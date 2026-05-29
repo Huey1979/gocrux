@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/Huey1979/gocrux/constants"
 	errs "github.com/Huey1979/gocrux/errors"
@@ -75,6 +77,11 @@ type HandlerConfig[M service.Record] struct {
 	// resource 为当前实体的 svcName（如 "site", "role"），
 	// action 为操作名（如 "create", "update", "delete", "get", "list"）。
 	Perm Authorizer
+
+	// MaxExpandDepth 最大展开深度（Get/List 时 References/ChildRefs/Cascades 递归展开层数，默认 0 不递归）。
+	// 设置 > 0 后，Get/List 会自动递归展开嵌套的引用和级联数据，每展开一层减一，到 0 时停止。
+	// 可通过 HTTP query param ?depth=N 临时覆盖（N 不能超过此值）。
+	MaxExpandDepth int
 }
 
 // GenericHandler 泛型 Handler。
@@ -120,6 +127,10 @@ type GenericHandler[M service.Record] struct {
 	hooks      HandlerHooks[M]  // Handler 层钩子（如未设置，fallback 到 _xxx 默认实现）
 	handlerReg *HandlerRegistry // 子 Handler 注册表（级联时用于查找子 Handler）
 	txCoord    *TxCoordinator   // 事务编排器（级联时用于保证事务一致性）
+
+	// selfFKField 缓存 Record.SelfFKField() 的结果。
+	// 非空 → 该实体存在自关联，读操作（Get/List）展开时跳过指向自身的 References/ChildRefs/Cascades。
+	selfFKField string
 }
 
 // NewGenericHandler 从 Service 注册表创建泛型 Handler（推荐方式）。
@@ -129,7 +140,13 @@ func NewGenericHandler[M service.Record](
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
 	svc := service.GetTyped[M](reg, svcName)
-	return &GenericHandler[M]{svc: svc, svcName: svcName, config: cfg}
+	var zero M
+	return &GenericHandler[M]{
+		svc:         svc,
+		svcName:     svcName,
+		config:      cfg,
+		selfFKField: zero.SelfFKField(),
+	}
 }
 
 // NewGenericHandlerWithSvc 直接传入 Service 实例创建 Handler。
@@ -137,7 +154,13 @@ func NewGenericHandlerWithSvc[M service.Record](
 	svc *service.GenericService[M],
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
-	return &GenericHandler[M]{svc: svc, svcName: "(direct)", config: cfg}
+	var zero M
+	return &GenericHandler[M]{
+		svc:         svc,
+		svcName:     "(direct)",
+		config:      cfg,
+		selfFKField: zero.SelfFKField(),
+	}
 }
 
 // Service 暴露底层 Service（供自定义 Handler 扩展用）。
@@ -268,6 +291,84 @@ func (h *GenericHandler[M]) checkPerm(c *gin.Context, action string) bool {
 	return true
 }
 
+// injectDepth 从 HTTP query ?depth=N 与 HandlerConfig.MaxExpandDepth 综合计算展开深度，
+// 写入 context。若两者均未设置则不注入（保持旧行为：展开一层不递归）。
+func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) context.Context {
+	qdStr := c.Query("depth")
+	var qd int
+	hasQD := false
+	if qdStr != "" {
+		if n, err := strconv.Atoi(qdStr); err == nil && n >= 0 {
+			qd = n
+			hasQD = true
+		}
+	}
+
+	maxDepth := h.config.MaxExpandDepth
+
+	// 仅当配置或 query 明确设置了 depth 时才注入 context
+	if maxDepth <= 0 && !hasQD {
+		return ctx // 未设置 → 旧行为
+	}
+
+	depth := 0
+	if hasQD {
+		depth = qd // query 优先
+	} else if maxDepth > 0 {
+		depth = maxDepth // fallback 到配置
+	}
+
+	// 上限：配置的 MaxExpandDepth 作为天花板
+	if maxDepth > 0 && depth > maxDepth {
+		depth = maxDepth
+	}
+
+	// 硬上限：禁止无上限递归（如 ?depth=999 → 裁剪为 hardMaxExpandDepth）
+	if depth > hardMaxExpandDepth {
+		depth = hardMaxExpandDepth
+	}
+
+	return withDepth(ctx, depth)
+}
+
+// injectIgnore 从 HTTP query params 解析忽略配置，写入 context。
+//
+// 支持参数：
+//
+//	?ignore=fieldA,fieldB          → 跳过指定字段的展开
+//	?ignoreRef=true                → 跳过所有 References + ChildRefs
+//	?ignoreCascade=true            → 跳过所有 Cascades
+//	?ignoreAll=true                → 跳过全部展开/级联
+//
+// 未传入任何参数时 ctx 不变（无额外开销）。
+func (h *GenericHandler[M]) injectIgnore(ctx context.Context, c *gin.Context) context.Context {
+	ignoreStr := c.Query("ignore")
+	ignoreRef := c.Query("ignoreRef") == "true"
+	ignoreCascade := c.Query("ignoreCascade") == "true"
+	ignoreAll := c.Query("ignoreAll") == "true"
+
+	if ignoreStr == "" && !ignoreRef && !ignoreCascade && !ignoreAll {
+		return ctx
+	}
+
+	cfg := &IgnoreConfig{
+		All:     ignoreAll,
+		Ref:     ignoreRef,
+		Cascade: ignoreCascade,
+	}
+	if ignoreStr != "" {
+		parts := strings.Split(ignoreStr, ",")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.Fields = append(cfg.Fields, p)
+			}
+		}
+	}
+
+	return withIgnore(ctx, cfg)
+}
+
 // extractChildData 从原始请求 map 中提取指定字段的子数据数组。
 // 例如：raw["domains"] → []map[string]any，每个 map 对应对条子记录。
 // 兼容三种数据来源：
@@ -358,6 +459,12 @@ func (h *GenericHandler[M]) hasCascadesOnEditVersion() bool {
 		}
 	}
 	return false
+}
+
+// isSelfRef 判断目标 HandlerName 是否为自关联。
+// 同时满足：Record.SelfFKField() != ""（实体定义自关联）且 targetHandlerName == svcName。
+func (h *GenericHandler[M]) isSelfRef(targetHandlerName string) bool {
+	return h.selfFKField != "" && targetHandlerName == h.svcName
 }
 
 // ============================================================
@@ -655,11 +762,21 @@ func (h *GenericHandler[M]) afterDelete(ctx context.Context) error {
 // DoGetByID CascadeHandler 接口实现。
 // 按主键查询单条记录，返回 map。
 // 用于向上级联：父实体的逻辑外键字段 → 调用引用 Handler 的 DoGetByID。
+//
+// 若 context 中存在深度控制（depth > 0），自动通过 expandGet 递归展开
+// 该记录的 References/ChildRefs/Cascades。
 func (h *GenericHandler[M]) DoGetByID(ctx context.Context, id any) (map[string]any, error) {
 	result, err := h.svc.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+
+	// depth > 0 且 handlerReg 已注入 → 递归展开
+	if d, ok := getDepth(ctx); ok && d > 0 && h.handlerReg != nil {
+		return h.expandGet(ctx, result)
+	}
+
+	// 无深度控制或 handlerReg 未注入 → 返回原始 map（旧行为）
 	data, err := json.Marshal(result)
 	if err != nil {
 		return nil, errs.ErrMarshalRecord(err)
@@ -676,6 +793,7 @@ func (h *GenericHandler[M]) DoGetByID(ctx context.Context, id any) (map[string]a
 //	GET /{prefix}/get?id=xxx                       → 精确版本查询
 //	GET /{prefix}/get?id=xxx&follow_published=true  → 解析为已发布版本
 //	GET /{prefix}/get?code=xxx                      → 按 Code 查询已发布版本
+//	GET /{prefix}/get?id=xxx&depth=2                → 展开引用/级联最多 2 层
 func (h *GenericHandler[M]) Get(c *gin.Context) {
 	if !h.checkPerm(c, "get") {
 		return
@@ -695,6 +813,11 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 		Code:            code,
 		FollowPublished: idStr != "" && c.Query("follow_published") == "true",
 	}
+
+	// 展开深度：query ?depth=N 覆盖配置值
+	ctx = h.injectDepth(ctx, c)
+	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
+	ctx = h.injectIgnore(ctx, c)
 
 	result, err := h.getPipeline(ctx, req)
 	if err != nil {
@@ -746,6 +869,9 @@ func (h *GenericHandler[M]) afterGet(ctx context.Context, result map[string]any)
 //  2. 向下引用：解析 FK 列表为完整子对象列表（ChildRefs 配置）
 //  3. 向下级联：查询本实体的子记录（Cascades 配置）
 //
+// 若 context 中设置了深度控制（depth > 0），每层展开后向下传递 depth-1，
+// 实现递归展开；depth=0 时停止。未设置深度时保持旧行为（仅展开一层）。
+//
 // 无 handlerReg 时跳过级联，仅做 marshal → map 转换。
 // 版本操作（activate / list-versions / edit-version）不应调用此方法。
 func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[string]any, error) {
@@ -759,113 +885,156 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 		return nil, errs.ErrUnmarshalEntity(err)
 	}
 
+	// visited 防循环：若当前记录已在此链条中出现过（如 site→dept→site），停止展开
+	pk := extractPKFromResult(result)
+	if isVisited(ctx, h.svcName, fmt.Sprint(pk)) {
+		return out, nil
+	}
+
+	// 深度检查：仅在未设置 depth 或 depth > 0 时展开
+	curDepth, hasDepth := getDepth(ctx)
+
+	// 构造子 context：深度递减 + visited 追踪
+	childCtx := ctx
+	if hasDepth {
+		childCtx = withDepth(ctx, curDepth-1)
+	}
+	if pk != nil && pk != "" {
+		childCtx = addVisited(childCtx, h.svcName, fmt.Sprint(pk))
+	}
+
 	// 2. 向上级联：解析本实体的引用字段
-	for _, ref := range h.config.References {
-		if h.handlerReg == nil {
-			break
-		}
-		refHandler := h.handlerReg.Get(ref.HandlerName)
-		if refHandler == nil {
-			continue
-		}
+	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+		for _, ref := range h.config.References {
+			// 禁止自关联展开：若目标 Handler 就是自身（如 site.parent_site_ulid → site）
+			if h.isSelfRef(ref.HandlerName) {
+				continue
+			}
 
-		fkVal, ok := out[ref.Field]
-		if !ok || fkVal == nil || fkVal == "" {
-			continue
-		}
+			resultKey := ref.ResultField
+			if resultKey == "" {
+				resultKey = deriveRefResultKey(ref.Field)
+			}
+			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+				continue
+			}
 
-		parentRecord, err := refHandler.DoGetByID(ctx, fkVal)
-		if err != nil {
-			return nil, errs.ErrRefResolve(ref.HandlerName, err)
-		}
+			refHandler := h.handlerReg.Get(ref.HandlerName)
+			if refHandler == nil {
+				continue
+			}
 
-		resultKey := ref.ResultField
-		if resultKey == "" {
-			resultKey = deriveRefResultKey(ref.Field)
+			fkVal, ok := out[ref.Field]
+			if !ok || fkVal == nil || fkVal == "" {
+				continue
+			}
+
+			parentRecord, err := refHandler.DoGetByID(childCtx, fkVal)
+			if err != nil {
+				return nil, errs.ErrRefResolve(ref.HandlerName, err)
+			}
+
+			out[resultKey] = parentRecord
 		}
-		out[resultKey] = parentRecord
 	}
 
 	// 2.5. 向下引用：将 FK 列表解析为完整子对象列表（ChildRefs）
-	for _, cr := range h.config.ChildRefs {
-		if h.handlerReg == nil {
-			break
-		}
-		refHandler := h.handlerReg.Get(cr.HandlerName)
-		if refHandler == nil {
-			continue
-		}
-
-		fkList, ok := out[cr.FKListField]
-		if !ok || fkList == nil {
-			continue
-		}
-
-		// 兼容多种列表类型：[]any、[]string、[]float64 等
-		ids := toAnySlice(fkList)
-		if len(ids) == 0 {
-			continue
-		}
-
-		// 转字符串列表（与 _doList 批量逻辑保持一致）
-		strIDs := make([]any, 0, len(ids))
-		for _, id := range ids {
-			strIDs = append(strIDs, fmt.Sprint(id))
-		}
-
-		// 批量查（DoList + slice → OpIn）
-		pkField := refHandler.PKField()
-		childRecords, err := refHandler.DoList(ctx, pkField, strIDs, false)
-		if err != nil {
-			return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
-		}
-
-		// 按 PK 建索引
-		childMap := make(map[string]map[string]any, len(childRecords))
-		for _, child := range childRecords {
-			if idVal, ok := child[pkField]; ok {
-				childMap[fmt.Sprint(idVal)] = child
+	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+		for _, cr := range h.config.ChildRefs {
+			// 禁止自关联展开
+			if h.isSelfRef(cr.HandlerName) {
+				continue
 			}
-		}
 
-		resolved := make([]map[string]any, 0, len(ids))
-		for _, id := range ids {
-			if child, ok := childMap[fmt.Sprint(id)]; ok {
-				resolved = append(resolved, child)
+			resultKey := cr.ResultField
+			if resultKey == "" {
+				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
-		}
+			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+				continue
+			}
 
-		resultKey := cr.ResultField
-		if resultKey == "" {
-			resultKey = deriveChildRefResultKey(cr.FKListField)
+			refHandler := h.handlerReg.Get(cr.HandlerName)
+			if refHandler == nil {
+				continue
+			}
+
+			fkList, ok := out[cr.FKListField]
+			if !ok || fkList == nil {
+				continue
+			}
+
+			// 兼容多种列表类型：[]any、[]string、[]float64 等
+			ids := toAnySlice(fkList)
+			if len(ids) == 0 {
+				continue
+			}
+
+			// 转字符串列表（与 _doList 批量逻辑保持一致）
+			strIDs := make([]any, 0, len(ids))
+			for _, id := range ids {
+				strIDs = append(strIDs, fmt.Sprint(id))
+			}
+
+			// 批量查（DoList + slice → OpIn）
+			pkField := refHandler.PKField()
+			childRecords, err := refHandler.DoList(childCtx, pkField, strIDs, false)
+			if err != nil {
+				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
+			}
+
+			// 按 PK 建索引
+			childMap := make(map[string]map[string]any, len(childRecords))
+			for _, child := range childRecords {
+				if idVal, ok := child[pkField]; ok {
+					childMap[fmt.Sprint(idVal)] = child
+				}
+			}
+
+			resolved := make([]map[string]any, 0, len(ids))
+			for _, id := range ids {
+				if child, ok := childMap[fmt.Sprint(id)]; ok {
+					resolved = append(resolved, child)
+				}
+			}
+
+			out[resultKey] = resolved
 		}
-		out[resultKey] = resolved
 	}
 
 	// 3. 向下级联：查询子记录
-	for _, rel := range h.config.Cascades {
-		if h.handlerReg == nil {
-			break
-		}
-		childHandler := h.handlerReg.Get(rel.HandlerName)
-		if childHandler == nil {
-			continue
-		}
+	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+		for _, rel := range h.config.Cascades {
+			// 禁止自关联展开
+			if h.isSelfRef(rel.HandlerName) {
+				continue
+			}
+			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
+			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
+				continue
+			}
+			childHandler := h.handlerReg.Get(rel.HandlerName)
+			if childHandler == nil {
+				continue
+			}
 
-		// 从当前实体提取主键值
-		pk := extractPKFromResult(result)
-		if pk == nil || pk == "" {
-			continue
-		}
+			// 从当前实体提取主键值
+			pk := extractPKFromResult(result)
+			if pk == nil || pk == "" {
+				continue
+			}
 
-		children, err := childHandler.DoList(ctx, rel.FKField, pk, rel.FollowPublished)
-		if err != nil {
-			return nil, errs.ErrCascadeQuery(rel.HandlerName, err)
-		}
+			children, err := childHandler.DoList(childCtx, rel.FKField, pk, rel.FollowPublished)
+			if err != nil {
+				return nil, errs.ErrCascadeQuery(rel.HandlerName, err)
+			}
 
-		// 空子表不输出（保持简洁），有数据时挂到 ChildrenField
-		if len(children) > 0 {
-			out[rel.ChildrenField] = children
+			// 空子表不输出（保持简洁），有数据时挂到 ChildrenField
+			if len(children) > 0 {
+				out[rel.ChildrenField] = children
+			}
 		}
 	}
 
@@ -910,7 +1079,7 @@ func (h *GenericHandler[M]) DoList(ctx context.Context, fkField string, fkValue 
 }
 
 // List 列表查询
-// GET /{prefix}/list?page=1&page_size=20&keyword=xxx&status=active
+// GET /{prefix}/list?page=1&page_size=20&keyword=xxx&status=active&depth=2
 func (h *GenericHandler[M]) List(c *gin.Context) {
 	if !h.checkPerm(c, "list") {
 		return
@@ -923,6 +1092,17 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 			filters[key] = vals[0]
 		}
 	}
+
+	// 展开深度：query ?depth=N 覆盖配置值
+	ctx = h.injectDepth(ctx, c)
+	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
+	ctx = h.injectIgnore(ctx, c)
+	// 从 filters 中移除控制参数（避免误传到 Service 层）
+	delete(filters, "ignore")
+	delete(filters, "ignoreRef")
+	delete(filters, "ignoreCascade")
+	delete(filters, "ignoreAll")
+	delete(filters, "depth")
 
 	// 转换为具体 List Request 类型（若配置了工厂）
 	query := h.newListRequest(filters)

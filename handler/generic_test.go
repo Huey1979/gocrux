@@ -81,6 +81,7 @@ func (t testParent) SupportsDraft() bool        { return false }
 func (t testParent) SetDelete() bool            { t.IsDeleted = 1; return true }
 func (t testParent) GetULID() string            { return fmt.Sprintf("%d", t.ID) }
 func (t testParent) PKField() string            { return "id" }
+func (t testParent) SelfFKField() string         { return "" }
 
 // testChild 测试子实体。
 type testChild struct {
@@ -99,6 +100,7 @@ func (t testChild) SetID()                     {}
 func (t testChild) SupportsDraft() bool        { return false }
 func (t testChild) SetDelete() bool            { t.IsDeleted = 1; return true }
 func (t testChild) PKField() string            { return "id" }
+func (t testChild) SelfFKField() string         { return "" }
 
 // ============================================================
 // 测试辅助函数
@@ -114,8 +116,9 @@ func newTestHandler(cascades []CascadeRelation, handlerReg *HandlerRegistry, tc 
 	repo := repository.NewCRUDRepository[testParent]()
 	svc := service.NewGenericService[testParent](repo, service.Config[testParent]{})
 	h := &GenericHandler[testParent]{
-		svc:     svc,
-		svcName: "test_parent",
+		svc:         svc,
+		svcName:     "test_parent",
+		selfFKField: testParent{}.SelfFKField(),
 		config: HandlerConfig[testParent]{
 			PathPrefix: "/test/parent",
 			Cascades:   cascades,
@@ -135,8 +138,9 @@ func newChildHandler() *GenericHandler[testChild] {
 	repo := repository.NewCRUDRepository[testChild]()
 	svc := service.NewGenericService[testChild](repo, service.Config[testChild]{})
 	return &GenericHandler[testChild]{
-		svc:     svc,
-		svcName: "test_child",
+		svc:         svc,
+		svcName:     "test_child",
+		selfFKField: testChild{}.SelfFKField(),
 		config: HandlerConfig[testChild]{
 			PathPrefix: "/test/child",
 		},
@@ -545,8 +549,9 @@ func TestDoCreate_CascadeTransactionRollback(t *testing.T) {
 		},
 	})
 	failingChild := &GenericHandler[testChild]{
-		svc:     childSvc,
-		svcName: "test_child",
+		svc:         childSvc,
+		svcName:     "test_child",
+		selfFKField: testChild{}.SelfFKField(),
 		config: HandlerConfig[testChild]{
 			PathPrefix: "/test/child",
 		},

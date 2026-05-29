@@ -1,6 +1,141 @@
 package handler
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// ============================================================
+// depthCtx — 展开深度控制
+//
+// 通过 context 传递剩余展开层数，每展开一层减一，<=0 停止。
+// ctx 中不存在 depth 值时，保持旧行为（展开一层，不做递归）。
+// ============================================================
+
+// hardMaxExpandDepth 全局硬上限，无论 query ?depth=N 或 MaxExpandDepth 设置为何值，
+// 实际递归层数不可超过此值。防止无上限递归。
+const hardMaxExpandDepth = 10
+
+type depthCtxKey struct{}
+
+// withDepth 将剩余展开深度写入 context。
+func withDepth(ctx context.Context, depth int) context.Context {
+	return context.WithValue(ctx, depthCtxKey{}, depth)
+}
+
+// getDepth 返回剩余展开深度，以及是否明确设置了深度。
+// 未设置时返回 (0, false) → 保持旧行为（展开一层，不递归）。
+func getDepth(ctx context.Context) (int, bool) {
+	d, ok := ctx.Value(depthCtxKey{}).(int)
+	return d, ok
+}
+
+// ============================================================
+// ignoreCtx — 忽略展开/级联控制
+//
+// 通过 context 传递忽略配置，支持以下 query param：
+//
+//	?ignore=fieldA,fieldB         → 跳过指定 ResultField/ChildrenField 的展开
+//	?ignoreRef=true               → 跳过所有 References + ChildRefs 展开
+//	?ignoreCascade=true           → 跳过所有 Cascades 展开
+//	?ignoreAll=true               → 跳过所有展开和级联（仅返回裸数据）
+//
+// 优先级：ignoreAll > ignoreRef/ignoreCascade > ignore
+// ============================================================
+
+type ignoreCtxKey struct{}
+
+// IgnoreConfig 描述当前请求中需跳过的展开/级联配置。
+type IgnoreConfig struct {
+	// Fields 需跳过的具体字段名列表（匹配 ResultField、ChildrenField）。
+	Fields []string
+
+	// All 跳过所有展开和级联（仅返回裸 map 数据）。
+	All bool
+
+	// Ref 跳过所有 References + ChildRefs 展开。
+	Ref bool
+
+	// Cascade 跳过所有 Cascades 展开。
+	Cascade bool
+}
+
+// withIgnore 将忽略配置写入 context。
+func withIgnore(ctx context.Context, cfg *IgnoreConfig) context.Context {
+	return context.WithValue(ctx, ignoreCtxKey{}, cfg)
+}
+
+// getIgnore 从 context 获取忽略配置，未设置时返回 nil。
+func getIgnore(ctx context.Context) *IgnoreConfig {
+	cfg, _ := ctx.Value(ignoreCtxKey{}).(*IgnoreConfig)
+	return cfg
+}
+
+// shouldIgnoreField 判断指定字段名是否应被忽略展开。
+// name 为展开结果的键名（References 的 ResultField、Cascades 的 ChildrenField 等）。
+func shouldIgnoreField(ctx context.Context, name string) bool {
+	ic := getIgnore(ctx)
+	if ic == nil {
+		return false
+	}
+	if ic.All {
+		return true
+	}
+	for _, f := range ic.Fields {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldIgnoreRef 判断是否应跳过所有 References/ChildRefs 展开。
+func shouldIgnoreRef(ctx context.Context) bool {
+	ic := getIgnore(ctx)
+	return ic != nil && (ic.All || ic.Ref)
+}
+
+// shouldIgnoreCascade 判断是否应跳过所有 Cascades 展开。
+func shouldIgnoreCascade(ctx context.Context) bool {
+	ic := getIgnore(ctx)
+	return ic != nil && (ic.All || ic.Cascade)
+}
+
+// ============================================================
+// visitedCtx — 展开链条追踪（防跨实体循环引用 A→B→A）
+//
+// expandGet 递归展开时，每条展开线记录已访问的 (handlerName, recordID) 对。
+// 若某层的当前记录已在此链条中出现过，则停止该条线的展开。
+//
+// visited set 通过 context 传递，每次加入新节点时创建新 map（不可变语义），
+// 确保多条并行展开线互不干扰。
+// ============================================================
+
+type visitedCtxKey struct{}
+
+// visitedSet 展开链条上已访问的记录集合。
+// key = "handlerName:recordID"（如 "dept:01J..."）。
+type visitedSet map[string]bool
+
+// addVisited 将 (handlerName, id) 加入 visited set，返回新 ctx。
+func addVisited(ctx context.Context, handlerName, id string) context.Context {
+	existing, _ := ctx.Value(visitedCtxKey{}).(visitedSet)
+	newSet := make(visitedSet, len(existing)+1)
+	for k, v := range existing {
+		newSet[k] = v
+	}
+	newSet[handlerName+":"+id] = true
+	return context.WithValue(ctx, visitedCtxKey{}, newSet)
+}
+
+// isVisited 检查 (handlerName, id) 是否已在当前展开链条中出现过。
+func isVisited(ctx context.Context, handlerName, id string) bool {
+	vs, ok := ctx.Value(visitedCtxKey{}).(visitedSet)
+	if !ok || vs == nil {
+		return false
+	}
+	return vs[fmt.Sprintf("%s:%s", handlerName, id)]
+}
 
 // ============================================================
 // CascadeHandler — 子 Handler 的统一入口

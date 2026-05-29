@@ -36,6 +36,15 @@ type Record interface {
 	// 用于 Handler 层批量展开 References/ChildRefs/Cascades 时生成 WHERE 条件和
 	// 构建 lookup map 索引键。
 	PKField() string
+
+	// SelfFKField 返回自关联的外键字段名（如 "parent_ulid"）。
+	// 返回值非空字符串 → 说明该实体存在自关联（同一张表的外键引用自身）。
+	// 返回值空字符串 → 该实体无自关联。
+	//
+	// Handler 层在 Get/List 的 References/ChildRefs/Cascades 展开时，
+	// 若检测到关系指向的 HandlerName == 自身 svcName 且 SelfFKField() != ""，
+	// 则跳过该自关联展开（防止无限递归或冗余自引用）。
+	SelfFKField() string
 }
 
 // ============================================================

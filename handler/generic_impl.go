@@ -325,9 +325,30 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 		}
 	}
 
+	// 深度检查：仅在未设置 depth 或 depth > 0 时展开 References/ChildRefs/Cascades
+	curDepth, hasDepth := getDepth(ctx)
+	childCtx := ctx
+	if hasDepth {
+		childCtx = withDepth(ctx, curDepth-1)
+	}
+
 	// 批量展开 References（向上引用）
-	if len(h.config.References) > 0 && h.handlerReg != nil {
+	if (!hasDepth || curDepth > 0) && len(h.config.References) > 0 && h.handlerReg != nil {
 		for _, ref := range h.config.References {
+			// 禁止自关联展开
+			if h.isSelfRef(ref.HandlerName) {
+				continue
+			}
+
+			resultKey := ref.ResultField
+			if resultKey == "" {
+				resultKey = deriveRefResultKey(ref.Field)
+			}
+			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+				continue
+			}
+
 			refHandler := h.handlerReg.Get(ref.HandlerName)
 			if refHandler == nil {
 				continue
@@ -354,9 +375,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				fkList = append(fkList, k)
 			}
 
-			// 批量查（DoList + slice → OpIn）
+			// 批量查（DoList + slice → OpIn），传入子深度 context
 			pkField := refHandler.PKField()
-			parentRecords, err := refHandler.DoList(ctx, pkField, fkList, false)
+			parentRecords, err := refHandler.DoList(childCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
 			}
@@ -369,11 +390,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				}
 			}
 
-			resultKey := ref.ResultField
-			if resultKey == "" {
-				resultKey = deriveRefResultKey(ref.Field)
-			}
-
 			for _, m := range result {
 				if parent, ok := parentMap[fmt.Sprint(m[ref.Field])]; ok {
 					m[resultKey] = parent
@@ -383,8 +399,22 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	}
 
 	// 批量展开 ChildRefs（向下引用 FK 列表）
-	if len(h.config.ChildRefs) > 0 && h.handlerReg != nil {
+	if (!hasDepth || curDepth > 0) && len(h.config.ChildRefs) > 0 && h.handlerReg != nil {
 		for _, cr := range h.config.ChildRefs {
+			// 禁止自关联展开
+			if h.isSelfRef(cr.HandlerName) {
+				continue
+			}
+
+			resultKey := cr.ResultField
+			if resultKey == "" {
+				resultKey = deriveChildRefResultKey(cr.FKListField)
+			}
+			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+				continue
+			}
+
 			refHandler := h.handlerReg.Get(cr.HandlerName)
 			if refHandler == nil {
 				continue
@@ -411,7 +441,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			}
 
 			pkField := refHandler.PKField()
-			childRecords, err := refHandler.DoList(ctx, pkField, fkList, false)
+			childRecords, err := refHandler.DoList(childCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrChildRefBatchResolve(cr.HandlerName, err)
 			}
@@ -421,11 +451,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				if idVal, ok := child[pkField]; ok {
 					childMap[fmt.Sprint(idVal)] = child
 				}
-			}
-
-			resultKey := cr.ResultField
-			if resultKey == "" {
-				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
 
 			for _, m := range result {
@@ -444,8 +469,16 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	}
 
 	// 批量展开 Cascades（向下级联子记录）
-	if len(h.config.Cascades) > 0 && h.handlerReg != nil {
+	if (!hasDepth || curDepth > 0) && len(h.config.Cascades) > 0 && h.handlerReg != nil {
 		for _, rel := range h.config.Cascades {
+			// 禁止自关联展开
+			if h.isSelfRef(rel.HandlerName) {
+				continue
+			}
+			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
+			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
+				continue
+			}
 			childHandler := h.handlerReg.Get(rel.HandlerName)
 			if childHandler == nil {
 				continue
@@ -471,8 +504,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				pkList = append(pkList, k)
 			}
 
-			// 批量查子记录（DoList + slice → OpIn）
-			children, err := childHandler.DoList(ctx, rel.FKField, pkList, rel.FollowPublished)
+			// 批量查子记录（DoList + slice → OpIn），传入子深度 context
+			children, err := childHandler.DoList(childCtx, rel.FKField, pkList, rel.FollowPublished)
 			if err != nil {
 				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
 			}
