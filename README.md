@@ -15,6 +15,7 @@ go get github.com/Huey1979/gocrux
 - [Handler 层配置](#handler-层配置)
 - [展开深度控制](#展开深度控制)
 - [忽略控制](#忽略控制)
+- [Entity → DTO 响应映射](#entity--dto-响应映射)
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
 - [级联机制](#级联机制)
@@ -273,6 +274,7 @@ type HandlerConfig[M service.Record] struct {
     MaxExpandDepth   int                  // 全局最大递归展开深度（>0 启用，默认 0=不递归）
     FieldDepthLimits map[string]int       // 单字段深度上限（如 {"dept_ulid": 1}）
     FieldStopRules   map[string][]StopRule // 字段级截止规则（如 dept_ulid→-department:manager）
+    ResponseMapper   func(M) any          // Entity→DTO 响应映射（可选，仅 HTTP 出口生效）
 }
 ```
 
@@ -401,6 +403,82 @@ GET /api/v1/users/get?fstop=dept_ulid=-department:manager,department:parent_id
 | `?ignore=all` | 跳过所有展开 |
 | `?ignoreRef=site_ulid` | 跳过特定 References 字段 |
 | `?ignoreCascade=domains` | 跳过特定 Cascades 字段 |
+
+### Entity → DTO 响应映射
+
+DB 实体通常携带存储层专属字段（`is_deleted`、`password`、`is_current`、`parent_ulid` 等），不应直接暴露给 API 消费者。`ResponseMapper` 在 HTTP 出口处将 Entity 转换为 DTO，裁剪敏感/冗余字段。
+
+**设计约束**：
+
+- **仅在 HTTP handler 出口执行**（Get/List），管道（pipeline）和级联调用（DoGetByID/DoList）不执行映射
+- `ResponseMapper == nil` 时零开销，完全向后兼容
+- 展开后的级联数据（References/ChildRefs/Cascades）自动从原始 map 合并回 DTO 输出
+
+**使用方式**：
+
+```go
+// 场景 1：不映射 — 完全兼容旧行为（默认）
+gh := handler.NewGenericHandler[*entity.SysDept](svcReg, "sys_dept",
+    handler.HandlerConfig[*entity.SysDept]{
+        PathPrefix: "/api/v1/sys-dept",
+        // ResponseMapper: nil （默认）
+    })
+
+// 场景 2：映射为 DTO（字段裁剪，如去掉 is_deleted、password 等）
+gh := handler.NewGenericHandler[*entity.SysSite](svcReg, "sys_site",
+    handler.HandlerConfig[*entity.SysSite]{
+        PathPrefix: "/api/v1/sys-site",
+        ResponseMapper: func(s *entity.SysSite) any {
+            return s.ToDTO() // gentity 自动生成的结构体方法
+        },
+    })
+
+// 场景 3：自定义映射（如 List 只返回概要字段）
+gh := handler.NewGenericHandler[*entity.SysSite](svcReg, "sys_site",
+    handler.HandlerConfig[*entity.SysSite]{
+        PathPrefix: "/api/v1/sys-site",
+        ResponseMapper: func(s *entity.SysSite) any {
+            return &BriefSite{
+                Code: s.SiteCode,
+                Name: s.SiteName,
+            }
+        },
+    })
+```
+
+**Get 流程**：
+
+```
+Get() → injectDepth/injectIgnore/injectStop → create entityHolder(ctx)
+     → getPipeline → _doGet(entity→holder) → expandGet
+     → applyResponseMapper(entityHolder, expandedMap)  ← 这里是映射点
+     → Success()
+```
+
+**List 流程**：
+
+```
+List() → inject… → create entitiesHolder(ctx) → listPipeline
+      → _doList(entities→holder) → 批量展开
+      → for each entity: applyResponseMapper(entity, item)  ← 这里是映射点
+      → Success()
+```
+
+**DTO 结构体生成**（gentity）：
+
+```
+gentity --dto --dto-exclude is_deleted,is_current,parent_ulid --all --out generated
+```
+
+参数说明：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--dto` | 启用 DTO 生成 | `false` |
+| `--dto-exclude` | 全局排除字段列表，逗号分隔 | `is_deleted,is_current,parent_ulid` |
+| `--dto-pkg` | DTO 输出包名/子目录 | `dto` |
+
+**注意**：`ResponseMapper` 仅裁剪 Entity 自有字段，级联展开数据（References/ChildRefs/Cascades 的 `ResultField`/`ChildrenField`）不受 DTO 裁剪影响——它们由框架在映射后自动合并。
 
 ### Cascades（向下级联）
 

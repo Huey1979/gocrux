@@ -98,6 +98,14 @@ type HandlerConfig[M service.Record] struct {
 	//         department:parent_id → {OnHandler:"department", Field:"parent_id", Stop:false}
 	// 可通过 HTTP query param ?fstop=dept_ulid=-department:manager,department:parent_id 临时覆盖。
 	FieldStopRules map[string][]StopRule
+
+	// ResponseMapper 将展开后的原始 Entity 实例映射为 API 响应对象（可选）。
+	// 入参是展开后的原始实体指针（此时 References/Cascades/ChildRefs 已 inject 到 map 中）。
+	// 返回 any 将被 JSON 序列化写入 HTTP response，级联数据（References/Cascades/ChildRefs）
+	// 会从展开后的 map 中自动合并回 DTO 输出。
+	// 为 nil 时直接返回原始 map（向后兼容，零破坏）。
+	// 例：ResponseMapper: func(s *entity.SysSite) any { return s.ToDTO() }
+	ResponseMapper func(M) any
 }
 
 // GenericHandler 泛型 Handler。
@@ -448,6 +456,13 @@ func (h *GenericHandler[M]) injectStop(ctx context.Context, c *gin.Context) cont
 type fdOverrideCtxKey struct{}
 type fsOverrideCtxKey struct{}
 
+// entityGetCtxKey / entityListCtxKey 用于在管线内部向 HTTP handler 透传 Entity 指针。
+// HTTP handler 创建 holder（*M 或 *[]*M）存入 context，管线内部 _doGet/_doList 写入 Entity，
+// HTTP handler 在管线返回后读取 Entity 并调用 ResponseMapper。
+// 级联调用（DoGetByID/DoList）不创建 holder，因此不会触发映射。
+type entityGetCtxKey struct{}
+type entityListCtxKey struct{}
+
 // getStopCfg 从 context + HandlerConfig 综合获取字段级深度/截止配置。
 // context 中的 HTTP overrides 优先于 HandlerConfig 默认值。
 func (h *GenericHandler[M]) getStopCfg(ctx context.Context) (map[string]int, map[string][]StopRule) {
@@ -661,6 +676,55 @@ func (h *GenericHandler[M]) hasCascadesOnEditVersion() bool {
 // 同时满足：Record.SelfFKField() != ""（实体定义自关联）且 targetHandlerName == svcName。
 func (h *GenericHandler[M]) isSelfRef(targetHandlerName string) bool {
 	return h.selfFKField != "" && targetHandlerName == h.svcName
+}
+
+// applyResponseMapper 将原始 Entity 通过 ResponseMapper 转换为 DTO map，并合并级联展开数据。
+// entity: 原始实体指针（*M）。
+// expanded: 展开后的完整 map（含 References/Cascades/ChildRefs 注入的额外 key）。
+// 返回：DTO 字段 + 级联数据合并后的 map。
+// ResponseMapper 为 nil 时直接返回 expanded（零开销）。
+func (h *GenericHandler[M]) applyResponseMapper(entity *M, expanded map[string]any) map[string]any {
+	if h.config.ResponseMapper == nil {
+		return expanded
+	}
+
+	dto := h.config.ResponseMapper(*entity)
+	dtoData, err := json.Marshal(dto)
+	if err != nil {
+		return expanded // fallback：映射失败时返回原始数据
+	}
+	var dtoMap map[string]any
+	if err := json.Unmarshal(dtoData, &dtoMap); err != nil {
+		return expanded
+	}
+
+	// 合并级联展开数据：References / ChildRefs / Cascades 的 result key
+	// 这些 key 由 expandGet / _doList 注入到 expanded map 中，不在 Entity 自有字段内
+	for _, ref := range h.config.References {
+		k := ref.ResultField
+		if k == "" {
+			k = deriveRefResultKey(ref.Field)
+		}
+		if v, ok := expanded[k]; ok {
+			dtoMap[k] = v
+		}
+	}
+	for _, cr := range h.config.ChildRefs {
+		k := cr.ResultField
+		if k == "" {
+			k = deriveChildRefResultKey(cr.FKListField)
+		}
+		if v, ok := expanded[k]; ok {
+			dtoMap[k] = v
+		}
+	}
+	for _, rel := range h.config.Cascades {
+		if v, ok := expanded[rel.ChildrenField]; ok {
+			dtoMap[rel.ChildrenField] = v
+		}
+	}
+
+	return dtoMap
 }
 
 // ============================================================
@@ -1017,11 +1081,19 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
 
+	// 创建 Entity holder：_doGet 会将原始实体写入此指针，供 HTTP 出口处 ResponseMapper 使用。
+	// 级联调用（DoGetByID）不经过此路径，因此不会触发映射。
+	var entityHolder *M
+	ctx = context.WithValue(ctx, entityGetCtxKey{}, &entityHolder)
+
 	result, err := h.getPipeline(ctx, req)
 	if err != nil {
 		h.handleError(c, err)
 		return
 	}
+
+	// HTTP 出口处执行 ResponseMapper（仅顶层 HTTP handler，管线/级联不参与）
+	result = h.applyResponseMapper(entityHolder, result)
 	Success(c, gin.H{"data": result})
 }
 
@@ -1326,8 +1398,6 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	ctx = h.injectIgnore(ctx, c)
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
-	// 字段级控制：query ?fdepth / ?fstop
-	ctx = h.injectStop(ctx, c)
 	// 从 filters 中移除控制参数（避免误传到 Service 层）
 	delete(filters, "ignore")
 	delete(filters, "ignoreRef")
@@ -1337,12 +1407,26 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	delete(filters, "fdepth")
 	delete(filters, "fstop")
 
+	// 创建 Entities holder：_doList 会将原始实体切片写入此指针，供 HTTP 出口处 ResponseMapper 使用。
+	// 级联调用（DoList）不创建 holder，因此不会触发映射。
+	var entitiesHolder []*M
+	ctx = context.WithValue(ctx, entityListCtxKey{}, &entitiesHolder)
+
 	// 转换为具体 List Request 类型（若配置了工厂）
 	query := h.newListRequest(filters)
 	items, total, err := h.listPipeline(ctx, query, false)
 	if err != nil {
 		h.handleError(c, err)
 		return
+	}
+
+	// HTTP 出口处执行 ResponseMapper（仅顶层 HTTP handler，管线/级联不参与）
+	if h.config.ResponseMapper != nil && len(entitiesHolder) > 0 {
+		for i, entity := range entitiesHolder {
+			if i < len(items) {
+				items[i] = h.applyResponseMapper(entity, items[i])
+			}
+		}
 	}
 
 	page, pageSize := GetPageParams(c)

@@ -282,6 +282,12 @@ func (h *GenericHandler[M]) _doGet(ctx context.Context, req *GetRequest) (map[st
 		}
 	}
 
+	// 将原始实体写入 context holder，供 HTTP 出口处 ResponseMapper 使用。
+	// holder 仅由顶层 HTTP Get() handler 创建，级联调用（DoGetByID）不经过此路径。
+	if holder, ok := ctx.Value(entityGetCtxKey{}).(**M); ok && holder != nil {
+		*holder = result
+	}
+
 	// 展开：*M → map + References + Cascades + ChildRefs
 	return h.expandGet(ctx, result)
 }
@@ -311,6 +317,16 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			return nil, 0, errs.ErrParsePublishedVersion(err)
 		}
 		list = resolved
+	}
+
+	// 将原始实体切片写入 context holder，供 HTTP 出口处 ResponseMapper 使用。
+	// holder 仅由顶层 HTTP List() handler 创建，级联调用（DoList）不创建 holder。
+	if holder, ok := ctx.Value(entityListCtxKey{}).(*[]*M); ok && holder != nil && len(list) > 0 {
+		entities := make([]*M, len(list))
+		for i := range list {
+			entities[i] = &list[i]
+		}
+		*holder = entities
 	}
 
 	// *M → []map[string]any
