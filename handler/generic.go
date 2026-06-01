@@ -106,6 +106,19 @@ type HandlerConfig[M service.Record] struct {
 	// 为 nil 时直接返回原始 map（向后兼容，零破坏）。
 	// 例：ResponseMapper: func(s *entity.SysSite) any { return s.ToDTO() }
 	ResponseMapper func(M) any
+
+	// ListSkipFields List 时跳过的字段名列表（可选，优先级高于 ListKeepFields）。
+	// 配置后，_doList 返回前会从每条记录中删除这些字段。
+	// 常用于跳过较大的 JSON/Text 字段（如 form_config、entity_config）。
+	// 不影响 Get 接口（单条查询始终返回全字段）。
+	// 例：[]string{"form_config", "entity_config", "flow_config"}
+	ListSkipFields []string
+
+	// ListKeepFields List 时保留的字段名列表（可选，仅 ListSkipFields 为空时生效）。
+	// 配置后，_doList 返回前每条记录仅保留这些字段（白名单模式）。
+	// 不影响 Get 接口。
+	// 例：[]string{"form_ulid", "form_code", "form_name", "form_type"}
+	ListKeepFields []string
 }
 
 // GenericHandler 泛型 Handler。

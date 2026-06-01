@@ -570,6 +570,32 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 		}
 	}
 
+	// List 字段裁剪：skip 优先于 keep，均未配置时全字段返回。
+	// 仅作用于 _doList（Get 接口不受影响），在所有展开逻辑之后执行。
+	if len(h.config.ListSkipFields) > 0 {
+		skipSet := make(map[string]bool, len(h.config.ListSkipFields))
+		for _, f := range h.config.ListSkipFields {
+			skipSet[f] = true
+		}
+		for _, row := range result {
+			for f := range skipSet {
+				delete(row, f)
+			}
+		}
+	} else if len(h.config.ListKeepFields) > 0 {
+		keepSet := make(map[string]bool, len(h.config.ListKeepFields))
+		for _, f := range h.config.ListKeepFields {
+			keepSet[f] = true
+		}
+		for _, row := range result {
+			for k := range row {
+				if !keepSet[k] {
+					delete(row, k)
+				}
+			}
+		}
+	}
+
 	return result, total, nil
 }
 
