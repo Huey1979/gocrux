@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // ============================================================
@@ -135,6 +136,117 @@ func isVisited(ctx context.Context, handlerName, id string) bool {
 		return false
 	}
 	return vs[fmt.Sprintf("%s:%s", handlerName, id)]
+}
+
+// ============================================================
+// fieldLimitCtx — 字段级展开限制（父 Handler 对子 Handler 的精确控制）
+//
+// 父 Handler 在展开 Referenece/Cascade/ChildRef 时构建 fieldLimitMap
+// 注入子 context，子 Handler 在自身展开时读取此 map 决定每个字段的行为：
+//
+//	0 → 跳过该字段（对应截止规则 -handler:field）
+//	N → 仅展开 N 层（对应截止规则 handler:field，N=1）
+//
+// 与全局 depthCtx 的关系：fieldLimitMap 对每个字段独立生效，会覆盖该字段的
+// 全局深度；未在 map 中的字段按全局 depthCtx 展开。
+// ============================================================
+
+type fieldLimitCtxKey struct{}
+
+// fieldLimitMap 当前 Handler 各字段的最大展开层数。
+// key 为 resultKey / ChildrenField 等字段名，value 为剩余深度（0=跳过，N=展开N层）。
+type fieldLimitMap map[string]int
+
+// withFieldLimits 将字段级深度限制写入 context。
+func withFieldLimits(ctx context.Context, fl fieldLimitMap) context.Context {
+	return context.WithValue(ctx, fieldLimitCtxKey{}, fl)
+}
+
+// getFieldLimits 从 context 获取字段级深度限制，未设置时返回 nil。
+func getFieldLimits(ctx context.Context) fieldLimitMap {
+	fl, _ := ctx.Value(fieldLimitCtxKey{}).(fieldLimitMap)
+	return fl
+}
+
+// ============================================================
+// StopRule — 截止规则
+//
+// 配置在父 Handler 的 HandlerConfig.FieldStopRules 中，
+// 控制父字段展开到目标子 Handler 后，子 Handler 哪些字段应被截止/限制。
+//
+// 格式示例：
+//
+//	-department:manager    → 级联到 department 后，跳过 manager 字段的展开
+//	 department:parent_id  → 级联到 department 后，parent_id 展开一层后截止
+//
+// HTTP compact 格式 (fstop=) 中同样使用此格式。
+// ============================================================
+
+// StopRule 描述对目标 Handler 上某个字段的截止控制。
+type StopRule struct {
+	OnHandler string // 目标 Handler 注册名（如 "department"）
+	Field     string // 目标 Handler 上的字段名（如 "manager", "parent_ulid"）
+	Stop      bool   // true=完全不展开该字段，false=展开一层后截止
+}
+
+// parseStopRule 解析单条截止规则字符串。
+// 格式：[-]handlerName:fieldName（如 "department:parent_id" 或 "-department:manager"）。
+func parseStopRule(s string) (StopRule, error) {
+	stop := false
+	rest := s
+	if len(rest) > 0 && rest[0] == '-' {
+		stop = true
+		rest = rest[1:]
+	}
+	parts := splitN(rest, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return StopRule{}, fmt.Errorf("invalid stop rule %q: expected [-]handler:field", s)
+	}
+	return StopRule{OnHandler: parts[0], Field: parts[1], Stop: stop}, nil
+}
+
+// parseStopRules 解析逗号分隔的截止规则字符串。
+func parseStopRules(s string) ([]StopRule, error) {
+	var rules []StopRule
+	for _, part := range splitCSV(s) {
+		if part == "" {
+			continue
+		}
+		r, err := parseStopRule(part)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, nil
+}
+
+// splitCSV 按逗号分割，过滤空串。
+func splitCSV(s string) []string {
+	var parts []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return parts
+}
+
+// splitN 按 sep 分割 n 段（最后一段包含剩余全部内容）。
+func splitN(s, sep string, n int) []string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n-1; i++ {
+		idx := strings.Index(s, sep)
+		if idx < 0 {
+			parts = append(parts, s)
+			return parts
+		}
+		parts = append(parts, s[:idx])
+		s = s[idx+len(sep):]
+	}
+	parts = append(parts, s)
+	return parts
 }
 
 // ============================================================

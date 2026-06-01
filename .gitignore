@@ -27,6 +27,9 @@ Thumbs.db
 # 依赖
 vendor/
 
+# 文档
+doc/
+
 # 临时文件
 tmp/
 temp/

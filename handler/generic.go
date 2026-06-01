@@ -82,6 +82,22 @@ type HandlerConfig[M service.Record] struct {
 	// 设置 > 0 后，Get/List 会自动递归展开嵌套的引用和级联数据，每展开一层减一，到 0 时停止。
 	// 可通过 HTTP query param ?depth=N 临时覆盖（N 不能超过此值）。
 	MaxExpandDepth int
+
+	// FieldDepthLimits 单字段深度上限（可选）。
+	// key: 当前 Handler 的字段名（References 的 Field、ChildRefs 的 FKListField、Cascades 的 ChildrenField）。
+	// value: 该字段展开时传递给子 Handler 的最大递归层数。
+	// 例：{"dept_ulid": 1} → 展开 dept 时子 Handler 最多展开 1 层。
+	// 可通过 HTTP query param ?fdepth=dept_ulid:1 临时覆盖。
+	FieldDepthLimits map[string]int
+
+	// FieldStopRules 字段级截止规则（可选）。
+	// key: 当前 Handler 的字段名（同上）。
+	// value: 截止规则列表，控制该字段展开到目标子 Handler 后子 Handler 哪些字段被截止。
+	// 例：{"dept_ulid": []StopRule{{OnHandler:"department", Field:"manager", Stop:true}}}
+	// 格式对照：-department:manager → {OnHandler:"department", Field:"manager", Stop:true}
+	//         department:parent_id → {OnHandler:"department", Field:"parent_id", Stop:false}
+	// 可通过 HTTP query param ?fstop=dept_ulid=-department:manager,department:parent_id 临时覆盖。
+	FieldStopRules map[string][]StopRule
 }
 
 // GenericHandler 泛型 Handler。
@@ -367,6 +383,186 @@ func (h *GenericHandler[M]) injectIgnore(ctx context.Context, c *gin.Context) co
 	}
 
 	return withIgnore(ctx, cfg)
+}
+
+// injectStop 从 HTTP query params 解析字段级深度/截止配置，写入 context。
+//
+// 支持参数：
+//
+//	?fdepth=dept_ulid:1,site_ulid:2          → 覆盖 FieldDepthLimits
+//	?fstop=dept_ulid=-department:manager      → 覆盖 FieldStopRules
+//
+// 每个 fstop 格式：field=rules（逗号分隔的 [-]handler:field）。
+// 多规则用多个 fstop 参数。
+func (h *GenericHandler[M]) injectStop(ctx context.Context, c *gin.Context) context.Context {
+	fdepthStr := c.Query("fdepth")
+	fstopValues := c.QueryArray("fstop")
+
+	if fdepthStr == "" && len(fstopValues) == 0 {
+		return ctx
+	}
+
+	// 解析 HTTP overrides
+	var fdOverride map[string]int
+	var fsOverride map[string][]StopRule
+
+	if fdepthStr != "" {
+		fdOverride = make(map[string]int)
+		for _, pair := range splitCSV(fdepthStr) {
+			parts := splitN(pair, ":", 2)
+			if len(parts) == 2 && parts[0] != "" {
+				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && n >= 0 {
+					fdOverride[parts[0]] = n
+				}
+			}
+		}
+	}
+
+	for _, fstopVal := range fstopValues {
+		eqIdx := strings.Index(fstopVal, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		field := fstopVal[:eqIdx]
+		rulesStr := fstopVal[eqIdx+1:]
+		rules, err := parseStopRules(rulesStr)
+		if err != nil || len(rules) == 0 {
+			continue
+		}
+		if fsOverride == nil {
+			fsOverride = make(map[string][]StopRule)
+		}
+		fsOverride[field] = rules
+	}
+
+	if fdOverride != nil {
+		ctx = context.WithValue(ctx, fdOverrideCtxKey{}, fdOverride)
+	}
+	if fsOverride != nil {
+		ctx = context.WithValue(ctx, fsOverrideCtxKey{}, fsOverride)
+	}
+	return ctx
+}
+
+// fdOverrideCtxKey / fsOverrideCtxKey HTTP override context keys。
+type fdOverrideCtxKey struct{}
+type fsOverrideCtxKey struct{}
+
+// getStopCfg 从 context + HandlerConfig 综合获取字段级深度/截止配置。
+// context 中的 HTTP overrides 优先于 HandlerConfig 默认值。
+func (h *GenericHandler[M]) getStopCfg(ctx context.Context) (map[string]int, map[string][]StopRule) {
+	fdLimits := h.config.FieldDepthLimits
+	if ov, ok := ctx.Value(fdOverrideCtxKey{}).(map[string]int); ok {
+		if fdLimits == nil {
+			fdLimits = ov
+		} else {
+			merged := make(map[string]int, len(fdLimits)+len(ov))
+			for k, v := range fdLimits {
+				merged[k] = v
+			}
+			for k, v := range ov {
+				merged[k] = v // override
+			}
+			fdLimits = merged
+		}
+	}
+
+	fdStops := h.config.FieldStopRules
+	if ov, ok := ctx.Value(fsOverrideCtxKey{}).(map[string][]StopRule); ok {
+		if fdStops == nil {
+			fdStops = ov
+		} else {
+			merged := make(map[string][]StopRule, len(fdStops)+len(ov))
+			for k, v := range fdStops {
+				merged[k] = v
+			}
+			for k, v := range ov {
+				merged[k] = v // override
+			}
+			fdStops = merged
+		}
+	}
+
+	return fdLimits, fdStops
+}
+
+// buildFieldCtx 为展开到子 Handler 构建携带字段级限制的子 context。
+// ctx: 当前 handler 的 context（含 depth/visited/fieldLimits）
+// parentField: 当前 handler 上触发展开的字段名（References.Field、Cascades.ChildrenField 等）
+// targetHandlerName: 目标子 handler 的注册名
+func (h *GenericHandler[M]) buildFieldCtx(ctx context.Context, parentField string, targetHandlerName string) context.Context {
+	cCtx := ctx
+
+	fdLimits, fdStops := h.getStopCfg(ctx)
+
+	// 1. 字段级深度上限：覆盖传给子 Handler 的全局深度
+	if fdLimits != nil {
+		if fd, ok := fdLimits[parentField]; ok {
+			curDepth, hasDepth := getDepth(cCtx)
+			if !hasDepth || fd < curDepth {
+				cCtx = withDepth(cCtx, fd)
+			}
+		}
+	}
+
+	// 2. 字段级截止规则 → 转为 fieldLimitMap 注入子 context
+	if fdStops != nil {
+		if rules, ok := fdStops[parentField]; ok {
+			fl := make(fieldLimitMap)
+			for _, r := range rules {
+				if r.OnHandler == targetHandlerName {
+					if r.Stop {
+						fl[r.Field] = 0
+					} else {
+						fl[r.Field] = 1
+					}
+				}
+			}
+			if len(fl) > 0 {
+				cCtx = withFieldLimits(cCtx, fl)
+			}
+		}
+	}
+
+	return cCtx
+}
+
+// effectiveExpandDepth 计算某字段的有效展开深度。
+// ctx: 当前 handler 的 context
+// hasDepth: 是否设置了全局深度
+// fieldName: 当前字段名（resultKey / ChildrenField）
+// 优先使用 fieldLimitMap（父 Handler 注入的截止规则），其次全局深度。
+func effectiveExpandDepth(ctx context.Context, hasDepth bool, fieldName string) (depth int, shouldExpand bool) {
+	fieldLimits := getFieldLimits(ctx)
+	if fieldLimits != nil {
+		if lim, ok := fieldLimits[fieldName]; ok {
+			if lim <= 0 {
+				return 0, false // 截止：完全跳过
+			}
+			return lim, true
+		}
+	}
+	if !hasDepth {
+		return 0, true // 未设置深度 → 展开一层，不递归
+	}
+	curDepth, _ := getDepth(ctx)
+	if curDepth <= 0 {
+		return 0, false
+	}
+	return curDepth, true
+}
+
+// withEffectiveChildCtx 基于字段有效深度构造子 context（深度减一）。
+// ctx: 当前 handler 的 base childCtx
+// fieldName: 字段名
+func withEffectiveChildCtx(ctx context.Context, fieldName string) context.Context {
+	fieldLimits := getFieldLimits(ctx)
+	if fieldLimits != nil {
+		if lim, ok := fieldLimits[fieldName]; ok && lim > 0 {
+			return withDepth(ctx, lim-1)
+		}
+	}
+	return ctx
 }
 
 // extractChildData 从原始请求 map 中提取指定字段的子数据数组。
@@ -818,6 +1014,8 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 	ctx = h.injectDepth(ctx, c)
 	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
 	ctx = h.injectIgnore(ctx, c)
+	// 字段级控制：query ?fdepth / ?fstop
+	ctx = h.injectStop(ctx, c)
 
 	result, err := h.getPipeline(ctx, req)
 	if err != nil {
@@ -872,6 +1070,9 @@ func (h *GenericHandler[M]) afterGet(ctx context.Context, result map[string]any)
 // 若 context 中设置了深度控制（depth > 0），每层展开后向下传递 depth-1，
 // 实现递归展开；depth=0 时停止。未设置深度时保持旧行为（仅展开一层）。
 //
+// 字段级控制：通过 fieldLimitCtx 接收父 Handler 的截止规则，
+// 通过 buildFieldCtx 将本 Handler 的 FieldDepthLimits/FieldStopRules 传递给子 Handler。
+//
 // 无 handlerReg 时跳过级联，仅做 marshal → map 转换。
 // 版本操作（activate / list-versions / edit-version）不应调用此方法。
 func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[string]any, error) {
@@ -894,13 +1095,14 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	// 深度检查：仅在未设置 depth 或 depth > 0 时展开
 	curDepth, hasDepth := getDepth(ctx)
 
-	// 构造子 context：深度递减 + visited 追踪
-	childCtx := ctx
-	if hasDepth {
-		childCtx = withDepth(ctx, curDepth-1)
-	}
+	// 构造基础子 context：visited 追踪（不含深度，由各字段单独控制）
+	baseChildCtx := ctx
 	if pk != nil && pk != "" {
-		childCtx = addVisited(childCtx, h.svcName, fmt.Sprint(pk))
+		baseChildCtx = addVisited(baseChildCtx, h.svcName, fmt.Sprint(pk))
+	}
+	// 基础深度：全局 depth-1
+	if hasDepth {
+		baseChildCtx = withDepth(baseChildCtx, curDepth-1)
 	}
 
 	// 2. 向上级联：解析本实体的引用字段
@@ -916,7 +1118,12 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				resultKey = deriveRefResultKey(ref.Field)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+			if shouldIgnoreRef(ctx) || shouldIgnoreField(ctx, resultKey) {
+				continue
+			}
+			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
+			effDepth, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			if !ok {
 				continue
 			}
 
@@ -930,7 +1137,16 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 
-			parentRecord, err := refHandler.DoGetByID(childCtx, fkVal)
+			// 构造字段级子 context：含字段深度上限 + 截止规则
+			refCtx := h.buildFieldCtx(baseChildCtx, ref.Field, ref.HandlerName)
+			// 若有字段级限深，覆盖全局深度
+			if fieldLimits := getFieldLimits(ctx); fieldLimits != nil {
+				if _, hasFieldLimit := fieldLimits[resultKey]; hasFieldLimit || effDepth != curDepth {
+					refCtx = withDepth(refCtx, effDepth-1)
+				}
+			}
+
+			parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
 			if err != nil {
 				return nil, errs.ErrRefResolve(ref.HandlerName, err)
 			}
@@ -952,7 +1168,12 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
+			if shouldIgnoreRef(ctx) || shouldIgnoreField(ctx, resultKey) {
+				continue
+			}
+			// 字段级截止
+			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			if !ok {
 				continue
 			}
 
@@ -966,26 +1187,25 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 
-			// 兼容多种列表类型：[]any、[]string、[]float64 等
 			ids := toAnySlice(fkList)
 			if len(ids) == 0 {
 				continue
 			}
 
-			// 转字符串列表（与 _doList 批量逻辑保持一致）
 			strIDs := make([]any, 0, len(ids))
 			for _, id := range ids {
 				strIDs = append(strIDs, fmt.Sprint(id))
 			}
 
-			// 批量查（DoList + slice → OpIn）
+			// 构造字段级子 context
+			refCtx := h.buildFieldCtx(baseChildCtx, cr.FKListField, cr.HandlerName)
+
 			pkField := refHandler.PKField()
-			childRecords, err := refHandler.DoList(childCtx, pkField, strIDs, false)
+			childRecords, err := refHandler.DoList(refCtx, pkField, strIDs, false)
 			if err != nil {
 				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
 			}
 
-			// 按 PK 建索引
 			childMap := make(map[string]map[string]any, len(childRecords))
 			for _, child := range childRecords {
 				if idVal, ok := child[pkField]; ok {
@@ -1012,26 +1232,33 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
-			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
+			if shouldIgnoreCascade(ctx) || shouldIgnoreField(ctx, rel.ChildrenField) {
 				continue
 			}
+			// 字段级截止
+			_, ok := effectiveExpandDepth(ctx, hasDepth, rel.ChildrenField)
+			if !ok {
+				continue
+			}
+
 			childHandler := h.handlerReg.Get(rel.HandlerName)
 			if childHandler == nil {
 				continue
 			}
 
-			// 从当前实体提取主键值
 			pk := extractPKFromResult(result)
 			if pk == nil || pk == "" {
 				continue
 			}
 
-			children, err := childHandler.DoList(childCtx, rel.FKField, pk, rel.FollowPublished)
+			// 构造字段级子 context
+			cascCtx := h.buildFieldCtx(baseChildCtx, rel.ChildrenField, rel.HandlerName)
+
+			children, err := childHandler.DoList(cascCtx, rel.FKField, pk, rel.FollowPublished)
 			if err != nil {
 				return nil, errs.ErrCascadeQuery(rel.HandlerName, err)
 			}
 
-			// 空子表不输出（保持简洁），有数据时挂到 ChildrenField
 			if len(children) > 0 {
 				out[rel.ChildrenField] = children
 			}
@@ -1097,12 +1324,18 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	ctx = h.injectDepth(ctx, c)
 	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
 	ctx = h.injectIgnore(ctx, c)
+	// 字段级控制：query ?fdepth / ?fstop
+	ctx = h.injectStop(ctx, c)
+	// 字段级控制：query ?fdepth / ?fstop
+	ctx = h.injectStop(ctx, c)
 	// 从 filters 中移除控制参数（避免误传到 Service 层）
 	delete(filters, "ignore")
 	delete(filters, "ignoreRef")
 	delete(filters, "ignoreCascade")
 	delete(filters, "ignoreAll")
 	delete(filters, "depth")
+	delete(filters, "fdepth")
+	delete(filters, "fstop")
 
 	// 转换为具体 List Request 类型（若配置了工厂）
 	query := h.newListRequest(filters)

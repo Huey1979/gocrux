@@ -13,6 +13,8 @@ go get github.com/Huey1979/gocrux
 - [实体定义](#实体定义)
 - [Service 层配置](#service-层配置)
 - [Handler 层配置](#handler-层配置)
+- [展开深度控制](#展开深度控制)
+- [忽略控制](#忽略控制)
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
 - [级联机制](#级联机制)
@@ -261,13 +263,16 @@ draft ──Activate──→ published ──(新版本发布)──→ depreca
 
 ```go
 type HandlerConfig[M service.Record] struct {
-    PathPrefix  string              // 路由前缀
-    Cascades    []CascadeRelation   // 向下级联（父→子）
-    References  []ReferenceRelation // 向上引用（子→父）
-    ChildRefs   []ChildRefRelation  // 向下 FK 列表引用
-    ReqFactory  *RequestFactory[M]  // 请求构造器
-    Auth        Authenticator       // 认证钩子
-    Perm        Authorizer          // 权限钩子
+    PathPrefix       string               // 路由前缀
+    Cascades         []CascadeRelation    // 向下级联（父→子）
+    References       []ReferenceRelation  // 向上引用（子→父）
+    ChildRefs        []ChildRefRelation   // 向下 FK 列表引用
+    ReqFactory       *RequestFactory[M]   // 请求构造器
+    Auth             Authenticator        // 认证钩子
+    Perm             Authorizer           // 权限钩子
+    MaxExpandDepth   int                  // 全局最大递归展开深度（>0 启用，默认 0=不递归）
+    FieldDepthLimits map[string]int       // 单字段深度上限（如 {"dept_ulid": 1}）
+    FieldStopRules   map[string][]StopRule // 字段级截止规则（如 dept_ulid→-department:manager）
 }
 ```
 
@@ -328,6 +333,74 @@ ChildRefs: []handler.ChildRefRelation{
 ```
 
 **注意**：ChildRefs 仅关联已有实体，不参与级联创建/删除/更新。
+
+### 展开深度控制
+
+当配置了 References、ChildRefs 或 Cascades 后，Get/List 会自动展开关联数据。框架提供三层深度控制：
+
+**1. 全局最大深度 (`MaxExpandDepth`)**
+
+```go
+MaxExpandDepth: 3, // References/ChildRefs/Cascades 递归展开最多 3 层
+```
+
+设置为 0 时只展开一层（不递归）。HTTP 可临时降级：
+
+```http
+GET /api/v1/sites/get?id=xxx&depth=2   # 上限不可超过 MaxExpandDepth
+```
+
+**2. 单字段深度上限 (`FieldDepthLimits`)**
+
+对特定字段单独限制展开深度：
+
+```go
+FieldDepthLimits: map[string]int{
+    "dept_ulid": 1,  // dept 字段只展开 1 层（即平铺后不递归）
+    "site_ulid": 2,  // site 字段最多展开 2 层
+},
+```
+
+HTTP 参数（逗号分隔 `字段:深度` 对）：
+
+```http
+GET /api/v1/users/get?id=xxx&fdepth=dept_ulid:1,site_ulid:2
+```
+
+**3. 字段级截止规则 (`FieldStopRules`)**
+
+控制某个字段展开到目标子 Handler 后，子 Handler 的哪些字段被截止（跳过不展开）：
+
+```go
+FieldStopRules: map[string][]handler.StopRule{
+    "dept_ulid": {
+        {OnHandler: "department", Field: "manager",  Stop: true},  // -department:manager → 跳过
+        {OnHandler: "department", Field: "parent_id", Stop: false}, // department:parent_id → 展开一层后截止
+    },
+},
+```
+
+HTTP compact 格式：
+
+```http
+GET /api/v1/users/get?fstop=dept_ulid=-department:manager,department:parent_id
+```
+
+**格式规则**：前缀 `-` 表示 `Stop:true`（完全跳过），不带前缀表示 `Stop:false`（展开一层后截止）。多规则用逗号分隔，多字段使用多个 `fstop` 参数。
+
+> **设计说明**：`MaxExpandDepth`、`FieldDepthLimits`、`FieldStopRules` 是服务端默认配置，HTTP 参数 `depth`/`fdepth`/`fstop` 作为限缩性覆盖（只能降级不能放大），避免 URL 过长问题。
+
+### 忽略控制
+
+通过 HTTP query 按需跳过特定展开环节（不覆盖配置，仅做减法）：
+
+| 参数 | 作用 |
+|------|------|
+| `?ignore=ref` | 跳过 References 展开 |
+| `?ignore=cascade` | 跳过 Cascades 展开 |
+| `?ignore=all` | 跳过所有展开 |
+| `?ignoreRef=site_ulid` | 跳过特定 References 字段 |
+| `?ignoreCascade=domains` | 跳过特定 Cascades 字段 |
 
 ### Cascades（向下级联）
 

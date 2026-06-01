@@ -348,6 +348,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
 				continue
 			}
+			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
+			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			if !ok {
+				continue
+			}
 
 			refHandler := h.handlerReg.Get(ref.HandlerName)
 			if refHandler == nil {
@@ -375,9 +380,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				fkList = append(fkList, k)
 			}
 
-			// 批量查（DoList + slice → OpIn），传入子深度 context
+			// 构造字段级子 context
+			refCtx := h.buildFieldCtx(childCtx, ref.Field, ref.HandlerName)
+
+			// 批量查（DoList + slice → OpIn）
 			pkField := refHandler.PKField()
-			parentRecords, err := refHandler.DoList(childCtx, pkField, fkList, false)
+			parentRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
 			}
@@ -414,6 +422,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
 				continue
 			}
+			// 字段级截止
+			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			if !ok {
+				continue
+			}
 
 			refHandler := h.handlerReg.Get(cr.HandlerName)
 			if refHandler == nil {
@@ -440,8 +453,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				fkList = append(fkList, k)
 			}
 
+			// 构造字段级子 context
+			refCtx := h.buildFieldCtx(childCtx, cr.FKListField, cr.HandlerName)
+
 			pkField := refHandler.PKField()
-			childRecords, err := refHandler.DoList(childCtx, pkField, fkList, false)
+			childRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrChildRefBatchResolve(cr.HandlerName, err)
 			}
@@ -479,6 +495,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
 				continue
 			}
+			// 字段级截止
+			_, ok := effectiveExpandDepth(ctx, hasDepth, rel.ChildrenField)
+			if !ok {
+				continue
+			}
+
 			childHandler := h.handlerReg.Get(rel.HandlerName)
 			if childHandler == nil {
 				continue
@@ -504,8 +526,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				pkList = append(pkList, k)
 			}
 
-			// 批量查子记录（DoList + slice → OpIn），传入子深度 context
-			children, err := childHandler.DoList(childCtx, rel.FKField, pkList, rel.FollowPublished)
+			// 构造字段级子 context
+			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
+
+			// 批量查子记录（DoList + slice → OpIn）
+			children, err := childHandler.DoList(cascCtx, rel.FKField, pkList, rel.FollowPublished)
 			if err != nil {
 				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
 			}
