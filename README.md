@@ -15,6 +15,7 @@ go get github.com/Huey1979/gocrux
 - [Handler 层配置](#handler-层配置)
 - [展开深度控制](#展开深度控制)
 - [忽略控制](#忽略控制)
+- [List 字段裁剪](#list-字段裁剪)
 - [Entity → DTO 响应映射](#entity--dto-响应映射)
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
@@ -53,6 +54,7 @@ go get github.com/Huey1979/gocrux
 - **管线模式**：每个操作（Create/Update/Delete/Get/List/Activate/EditVersion）都遵循 before → do → after 三段管线
 - **钩子覆盖**：任意环节的钩子函数均可被外部替换，未替换时 fallback 到内置默认实现
 - **事务透明**：Handler 层通过 `TxCoordinator` 编排事务，Service 层通过 `common.GetTx(ctx)` 自动感知事务上下文
+- **HTTP 与业务解耦**：所有业务场景统一返回 HTTP 200，业务结果（成功/参数错误/数据不存在/内部错误）通过响应体中的 `code` 字段区分，绝不使用 HTTP 状态码表达业务语义
 
 ---
 
@@ -403,6 +405,36 @@ GET /api/v1/users/get?fstop=dept_ulid=-department:manager,department:parent_id
 | `?ignore=all` | 跳过所有展开 |
 | `?ignoreRef=site_ulid` | 跳过特定 References 字段 |
 | `?ignoreCascade=domains` | 跳过特定 Cascades 字段 |
+
+### List 字段裁剪
+
+**注意**：以下配置**仅影响 List 接口**（`_doList` 返回前执行），Get 接口始终返回全字段。
+
+**`ListSkipFields`** — 黑名单模式（优先级高于 Keep）
+
+从 List 响应中移除指定字段，常用于跳过较大的 JSON/Text 字段（如 `form_config`、`entity_config`），减少网络传输量。
+
+```go
+HandlerConfig[entity.SysForm]{
+    PathPrefix:     "/api/v1/sys-form",
+    ListSkipFields: []string{"form_config", "entity_config", "flow_config"},
+}
+```
+
+**`ListKeepFields`** — 白名单模式（仅 Skip 为空时生效）
+
+仅保留指定字段，所有未声明的字段从 List 响应中移除。
+
+```go
+HandlerConfig[entity.SysForm]{
+    PathPrefix:     "/api/v1/sys-form",
+    ListKeepFields: []string{"form_ulid", "form_code", "form_name", "form_type"},
+}
+```
+
+**优先级**：`ListSkipFields` > `ListKeepFields`。两者同时配置时 hanya 生效 Skip，Keep 被忽略。均未配置时全字段返回（向后兼容）。
+
+**执行时机**：所有级联展开（References/ChildRefs/Cascades）完成之后执行，级联数据不受裁剪影响。
 
 ### Entity → DTO 响应映射
 
