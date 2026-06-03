@@ -351,11 +351,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	// 批量展开 References（向上引用）
 	if (!hasDepth || curDepth > 0) && len(h.config.References) > 0 && h.handlerReg != nil {
 		for _, ref := range h.config.References {
-			// 禁止自关联展开
-			if h.isSelfRef(ref.HandlerName) {
-				continue
-			}
-
 			resultKey := ref.ResultField
 			if resultKey == "" {
 				resultKey = deriveRefResultKey(ref.Field)
@@ -425,11 +420,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	// 批量展开 ChildRefs（向下引用 FK 列表）
 	if (!hasDepth || curDepth > 0) && len(h.config.ChildRefs) > 0 && h.handlerReg != nil {
 		for _, cr := range h.config.ChildRefs {
-			// 禁止自关联展开
-			if h.isSelfRef(cr.HandlerName) {
-				continue
-			}
-
 			resultKey := cr.ResultField
 			if resultKey == "" {
 				resultKey = deriveChildRefResultKey(cr.FKListField)
@@ -503,10 +493,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	// 批量展开 Cascades（向下级联子记录）
 	if (!hasDepth || curDepth > 0) && len(h.config.Cascades) > 0 && h.handlerReg != nil {
 		for _, rel := range h.config.Cascades {
-			// 禁止自关联展开
-			if h.isSelfRef(rel.HandlerName) {
-				continue
-			}
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
 			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
 				continue

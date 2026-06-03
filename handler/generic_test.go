@@ -119,9 +119,8 @@ func newTestHandler(cascades []CascadeRelation, handlerReg *HandlerRegistry, tc 
 	repo := repository.NewCRUDRepository[testParent]()
 	svc := service.NewGenericService[testParent](repo, service.Config[testParent]{})
 	h := &GenericHandler[testParent]{
-		svc:         svc,
-		svcName:     "test_parent",
-		selfFKField: testParent{}.SelfFKField(),
+		svc:     svc,
+		svcName: "test_parent",
 		config: HandlerConfig[testParent]{
 			PathPrefix: "/test/parent",
 			Cascades:   cascades,
@@ -141,9 +140,8 @@ func newChildHandler() *GenericHandler[testChild] {
 	repo := repository.NewCRUDRepository[testChild]()
 	svc := service.NewGenericService[testChild](repo, service.Config[testChild]{})
 	return &GenericHandler[testChild]{
-		svc:         svc,
-		svcName:     "test_child",
-		selfFKField: testChild{}.SelfFKField(),
+		svc:     svc,
+		svcName: "test_child",
 		config: HandlerConfig[testChild]{
 			PathPrefix: "/test/child",
 		},
@@ -552,9 +550,8 @@ func TestDoCreate_CascadeTransactionRollback(t *testing.T) {
 		},
 	})
 	failingChild := &GenericHandler[testChild]{
-		svc:         childSvc,
-		svcName:     "test_child",
-		selfFKField: testChild{}.SelfFKField(),
+		svc:     childSvc,
+		svcName: "test_child",
 		config: HandlerConfig[testChild]{
 			PathPrefix: "/test/child",
 		},

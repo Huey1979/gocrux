@@ -15,6 +15,7 @@ go get github.com/Huey1979/gocrux
 - [Handler 层配置](#handler-层配置)
 - [展开深度控制](#展开深度控制)
 - [忽略控制](#忽略控制)
+- [自关联展开](#自关联展开)
 - [List 字段裁剪](#list-字段裁剪)
 - [Entity → DTO 响应映射](#entity--dto-响应映射)
 - [路由注册](#路由注册)
@@ -405,6 +406,50 @@ GET /api/v1/users/get?fstop=dept_ulid=-department:manager,department:parent_id
 | `?ignore=all` | 跳过所有展开 |
 | `?ignoreRef=site_ulid` | 跳过特定 References 字段 |
 | `?ignoreCascade=domains` | 跳过特定 Cascades 字段 |
+
+### 自关联展开
+
+当实体需要引用自身时（如部门表 `parent_dept_ulid` 指向同表的父部门），可通过配置 References 实现自关联展开。
+
+**示例**：
+
+```go
+// 1. 实体实现 SelfFKField()，声明自关联外键字段
+func (d *SysDept) SelfFKField() string { return "parent_dept_ulid" }
+
+// 2. 配置 References 指向自身
+HandlerConfig[*entity.SysDept]{
+    PathPrefix: "/api/v1/dept",
+    MaxExpandDepth: 5, // 最多展开 5 层
+    References: []handler.ReferenceRelation{
+        {
+            Field:       "parent_dept_ulid",
+            HandlerName: "dept",  // 指向自身
+            ResultField: "parent",
+        },
+    },
+}
+```
+
+Get 请求 `/api/v1/dept/get?id=xxx` 会递归展开父部门链，形成层级树：
+```json
+{
+    "dept_name": "研发三组",
+    "parent": {
+        "dept_name": "研发部",
+        "parent": {
+            "dept_name": "技术中心",
+            "parent": null
+        }
+    }
+}
+```
+
+**循环防护**（无需手动阻止自关联）：
+1. **深度控制**：`MaxExpandDepth` 限制最大递归层数，全局硬上限 `hardMaxExpandDepth=10`，到 0 时自动停止
+2. **visited 追踪**（Get 场景）：记录每条展开线上的 `(HandlerName, RecordID)`，遇到已访问的记录立即终止该条展开线，防止 A→B→A 跨实体环或 A→A→A 自环
+
+> **注意**：级联写操作（OnCreate/OnDelete/OnUpdate）的 `SelfFKField()` 仅用于读展开的循环防护，不影响写行为。
 
 ### List 字段裁剪
 

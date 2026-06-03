@@ -41,9 +41,9 @@ type Record interface {
 	// 返回值非空字符串 → 说明该实体存在自关联（同一张表的外键引用自身）。
 	// 返回值空字符串 → 该实体无自关联。
 	//
-	// Handler 层在 Get/List 的 References/ChildRefs/Cascades 展开时，
-	// 若检测到关系指向的 HandlerName == 自身 svcName 且 SelfFKField() != ""，
-	// 则跳过该自关联展开（防止无限递归或冗余自引用）。
+	// 自关联展开的循环防护由两层机制保证：
+	//  1. 深度控制（MaxExpandDepth + FieldDepthLimits + hardMaxExpandDepth=10）
+	//  2. visited 追踪（expandGet 中记录 (handlerName, recordID) 链条，防环）
 	SelfFKField() string
 }
 

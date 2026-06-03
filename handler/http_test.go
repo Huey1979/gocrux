@@ -69,9 +69,8 @@ func setupHTTPTest(t *testing.T) (*gin.Engine, func()) {
 	svc := service.NewGenericService[testHttpEntity](repo, service.Config[testHttpEntity]{})
 
 	h := &GenericHandler[testHttpEntity]{
-		svc:         svc,
-		svcName:     "test_http",
-		selfFKField: testHttpEntity{}.SelfFKField(),
+		svc:     svc,
+		svcName: "test_http",
 		config: HandlerConfig[testHttpEntity]{
 			PathPrefix: "/api/v1/testhttp",
 		},
@@ -829,10 +828,9 @@ func setupHTTPWithConfig(t *testing.T, cfg HandlerConfig[testHttpEntity]) (*gin.
 	svc := service.NewGenericService[testHttpEntity](repo, service.Config[testHttpEntity]{})
 
 	h := &GenericHandler[testHttpEntity]{
-		svc:         svc,
-		svcName:     "test_http",
-		selfFKField: testHttpEntity{}.SelfFKField(),
-		config:      cfg,
+		svc:     svc,
+		svcName: "test_http",
+		config:  cfg,
 	}
 
 	r := gin.New()

@@ -165,9 +165,6 @@ type GenericHandler[M service.Record] struct {
 	handlerReg *HandlerRegistry // 子 Handler 注册表（级联时用于查找子 Handler）
 	txCoord    *TxCoordinator   // 事务编排器（级联时用于保证事务一致性）
 
-	// selfFKField 缓存 Record.SelfFKField() 的结果。
-	// 非空 → 该实体存在自关联，读操作（Get/List）展开时跳过指向自身的 References/ChildRefs/Cascades。
-	selfFKField string
 }
 
 // NewGenericHandler 从 Service 注册表创建泛型 Handler（推荐方式）。
@@ -177,12 +174,10 @@ func NewGenericHandler[M service.Record](
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
 	svc := service.GetTyped[M](reg, svcName)
-	var zero M
 	return &GenericHandler[M]{
-		svc:         svc,
-		svcName:     svcName,
-		config:      cfg,
-		selfFKField: zero.SelfFKField(),
+		svc:     svc,
+		svcName: svcName,
+		config:  cfg,
 	}
 }
 
@@ -191,12 +186,10 @@ func NewGenericHandlerWithSvc[M service.Record](
 	svc *service.GenericService[M],
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
-	var zero M
 	return &GenericHandler[M]{
-		svc:         svc,
-		svcName:     "(direct)",
-		config:      cfg,
-		selfFKField: zero.SelfFKField(),
+		svc:     svc,
+		svcName: "(direct)",
+		config:  cfg,
 	}
 }
 
@@ -683,12 +676,6 @@ func (h *GenericHandler[M]) hasCascadesOnEditVersion() bool {
 		}
 	}
 	return false
-}
-
-// isSelfRef 判断目标 HandlerName 是否为自关联。
-// 同时满足：Record.SelfFKField() != ""（实体定义自关联）且 targetHandlerName == svcName。
-func (h *GenericHandler[M]) isSelfRef(targetHandlerName string) bool {
-	return h.selfFKField != "" && targetHandlerName == h.svcName
 }
 
 // applyResponseMapper 将原始 Entity 通过 ResponseMapper 转换为 DTO map，并合并级联展开数据。
@@ -1193,11 +1180,6 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	// 2. 向上级联：解析本实体的引用字段
 	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
 		for _, ref := range h.config.References {
-			// 禁止自关联展开：若目标 Handler 就是自身（如 site.parent_site_ulid → site）
-			if h.isSelfRef(ref.HandlerName) {
-				continue
-			}
-
 			resultKey := ref.ResultField
 			if resultKey == "" {
 				resultKey = deriveRefResultKey(ref.Field)
@@ -1243,11 +1225,6 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	// 2.5. 向下引用：将 FK 列表解析为完整子对象列表（ChildRefs）
 	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
 		for _, cr := range h.config.ChildRefs {
-			// 禁止自关联展开
-			if h.isSelfRef(cr.HandlerName) {
-				continue
-			}
-
 			resultKey := cr.ResultField
 			if resultKey == "" {
 				resultKey = deriveChildRefResultKey(cr.FKListField)
@@ -1312,10 +1289,6 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	// 3. 向下级联：查询子记录
 	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
 		for _, rel := range h.config.Cascades {
-			// 禁止自关联展开
-			if h.isSelfRef(rel.HandlerName) {
-				continue
-			}
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
 			if shouldIgnoreCascade(ctx) || shouldIgnoreField(ctx, rel.ChildrenField) {
 				continue
