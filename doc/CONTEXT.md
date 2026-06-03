@@ -338,6 +338,32 @@ ListKeepFields: []string{"form_ulid", "form_code", "form_name"}
 
 HTTP 状态码仅用于路由不存在（404）或服务器崩溃（500），绝不用于表达业务语义。
 
+### 5.6 日志系统（2026-06 安全加固）
+
+框架内存在**两套独立的日志系统**：
+
+| 系统 | 初始化方式 | 输出 | 用途 |
+|------|-----------|------|------|
+| **全局 logrus** | `config.yaml` → `log` 段 | stdout / file（由配置决定） | 应用级日志（启动、配置加载） |
+| **运行时追踪日志** | `logger.Init(logDir)` | 按天滚动文件 | 每个 HTTP 请求的完整链路追踪 |
+
+**运行时追踪日志**（`internal/logger`）三个实例：
+
+- `RequestLog` → `logs/request_YYYY-MM-DD.log`
+- `ResponseLog` → `logs/response_YYYY-MM-DD.log`
+- `BusinessLog` → `logs/business_YYYY-MM-DD.log`
+
+**安全加固（Bug 修复）**：原实现中 3 个 Logger 包级变量默认 nil，未调用 `Init()` 时任何错误触发 `InternalError → LogBusiness` 会导致 nil panic。修复：
+
+1. **`init()` 默认值**：包初始化时创建 `logrus.New()`（输出到 stderr），`Init()` 调用后覆盖为按天滚动文件
+2. **nil guard**：`LogRequest/LogResponse/LogBusiness` 开头检查 Logger 是否为 nil，为 nil 则直接 return
+
+**InternalError 双重日志**：`handler/response.go` 的 `InternalError` 会同时写两套日志：
+- `logrus.WithFields(...)` → 全局 logrus（遵循配置的格式/输出，即时可见）
+- `logger.LogBusiness(c, "internal_error", ...)` → BusinessLog（按天文件 + request_id 串联）
+
+这不是重复，而是双通道保障：全局 logrus 便于运维实时监控，BusinessLog 便于按 request_id 事后排查完整请求链路。
+
 ---
 
 ## 六、代码生成器 gentity

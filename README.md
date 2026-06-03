@@ -25,6 +25,7 @@ go get github.com/Huey1979/gocrux
 - [身份认证与授权](#身份认证与授权)
 - [幂等支持](#幂等支持)
 - [操作日志与备份](#操作日志与备份)
+- [运行时日志（Request/Response/Business）](#运行时日志requestresponsebusiness)
 - [列表查询条件](#列表查询条件)
 - [配置文件](#配置文件)
 - [代码生成器 gentity](#代码生成器-gentity)
@@ -967,6 +968,51 @@ svc.SetBakWriter(func(ctx context.Context, tableName string, recordID any, opera
     return nil
 })
 ```
+
+---
+
+## 运行时日志（Request/Response/Business）
+
+框架内置一套独立的**运行时追踪日志**（`internal/logger`），与 `config.yaml` 中的 `log` 配置段**是两套不同的日志系统**：
+
+| 系统 | 初始化方式 | 输出 | 用途 |
+|------|-----------|------|------|
+| **全局 logrus** | `config.yaml` → `log` 段 | stdout / file（由配置决定） | 应用级日志（启动、配置加载等） |
+| **运行时追踪日志** | `logger.Init(logDir)` | 按天滚动文件 | 每个 HTTP 请求的完整链路追踪 |
+
+三个独立实例，每次请求生成唯一 `request_id` 串联：
+
+| 实例 | 文件 | 内容 |
+|------|------|------|
+| `RequestLog` | `logs/request_YYYY-MM-DD.log` | URL、GET 参数、POST body |
+| `ResponseLog` | `logs/response_YYYY-MM-DD.log` | HTTP 状态码、返回体 |
+| `BusinessLog` | `logs/business_YYYY-MM-DD.log` | 业务节点（如 `internal_error`） |
+
+**初始化**：
+
+```go
+import "github.com/Huey1979/gocrux/internal/logger"
+
+logger.Init("./logs") // 可选，默认为 ./logs
+```
+
+**安全特性**：即使不调用 `logger.Init()`，日志实例也已内置默认值（输出到 stderr），**不会因未初始化而 nil panic**。调用 `Init()` 后切换为按天滚动文件模式。
+
+### InternalError 双重日志说明
+
+当发生内部错误时，`handler.InternalError` 会**同时写入两套日志**：
+
+```go
+// ① 全局 logrus（受 config.yaml log 段控制，即时可见）
+logrus.WithFields(...).Error("内部错误")
+
+// ② 运行时 BusinessLog（按天滚动，带 request_id 串联请求链路）
+logger.LogBusiness(c, "internal_error", ...)
+```
+
+这不是重复记录，而是**双通道保障**：
+- **logrus 通道**：遵循配置的格式和输出（stdout/JSON/text），便于运维实时监控和日志采集
+- **BusinessLog 通道**：按天独立文件 + `request_id` 串联完整请求链路，便于事后排查
 
 ---
 

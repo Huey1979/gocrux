@@ -28,6 +28,14 @@ var (
 	BusinessLog *logrus.Logger
 )
 
+// init 确保日志实例始终可用，防止未调 Init() 时的 nil panic。
+// Init() 会覆盖为按天滚动的文件 logger；若未调用 Init()，默认输出到 stderr。
+func init() {
+	RequestLog = logrus.New()
+	ResponseLog = logrus.New()
+	BusinessLog = logrus.New()
+}
+
 // Init 初始化日志系统，创建 logs 目录及三个独立日志实例
 func Init(logDir string) error {
 	if logDir == "" {
@@ -102,6 +110,10 @@ func LogRequest(c *gin.Context, requestID string) {
 	bodyBytes, _ := io.ReadAll(c.Request.Body)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
+	if RequestLog == nil {
+		return
+	}
+
 	fields := logrus.Fields{
 		"log_id":    requestID,
 		"method":    c.Request.Method,
@@ -130,6 +142,9 @@ func LogRequest(c *gin.Context, requestID string) {
 // LogResponse 记录响应信息（状态码、返回数据）
 // 在中间件中调用，发生在业务逻辑之后
 func LogResponse(c *gin.Context, requestID string, status int, respBody string) {
+	if ResponseLog == nil {
+		return
+	}
 	fields := logrus.Fields{
 		"log_id": requestID,
 		"method": c.Request.Method,
@@ -151,6 +166,9 @@ func LogResponse(c *gin.Context, requestID string, status int, respBody string) 
 // node: 业务节点名称，如 "dept.create", "site.publish", "login.success"
 // fields: 附加字段，会自动附加请求ID
 func LogBusiness(c *gin.Context, node string, fields logrus.Fields) {
+	if BusinessLog == nil {
+		return
+	}
 	if fields == nil {
 		fields = logrus.Fields{}
 	}
