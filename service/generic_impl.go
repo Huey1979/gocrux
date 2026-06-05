@@ -213,7 +213,7 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 	now := time.Now()
 	userID := GetUserULID(ctx)
 	for _, req := range input {
-		var m M
+		m := newRecord[M]()
 		m.SetDefaults()
 		if err := req.MergeTo(&m); err != nil {
 			return nil, err
@@ -668,7 +668,7 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	}
 
 	// 判断实体是否支持软删除
-	var m M
+	m := newRecord[M]()
 	if m.SetDelete() {
 		// 软删除：批量标记 is_deleted=1
 		return s.repo.DB(ctx).Model(new(M)).Where(s.repo.PKField()+" IN ?", ids).Update("is_deleted", int8(1)).Error
@@ -695,7 +695,7 @@ func (s *GenericService[M]) DeleteByFK(ctx context.Context, fkField string, fkVa
 		return nil
 	}
 
-	var m M
+	m := newRecord[M]()
 	if m.SetDelete() {
 		// 软删除
 		return s.repo.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Update("is_deleted", int8(1)).Error
@@ -795,11 +795,11 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		f.OrderBy, f.OrderDir = popStrParam(v, "order_by"), popStrParam(v, "order_dir")
 
 		for k, val := range v {
-			op := repository.OpEQ
-			if isSlice(val) {
-				op = repository.OpIn
+			field, op, value := parseFilterKey(k, val)
+			if field == "" {
+				continue
 			}
-			f.Filters = append(f.Filters, repository.Filter{Field: k, Op: op, Value: val})
+			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: op, Value: value})
 		}
 
 	default:
@@ -808,6 +808,89 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	}
 
 	return s.repo.ListByFilters(ctx, f)
+}
+
+// ============================================================
+// parseFilterKey — 解析 URL 查询参数键中的操作符后缀
+//
+// 支持的后缀（双下划线分隔，兼容字段名中的单下划线）：
+//
+//	field           → (field, OpEQ / OpIn, value)     自动：切片=OpIn，否则=OpEQ
+//	field__like     → (field, OpLike, value)           LIKE，自动包裹 %value%
+//	field__gt       → (field, OpGT, value)
+//	field__gte      → (field, OpGTE, value)
+//	field__lt       → (field, OpLT, value)
+//	field__lte      → (field, OpLTE, value)
+//	field__ne       → (field, OpNEQ, value)
+//	field__in       → (field, OpIn, value)             逗号分隔字符串 → []any
+//	field__between  → (field, OpRange, value)          逗号分隔字符串 → []any{lo,hi}
+//
+// 注意：field__like 的值会自动在前后追加 %，除非已包含 %。
+// ============================================================
+func parseFilterKey(key string, rawValue any) (field string, op repository.FilterOp, value any) {
+	// 1. 查找后缀分隔符 __（双下划线）
+	idx := strings.LastIndex(key, "__")
+	if idx > 0 {
+		suffix := key[idx+2:]
+		field = key[:idx]
+		switch suffix {
+		case "like":
+			s := fmt.Sprintf("%v", rawValue)
+			if !strings.Contains(s, "%") {
+				s = "%" + s + "%"
+			}
+			return field, repository.OpLike, s
+		case "gt":
+			return field, repository.OpGT, rawValue
+		case "gte":
+			return field, repository.OpGTE, rawValue
+		case "lt":
+			return field, repository.OpLT, rawValue
+		case "lte":
+			return field, repository.OpLTE, rawValue
+		case "ne":
+			return field, repository.OpNEQ, rawValue
+		case "in":
+			return field, repository.OpIn, parseCSVValue(rawValue)
+		case "between":
+			return field, repository.OpRange, parseCSVValue(rawValue)
+		}
+		// 未知后缀 → 当作普通字段名的一部分
+	}
+
+	// 2. 无后缀：自动推断 Op
+	field = key
+	if isSlice(rawValue) {
+		return field, repository.OpIn, rawValue
+	}
+	return field, repository.OpEQ, rawValue
+}
+
+// parseCSVValue 将逗号分隔的字符串值转为 []any（用于 OpIn / OpRange）。
+// 若 rawValue 已是切片则直接返回；否则按 fmt.Sprintf + strings.Split 解析。
+func parseCSVValue(rawValue any) []any {
+	// 已是切片 → 直接转 []any
+	if rv := reflect.ValueOf(rawValue); rv.Kind() == reflect.Slice {
+		result := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			result[i] = rv.Index(i).Interface()
+		}
+		return result
+	}
+
+	s := strings.TrimSpace(fmt.Sprintf("%v", rawValue))
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]any, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 func (s *GenericService[M]) _afterList(ctx context.Context, list []M, total int64) ([]M, int64, error) {
 	return list, total, nil
@@ -1058,6 +1141,18 @@ func (s *GenericService[M]) _afterEditVersion(ctx context.Context, id any, resul
 // ============================================================
 // 工具函数
 // ============================================================
+
+// newRecord 创建一个新的零值 Record 实例。
+// M 必须是 *Struct 指针类型（gocrux 约定），通过反射分配底层 struct。
+// 替代直接 var m M（当 M 为指针类型时会产生 nil 指针，导致方法调用 panic）。
+func newRecord[M Record]() M {
+	var z M
+	t := reflect.TypeOf(z)
+	if t.Kind() == reflect.Ptr {
+		return reflect.New(t.Elem()).Interface().(M)
+	}
+	return z
+}
 
 // extractIdemKey 从批量请求中提取首个有效幂等键。
 // 返回空字符串表示未启用幂等。

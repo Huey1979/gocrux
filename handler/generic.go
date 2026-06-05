@@ -1373,8 +1373,26 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 
 	filters := make(map[string]any)
 	for key, vals := range c.Request.URL.Query() {
-		if len(vals) > 0 {
+		if len(vals) == 0 {
+			continue
+		}
+		// 处理 key[]= 语法（如 ?id[]=1&id[]=2）→ 去掉 [] 后缀，全量作为切片
+		if strings.HasSuffix(key, "[]") {
+			cleanKey := key[:len(key)-2]
+			anyVals := make([]any, len(vals))
+			for i, v := range vals {
+				anyVals[i] = v
+			}
+			filters[cleanKey] = anyVals
+		} else if len(vals) == 1 {
 			filters[key] = vals[0]
+		} else {
+			// 多值同键（如 ?status=active&status=draft）→ 全量作为切片
+			anyVals := make([]any, len(vals))
+			for i, v := range vals {
+				anyVals[i] = v
+			}
+			filters[key] = anyVals
 		}
 	}
 

@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/Huey1979/gocrux/internal/config"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	mysqldrv "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 )
 
@@ -20,8 +22,21 @@ func Migrate(models ...any) error {
 	}
 
 	// 1. 执行 AutoMigrate（创建不存在的表和列）
+	//    GORM 遇到首个错误就会停止，若因残留索引/列导致 Error 1091，
+	//    忽略错误后重试一次，确保后续模型都能被处理。
 	if err := DB.InternalDB().AutoMigrate(models...); err != nil {
-		return errs.ErrAutoMigrate(err)
+		if isError1091(err) {
+			logrus.Warnf("AutoMigrate 首次遇到 1091 错误（已忽略），重试自动迁移: %v", err)
+			if err2 := DB.InternalDB().AutoMigrate(models...); err2 != nil {
+				if isError1091(err2) {
+					logrus.Warnf("AutoMigrate 重试仍遇 1091 错误（已忽略），继续: %v", err2)
+				} else {
+					return errs.ErrAutoMigrate(err2)
+				}
+			}
+		} else {
+			return errs.ErrAutoMigrate(err)
+		}
 	}
 
 	// 2. 检测并尝试自动修复所有问题
@@ -306,4 +321,24 @@ func getTableName(model interface{}) string {
 
 func correctToWrongULIDName(correct string) string {
 	return strings.Replace(correct, "_ulid", "_ul_id", 1)
+}
+
+// isError1091 检查错误链中是否包含 MySQL Error 1091（Can't DROP — 删除不存在的列/索引）。
+//
+// GORM AutoMigrate 在索引/列重命名时会尝试 DROP 旧名称，若表被外部重建过导致旧对象已不存在，
+// MySQL 将返回 Error 1091，GORM 会立即停止处理后续模型。本函数用于识别此场景，配合重试机制
+// 确保所有模型都能被 AutoMigrate 处理到。
+func isError1091(err error) bool {
+	for err != nil {
+		// 兜底：字符串匹配
+		if strings.Contains(err.Error(), "Error 1091") {
+			return true
+		}
+		var mysqlErr *mysqldrv.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1091 {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }

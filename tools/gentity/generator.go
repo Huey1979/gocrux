@@ -105,11 +105,27 @@ func isFrameworkField(name string) bool {
 	return framework[name]
 }
 
-// goTypeName 返回最终的 Go 类型名（含 * 前缀表示指针）
-func goTypeName(col ColumnInfo) string {
+// goTypeName 返回最终的 Go 类型名（含 * 前缀表示指针）。
+// cfg 用于判断列是否为框架字段（含映射别名），以决定是否为指针类型。
+func goTypeName(col ColumnInfo, cfg *FieldConfig) string {
 	info := mapColumnType(col)
 	t := info.GoType
-	if info.Nullable && !isFrameworkField(col.Name) {
+
+	// is_deleted 字段统一使用 int8（与 heims 约定一致：tinyint(1)→int8 而非 bool）
+	isFramework := isFrameworkField(col.Name)
+	if cfg != nil {
+		if cfg.isFrameworkColumn(col.Name) {
+			isFramework = true
+			if cfg.FieldMapping.ReverseLookup(col.Name) == "is_deleted" {
+				t = "int8"
+			}
+		}
+	} else if col.Name == "is_deleted" {
+		// 无 config 时的 fallback：is_deleted 用 int8
+		t = "int8"
+	}
+
+	if info.Nullable && !isFramework {
 		return "*" + t
 	}
 	return t
@@ -167,8 +183,8 @@ func buildGormTag(col ColumnInfo) string {
 // Entity struct 生成
 // ============================================================
 
-// generateEntity 生成实体定义文件内容
-func generateEntity(table *TableInfo) string {
+// generateEntity 生成实体定义文件内容。cfg 用于字段映射和类型判定。
+func generateEntity(table *TableInfo, cfg *FieldConfig) string {
 	structName := toPascal(singularize(table.Name))
 	var sb strings.Builder
 
@@ -191,7 +207,7 @@ func generateEntity(table *TableInfo) string {
 
 	for _, col := range table.Columns {
 		fieldName := toPascal(col.Name)
-		gt := goTypeName(col)
+		gt := goTypeName(col, cfg)
 		gormTag := buildGormTag(col)
 
 		colComment := col.Comment
@@ -210,13 +226,14 @@ func generateEntity(table *TableInfo) string {
 	sb.WriteString("}\n\n")
 
 	// Record 接口实现
-	sb.WriteString(generateRecordImpl(table, structName))
+	sb.WriteString(generateRecordImpl(table, structName, cfg))
 
 	return sb.String()
 }
 
-// generateRecordImpl 生成 Record 接口实现
-func generateRecordImpl(table *TableInfo, structName string) string {
+// generateRecordImpl 生成 Record 接口实现。
+// cfg 用于将框架字段名映射到数据库列名，从而正确检测字段存在性。
+func generateRecordImpl(table *TableInfo, structName string, cfg *FieldConfig) string {
 	var sb strings.Builder
 
 	pkCol := getPKColumn(table)
@@ -225,7 +242,23 @@ func generateRecordImpl(table *TableInfo, structName string) string {
 	isAutoInc := strings.Contains(pkCol.Extra, "auto_increment")
 	isULID := strings.HasSuffix(pkCol.Name, "_ulid") || strings.HasSuffix(pkCol.Name, "_ulid")
 
-	// SetDefaults
+	// 解析映射后的列名
+	isDelCol := "is_deleted"
+	delAtCol := "deleted_at"
+	createdAtCol := "created_at"
+	createdByCol := "created_by"
+	updatedAtCol := "updated_at"
+	updatedByCol := "updated_by"
+	if cfg != nil {
+		isDelCol = cfg.FieldMapping.Resolve("is_deleted")
+		delAtCol = cfg.FieldMapping.Resolve("deleted_at")
+		createdAtCol = cfg.FieldMapping.Resolve("created_at")
+		createdByCol = cfg.FieldMapping.Resolve("created_by")
+		updatedAtCol = cfg.FieldMapping.Resolve("updated_at")
+		updatedByCol = cfg.FieldMapping.Resolve("updated_by")
+	}
+
+	// ---- SetDefaults ----
 	sb.WriteString(fmt.Sprintf("func (m *%s) SetDefaults() {\n", structName))
 	for _, col := range table.Columns {
 		if col.Default.Valid && col.Default.String != "" {
@@ -237,7 +270,7 @@ func generateRecordImpl(table *TableInfo, structName string) string {
 	}
 	sb.WriteString("}\n\n")
 
-	// SetID
+	// ---- SetID ----
 	sb.WriteString(fmt.Sprintf("func (m *%s) SetID() {\n", structName))
 	if isAutoInc {
 		sb.WriteString(fmt.Sprintf("\t// %s 自增，由数据库生成\n", pkDBName))
@@ -249,39 +282,43 @@ func generateRecordImpl(table *TableInfo, structName string) string {
 	}
 	sb.WriteString("}\n\n")
 
-	// SetCreatedAt
-	if hasColumn(table, "created_at") {
-		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedAt(t time.Time) { m.CreatedAt = t }\n", structName))
+	// ---- SetCreatedAt ----
+	if hasColumn(table, createdAtCol) {
+		fieldName := toPascal(createdAtCol)
+		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedAt(t time.Time) { m.%s = t }\n", structName, fieldName))
 	} else {
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedAt(t time.Time) {}\n", structName))
 	}
 	sb.WriteString("\n")
 
-	// SetCreatedBy
-	if hasColumn(table, "created_by") {
-		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedBy(uid string) { m.CreatedBy = uid }\n", structName))
+	// ---- SetCreatedBy ----
+	if hasColumn(table, createdByCol) {
+		fieldName := toPascal(createdByCol)
+		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedBy(uid string) { m.%s = uid }\n", structName, fieldName))
 	} else {
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetCreatedBy(uid string) {}\n", structName))
 	}
 	sb.WriteString("\n")
 
-	// SetUpdatedAt
-	if hasColumn(table, "updated_at") {
-		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedAt(t time.Time) { m.UpdatedAt = t }\n", structName))
+	// ---- SetUpdatedAt ----
+	if hasColumn(table, updatedAtCol) {
+		fieldName := toPascal(updatedAtCol)
+		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedAt(t time.Time) { m.%s = t }\n", structName, fieldName))
 	} else {
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedAt(t time.Time) {}\n", structName))
 	}
 	sb.WriteString("\n")
 
-	// SetUpdatedBy
-	if hasColumn(table, "updated_by") {
-		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedBy(uid string) { m.UpdatedBy = uid }\n", structName))
+	// ---- SetUpdatedBy ----
+	if hasColumn(table, updatedByCol) {
+		fieldName := toPascal(updatedByCol)
+		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedBy(uid string) { m.%s = uid }\n", structName, fieldName))
 	} else {
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetUpdatedBy(uid string) {}\n", structName))
 	}
 	sb.WriteString("\n")
 
-	// SupportsDraft
+	// ---- SupportsDraft ----
 	hasDraft := hasColumn(table, "version_status") || hasColumn(table, "is_draft")
 	if hasDraft {
 		sb.WriteString(fmt.Sprintf("func (m *%s) SupportsDraft() bool { return true }\n", structName))
@@ -290,13 +327,14 @@ func generateRecordImpl(table *TableInfo, structName string) string {
 	}
 	sb.WriteString("\n")
 
-	// SetDelete
-	if hasColumn(table, "is_deleted") {
-		fieldName := toPascal("is_deleted")
+	// ---- SetDelete ----
+	if hasColumn(table, isDelCol) {
+		fieldName := toPascal(isDelCol)
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetDelete() bool {\n", structName))
-		sb.WriteString(fmt.Sprintf("\tm.%s = true\n\treturn true\n}\n", fieldName))
-	} else if hasColumn(table, "deleted_at") {
-		fieldName := toPascal("deleted_at")
+		// 使用 int8 赋值 1（与 heims 约定一致，tinyint(1) 在 ORM 中映射为 int8）
+		sb.WriteString(fmt.Sprintf("\tm.%s = 1\n\treturn true\n}\n", fieldName))
+	} else if hasColumn(table, delAtCol) {
+		fieldName := toPascal(delAtCol)
 		sb.WriteString(fmt.Sprintf("func (m *%s) SetDelete() bool {\n", structName))
 		sb.WriteString(fmt.Sprintf("\tm.%s = time.Now()\n\treturn true\n}\n", fieldName))
 	} else {
@@ -304,8 +342,19 @@ func generateRecordImpl(table *TableInfo, structName string) string {
 	}
 	sb.WriteString("\n")
 
-	// PKField
+	// ---- PKField ----
 	sb.WriteString(fmt.Sprintf("func (m *%s) PKField() string { return \"%s\" }\n", structName, pkDBName))
+	sb.WriteString("\n")
+
+	// ---- SelfFKField ----
+	// 检测自关联外键（parent_ulid 或 parent_id 列）
+	selfFK := ""
+	if hasColumn(table, "parent_ulid") {
+		selfFK = "parent_ulid"
+	} else if hasColumn(table, "parent_id") {
+		selfFK = "parent_id"
+	}
+	sb.WriteString(fmt.Sprintf("func (m *%s) SelfFKField() string { return \"%s\" }\n", structName, selfFK))
 
 	return sb.String()
 }

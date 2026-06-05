@@ -1167,7 +1167,7 @@ cfg, err := config.Load("config.yaml")
 
 ## 代码生成器 gentity
 
-`tools/gentity` 是一个独立的 MySQL→Go 代码生成器，根据表结构自动生成实体定义和注册蓝图。
+`tools/gentity` 是一个独立的 MySQL→Go 代码生成器，根据表结构自动生成实体定义和注册蓝图。同时支持**字段存在性检查**，可自动发现表中缺少的框架约定字段（`is_deleted`、`created_at/by`、`updated_at/by`）并生成 ALTER TABLE SQL。
 
 ### 安装
 
@@ -1175,7 +1175,7 @@ cfg, err := config.Load("config.yaml")
 go build -o gentity.exe ./tools/gentity/
 ```
 
-### 使用
+### 正常生成模式
 
 ```bash
 # 单表生成
@@ -1185,7 +1185,59 @@ gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" 
 # 全库生成
 gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" \
         --all --out generated
+
+# 全库生成 + 字段映射 + 排除日志表
+gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" \
+        --all \
+        --field-config tools/gentity/gentity_fields.yml \
+        --out generated
 ```
+
+### 检查模式（`--check`）
+
+检查所有表（排除日志表）是否缺少框架约定字段，若缺失则生成 ALTER TABLE SQL 文件。
+
+```bash
+gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" \
+        --check \
+        --field-config tools/gentity/gentity_fields.yml \
+        --out migration
+# 输出: migration/migration_add_fields.sql
+```
+
+默认检查的 5 个必填字段：
+
+| 框架字段 | MySQL 类型 | 默认值 |
+|---------|-----------|--------|
+| `is_deleted` | `tinyint(1)` | `0` |
+| `created_at` | `datetime` | `CURRENT_TIMESTAMP` |
+| `created_by` | `varchar(26)` | `''` |
+| `updated_at` | `datetime` | `CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP` |
+| `updated_by` | `varchar(26)` | `''` |
+
+### 字段映射配置（`--field-config`）
+
+通过 YAML 文件自定义框架字段在实际表中的列名。
+
+**配置文件格式**（`tools/gentity/gentity_fields.yml`）：
+
+```yaml
+field_mapping:
+  is_deleted: del_flag      # 用 del_flag 替代 is_deleted
+  created_by: creator       # 用 creator 替代 created_by
+  updated_by: updater       # 用 updater 替代 updated_by
+  deleted_at: deleted_time  # 用 deleted_time 替代 deleted_at
+  created_at: gmt_create    # 用 gmt_create 替代 created_at
+  updated_at: gmt_modified  # 用 gmt_modified 替代 updated_at
+
+exclude_tables:             # 排除表（不检查也不生成）
+  - sys_operation_log
+  - sys_publish_history
+```
+
+- `field_mapping`：按需覆盖，未覆盖的字段使用默认列名
+- `exclude_tables`：日志表等无需框架字段的特殊表，检查/生成时均跳过
+- 检查模式下：若配置 `is_deleted: del_flag`，则检查表中是否有 `del_flag` 列
 
 ### 生成物
 
@@ -1198,16 +1250,33 @@ generated/
     └── users.go            # 注册蓝图（Repository→Service→Handler→Routes）
 ```
 
-### 自动识别
+### Record 接口实现
 
-| 列名模式 | 处理方式 |
-|---------|---------|
-| `*_ulid`（主键） | `SetID()` 自动生成 ULID |
-| `id`（自增） | `SetID()` 空操作 |
-| `created_at/updated_at` | 自动注入时间戳 |
-| `created_by/updated_by` | 自动注入操作人 |
-| `is_deleted/deleted_at` | 启用软删除 |
-| 列注释 | 保留为字段注释 |
+生成的 entity 文件自动实现 `service.Record` 接口的全部方法：
+
+| 方法 | 行为 |
+|------|------|
+| `SetDefaults()` | 遍历 DEFAULT 值，零值时回填 |
+| `SetID()` | 主键为 `*_ulid` 生成 ULID；自增主键空操作 |
+| `SetCreatedAt(t)` | 若表存在 `created_at`（或映射列）则赋值 |
+| `SetCreatedBy(uid)` | 若表存在 `created_by`（或映射列）则赋值 |
+| `SetUpdatedAt(t)` | 若表存在 `updated_at`（或映射列）则赋值 |
+| `SetUpdatedBy(uid)` | 若表存在 `updated_by`（或映射列）则赋值 |
+| `SupportsDraft()` | 检测 `version_status` 或 `is_draft` 列 |
+| `SetDelete()` | `is_deleted` 列 → 赋值为 `1`（int8）；`deleted_at` 列 → 赋值为 `time.Now()`；否则返回 `false` |
+| `PKField()` | 返回主键数据库列名 |
+| `SelfFKField()` | 检测 `parent_ulid` 或 `parent_id` 列 |
+
+### 自动类型映射
+
+| MySQL 类型 | Go 类型 | 说明 |
+|-----------|---------|------|
+| `varchar`/`char`/`text`/`json` | `string` | |
+| `int`/`int unsigned` | `int`/`uint` | |
+| `bigint` | `int64` | |
+| `decimal` | `float64` | |
+| `datetime`/`timestamp` | `time.Time` | |
+| `tinyint(1)` | `int8` | `is_deleted` 专用，与 heims 约定对齐 |
 
 ### 集成方式
 
