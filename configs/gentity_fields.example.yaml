@@ -1,0 +1,45 @@
+# ============================================================
+# gentity 字段映射配置文件
+# 
+# 用途：
+#   1. 将框架约定的字段名映射到数据库中的实际列名
+#   2. 指定排除的表（如日志表，不检查也不生成 entity）
+# 
+# 使用方式：
+#   go run tools/gentity --dsn "..." --all --field-config configs/gentity_fields.yaml
+#   go run tools/gentity --dsn "..." --check --field-config configs/gentity_fields.yaml
+# ============================================================
+
+# ----------------------------------------------------------
+# 框架字段 → 数据库列名 映射
+# 
+# 左侧：gocrux 框架约定的字段名（不可更改）
+# 右侧：数据库中实际的列名（可自定义）
+# 留空表示使用默认值（与左侧相同）
+# ----------------------------------------------------------
+field_mapping:
+  is_deleted: ""          # 软删除标记，默认 is_deleted (tinyint(1))
+  deleted_at: ""          # 软删除时间（备选），默认 deleted_at
+  created_at: ""          # 创建时间，默认 created_at
+  created_by: ""          # 创建人ULID，默认 created_by (varchar(26))
+  updated_at: ""          # 更新时间，默认 updated_at
+  updated_by: ""          # 更新人ULID，默认 updated_by (varchar(26))
+
+  # 示例：如果你的数据库使用自定义列名，修改如下：
+  # is_deleted: del_flag
+  # created_by: creator
+  # updated_by: modifier
+  # created_at: gmt_create
+  # updated_at: gmt_modified
+
+# ----------------------------------------------------------
+# 排除的表（不检查字段完整性、不生成 entity）
+# 
+# 预置的日志表不需要 created_at/by/updated_at/by/is_deleted 等审计字段，
+# 它们使用自己的时间/操作人字段（如 operated_at、published_at）
+# ----------------------------------------------------------
+exclude_tables:
+  - sys_operation_log
+  - sys_publish_history
+  # 可追加更多排除表：
+  # - some_other_log_table

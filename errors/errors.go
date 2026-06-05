@@ -70,6 +70,9 @@ func ErrReqValidation(idx int, cause error) error {
 func ErrUpdateReqValidation(idx int, cause error) error {
 	return fmt.Errorf("更新请求[%d]校验失败: %w", idx, cause)
 }
+func ErrFieldValidation(field, reason string) error {
+	return fmt.Errorf("字段[%s] %s", field, reason)
+}
 func ErrParsePublishedVersion(cause error) error {
 	return fmt.Errorf("解析正式发布版本失败: %w", cause)
 }

@@ -119,6 +119,17 @@ type HandlerConfig[M service.Record] struct {
 	// 不影响 Get 接口。
 	// 例：[]string{"form_ulid", "form_code", "form_name", "form_type"}
 	ListKeepFields []string
+
+	// Validate 输入校验规则（可选）。
+	// 为 nil 时使用自动推导的默认规则（从 entity struct 反射类型信息）。
+	// 非 nil 时与自动推导规则合并（用户规则覆盖自动规则的同名字段）。
+	// 可通过 YAML 批量加载：handler.LoadValidationConfig("configs/validations.yaml")
+	// 例：
+	//   Validate: &ValidateConfig{
+	//     Create: &EndpointRules{"site_code": &FieldRule{Required: true}},
+	//     List:   &EndpointRules{"page_size": &FieldRule{Max: Float64Ptr(200)}},
+	//   }
+	Validate *ValidateConfig
 }
 
 // GenericHandler 泛型 Handler。
@@ -165,6 +176,12 @@ type GenericHandler[M service.Record] struct {
 	handlerReg *HandlerRegistry // 子 Handler 注册表（级联时用于查找子 Handler）
 	txCoord    *TxCoordinator   // 事务编排器（级联时用于保证事务一致性）
 
+	// 合并后的校验规则（自动推导 + 用户配置）
+	validateRules struct {
+		Create EndpointRules
+		Update EndpointRules
+		List   EndpointRules
+	}
 }
 
 // NewGenericHandler 从 Service 注册表创建泛型 Handler（推荐方式）。
@@ -174,11 +191,13 @@ func NewGenericHandler[M service.Record](
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
 	svc := service.GetTyped[M](reg, svcName)
-	return &GenericHandler[M]{
+	h := &GenericHandler[M]{
 		svc:     svc,
 		svcName: svcName,
 		config:  cfg,
 	}
+	h.initValidation()
+	return h
 }
 
 // NewGenericHandlerWithSvc 直接传入 Service 实例创建 Handler。
@@ -186,10 +205,48 @@ func NewGenericHandlerWithSvc[M service.Record](
 	svc *service.GenericService[M],
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
-	return &GenericHandler[M]{
+	h := &GenericHandler[M]{
 		svc:     svc,
 		svcName: "(direct)",
 		config:  cfg,
+	}
+	h.initValidation()
+	return h
+}
+
+// initValidation 构建合并后的校验规则。
+func (h *GenericHandler[M]) initValidation() {
+	auto := deriveFieldRules[M]()
+	if auto == nil {
+		auto = make(EndpointRules)
+	}
+
+	// Create 规则：auto + 用户 Create 覆盖
+	h.validateRules.Create = mergeRules(auto, nil)
+	if h.config.Validate != nil && h.config.Validate.Create != nil {
+		h.validateRules.Create = mergeRules(h.validateRules.Create, *h.config.Validate.Create)
+	}
+
+	// Update 规则：auto（不含 Required）+ 用户 Update 覆盖
+	updateAuto := cloneEndpointRules(auto)
+	for k, r := range updateAuto {
+		r.Required = false // Update 不该要求全量字段
+		updateAuto[k] = r
+	}
+	h.validateRules.Update = mergeRules(updateAuto, nil)
+	if h.config.Validate != nil && h.config.Validate.Update != nil {
+		h.validateRules.Update = mergeRules(h.validateRules.Update, *h.config.Validate.Update)
+	}
+
+	// List 规则：框架默认 + auto（仅字段类型） + 用户 List 覆盖
+	listRules := defaultListRules()
+	for k, r := range auto {
+		// 仅保留类型信息
+		listRules[k] = &FieldRule{Type: r.Type}
+	}
+	h.validateRules.List = listRules
+	if h.config.Validate != nil && h.config.Validate.List != nil {
+		h.validateRules.List = mergeRules(listRules, *h.config.Validate.List)
 	}
 }
 
@@ -783,12 +840,19 @@ func (h *GenericHandler[M]) Create(c *gin.Context) {
 
 // createPipeline 统一管线：HTTP 和级联共享。
 func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[string]any) ([]*M, error) {
+	// 框架层校验：类型/长度/必填等（自动推导 + 用户配置）
+	for i, raw := range rawReqs {
+		if err := validateInput(h.validateRules.Create, raw, "create"); err != nil {
+			return nil, errs.ErrReqValidation(i, err)
+		}
+	}
+
 	reqs := make([]service.CrudRequest[M], len(rawReqs))
 	for i, raw := range rawReqs {
 		reqs[i] = h.newCrudRequest(raw)
 	}
 
-	// 字段级校验（具体 Request 的 Validate()，MapRequest 为 no-op）
+	// 业务字段校验（具体 Request 的 Validate()，MapRequest 为 no-op）
 	for i, r := range reqs {
 		if err := r.Validate(); err != nil {
 			return nil, errs.ErrReqValidation(i, err)
@@ -883,6 +947,13 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。
 // rawReqs 为待处理的原始请求 map 列表；parentVersioned 表示父链是否已出现版本化节点。
 func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[string]any, parentVersioned bool) ([]*M, error) {
+	// 框架层校验：类型/长度等（自动推导 + 用户配置）
+	for i, raw := range rawReqs {
+		if err := validateInput(h.validateRules.Update, raw, "update"); err != nil {
+			return nil, errs.ErrUpdateReqValidation(i, err)
+		}
+	}
+
 	reqs := make([]service.CrudRequest[M], len(rawReqs))
 	for i, raw := range rawReqs {
 		reqs[i] = h.newCrudRequestForUpdate(raw)
@@ -1410,6 +1481,12 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	delete(filters, "depth")
 	delete(filters, "fdepth")
 	delete(filters, "fstop")
+
+	// 框架层校验：分页参数 + 过滤字段类型（自动推导 + 用户配置）
+	if err := validateInput(h.validateRules.List, filters, "list"); err != nil {
+		h.handleError(c, err)
+		return
+	}
 
 	// 创建 Entities holder：_doList 会将原始实体切片写入此指针，供 HTTP 出口处 ResponseMapper 使用。
 	// 级联调用（DoList）不创建 holder，因此不会触发映射。

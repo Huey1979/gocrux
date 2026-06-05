@@ -24,7 +24,7 @@ func main() {
 
 	if *dsn == "" {
 		fmt.Println("错误: 必须指定 --dsn")
-		fmt.Println("用法: go run tools/gentity --dsn 'root:pass@tcp(localhost:3306)/mydb?charset=utf8mb4&parseTime=true' [--all | --table xxx] [--check] [--field-config fields.yml]")
+		fmt.Println("用法: go run tools/gentity --dsn 'root:pass@tcp(localhost:3306)/mydb?charset=utf8mb4&parseTime=true' [--all | --table xxx] [--check] [--field-config configs/gentity_fields.yaml]")
 		os.Exit(1)
 	}
 

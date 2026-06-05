@@ -20,6 +20,7 @@ go get github.com/Huey1979/gocrux
 - [Entity → DTO 响应映射](#entity--dto-响应映射)
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
+- [输入校验](#输入校验)
 - [级联机制](#级联机制)
 - [版本管理](#版本管理)
 - [身份认证与授权](#身份认证与授权)
@@ -665,6 +666,196 @@ handler.hooks.XxxBefore != nil ? → 使用自定义钩子
 
 ---
 
+## 输入校验
+
+框架在 **Handler 层**对 Create / Update / List 接口提供内置输入校验，无需显式配置即可获得基础的类型和长度保护。
+
+### 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **零配置** | 从 entity struct 的 gorm 标签自动推导规则 |
+| **宽松类型** | 类型不匹配时优先尝试转换，而非直接报错 |
+| **内置格式** | `datetime` / `date` / `email` / `phone` / `url` / `ulid` 等开箱即用 |
+| **双层模型** | 框架校验（字段级）→ 业务校验（跨字段 / DB 唯一性） |
+
+### 自动推导（零配置）
+
+Handler 构造时自动从 entity struct 反射出字段类型规则：
+
+| entity 字段类型 | 自动规则 |
+|---------------|---------|
+| `string`（gorm `size:N`） | `type=string`, `max_length=N` |
+| `string`（`*_ulid` 后缀） | `type=string`, `max_length=26`, `format=ulid` |
+| `int/int8/.../int64` | `type=int` |
+| `float32/float64` | `type=float` |
+| `bool` | `type=bool` |
+| `time.Time` | `type=time` |
+| gorm `not null` | `required=true`（仅 Create） |
+
+### 宽松类型转换
+
+框架在类型不匹配时**优先尝试转换**，能转就不报错：
+
+| 输入值 | 期望类型 | 结果 |
+|--------|---------|------|
+| `123`（JSON 数字） | `string` | ✅ → `"123"` |
+| `"123"`（字符串） | `int` | ✅ → `123` |
+| `"1"` / `1` | `bool` | ✅ → `true` |
+| `0` | `bool` | ✅ → `false` |
+| `"abc"` | `int` | ❌ 无法转换才报错 |
+| `""` | `datetime` | ❌ 空字符串时间 → 报错 |
+
+### 校验范围
+
+| 接口 | 校验内容 |
+|------|---------|
+| **Create** | body 中每个字段的**类型转换 + 格式 + 必填 + 长度** |
+| **Update** | body 中每个字段的**类型转换 + 格式 + 长度**（不强制必填） |
+| **List** | 分页参数（`page`≥1, `page_size`∈[1,100], `order_dir`∈{asc\|desc}）+ 过滤字段 |
+
+### 示例：无配置时的行为
+
+```go
+type Site struct {
+    SiteULID  string `gorm:"column:site_ulid;primaryKey;size:26" json:"site_ulid"`
+    SiteCode  string `gorm:"column:site_code;size:64;not null" json:"site_code"`
+    SortOrder int    `gorm:"column:sort_order" json:"sort_order"`
+}
+```
+
+**Create 时**（JSON body）：
+```json
+{"site_code": 123, "sort_order": "5"}
+```
+→ 框架自动转换：`site_code` → `"123"`，`sort_order` → `5`，正常入库
+
+**List 时**：
+```
+GET /api/v1/sites/list?page=a
+```
+→ 框架拦截：`字段[page] 应为整数`（`"a"` 无法转为数字）
+
+### 内置格式校验（`format` 字段）
+
+无需手写正则的常见格式：
+
+| 格式 | 说明 | 示例 |
+|------|------|------|
+| `datetime` | 日期时间（支持多种格式） | `2024-01-01 10:00:00` |
+| `date` | 日期 | `2024-01-01` |
+| `time` | 时间 | `10:00:00` |
+| `email` | 邮箱 | `user@example.com` |
+| `url` | URL | `https://example.com` |
+| `phone` | 手机号（中国大陆） | `13800138000` |
+| `ulid` | 26位 Crockford base32 | `01JXXXXX...`（自动开启） |
+
+**使用场景**：
+
+```yaml
+# 防止前端传空字符串 "" 导致 MySQL datetime 插入失败
+created_at:
+  format: datetime
+```
+
+```go
+// 代码方式
+"email": {Format: "email"}
+"phone": {Format: "phone"}
+```
+
+### 自定义规则（YAML 覆写）
+
+通过 `Validate` 配置字段覆盖或增强自动推导规则。
+
+**代码方式**：
+
+```go
+handler.HandlerConfig[entity.SysSite]{
+    PathPrefix: "/api/v1/sys-site",
+    Validate: &handler.ValidateConfig{
+        Create: &handler.EndpointRules{
+            "site_code": {Required: true, MaxLength: handler.IntPtr(64)},
+            "site_type": {Enum: []string{"web", "app", "miniapp"}},
+            "domain":    {Format: "url"},
+        },
+        List: &handler.EndpointRules{
+            "page_size": {Max: handler.Float64Ptr(200)},
+        },
+    },
+}
+```
+
+**YAML 文件方式**（`configs/validations.example.yaml`）：
+
+```yaml
+validations:
+  sys_site:
+    create:
+      site_code:
+        required: true
+        max_length: 64
+      site_type:
+        enum: ["web", "app", "miniapp"]
+      domain:
+        format: url
+    list:
+      page_size:
+        max: 200
+  sys_user:
+    create:
+      email:
+        format: email
+      phone:
+        format: phone
+```
+
+加载：
+
+```go
+vcMap, _ := handler.LoadValidationConfig("configs/validations.yaml")
+
+siteHandler := handler.NewGenericHandler[*entity.SysSite](svcReg, "sys_site",
+    handler.HandlerConfig[*entity.SysSite]{
+        PathPrefix: "/api/v1/sys-site",
+        Validate: vcMap["sys_site"],
+    })
+```
+
+### 支持的校验规则
+
+| 属性 | 类型 | 说明 | 适用操作 |
+|------|------|------|---------|
+| `type` | `string` | 期望类型：`string`/`int`/`float`/`bool`/`time` | 全部 |
+| `required` | `bool` | 是否必填（Create 由 gorm `not null` 自动推导） | Create |
+| `min` / `max` | `float64` | 数值范围 | 全部 |
+| `min_length` / `max_length` | `int` | 字符串长度 | 全部 |
+| `enum` | `[]string` | 枚举值白名单 | 全部 |
+| `pattern` | `string` | 正则表达式 | 全部 |
+| `format` | `string` | 内置格式：`datetime`/`date`/`time`/`email`/`url`/`phone`/`ulid` | 全部 |
+
+### 双层校验模型
+
+框架校验与业务校验协同工作：
+
+```
+HTTP Body
+  │
+  ├─ validateInput(raw, rules)  ← ★ 框架校验（类型转换 + 格式 + 长度，自动+配置）
+  │   └─ 失败 → ErrReqValidation（Create）/ ErrUpdateReqValidation（Update）
+  │
+  ├─ req.Validate()             ← ★ 业务校验（ReqFactory 注入，可选）
+  │   └─ 失败 → 同上
+  │
+  └─ Service before hooks       ← Service 层校验（唯一性等）
+```
+
+两层的分工：
+- **框架校验**：字段级别的类型、长度、范围、枚举 — **零配置即可用**
+- **业务校验**：跨字段逻辑、数据库唯一性、状态迁移 — 按需覆盖
+
+---
+
 ## 级联机制
 
 级联是 gocrux 核心特性之一，通过 `CascadeRelation` 声明父子关系，框架自动在事务内编排父实体与子实体的联动操作。
@@ -1189,7 +1380,7 @@ gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" 
 # 全库生成 + 字段映射 + 排除日志表
 gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" \
         --all \
-        --field-config tools/gentity/gentity_fields.yml \
+        --field-config configs/gentity_fields.yaml \
         --out generated
 ```
 
@@ -1200,7 +1391,7 @@ gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" 
 ```bash
 gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" \
         --check \
-        --field-config tools/gentity/gentity_fields.yml \
+        --field-config configs/gentity_fields.yaml \
         --out migration
 # 输出: migration/migration_add_fields.sql
 ```
@@ -1219,7 +1410,7 @@ gentity --dsn "user:pass@tcp(localhost:3306)/db?charset=utf8mb4&parseTime=true" 
 
 通过 YAML 文件自定义框架字段在实际表中的列名。
 
-**配置文件格式**（`tools/gentity/gentity_fields.yml`）：
+**配置文件格式**（`configs/gentity_fields.example.yaml`）：
 
 ```yaml
 field_mapping:
@@ -1339,7 +1530,11 @@ gocrux/
 ├── constants/              # 业务状态码（BusinessCode + 消息映射）
 ├── errors/                 # 哨兵错误 + 格式化错误函数
 ├── tools/gentity/          # 代码生成器（独立工具）
-├── config.yaml             # 配置文件示例
+├── configs/                # YAML 配置样例
+│   ├── gentity_fields.example.yaml   # gentity 字段映射
+│   ├── validations.example.yaml      # 输入校验规则
+│   └── menu.example.yaml             # 默认菜单配置
+├── config.yaml             # 应用主配置（脱敏，不提交）
 └── go.mod
 ```
 
