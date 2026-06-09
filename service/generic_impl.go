@@ -445,8 +445,14 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 // _beforeUpdateVersioned 版本化更新的 before 处理
 func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data any, old *M, vf *VersionFieldMapping) (any, any, error) {
 	// 1. 深拷贝旧数据
-	tmp := *(*old)
-	newEntity := &tmp
+	// æ·±æ·è´ï¼ä¸è½ç´æ¥ *(M)
+	oldPtrVal := reflect.ValueOf(*old)
+	for oldPtrVal.Kind() == reflect.Ptr {
+		oldPtrVal = oldPtrVal.Elem()
+	}
+	newPtrVal := reflect.New(oldPtrVal.Type())
+	newPtrVal.Elem().Set(oldPtrVal)
+	newEntity := newPtrVal.Interface().(M)
 
 	// 2. 合并请求字段到新行
 	if data != nil {
