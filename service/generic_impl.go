@@ -461,6 +461,9 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 
 	// 3. 提取旧版本信息
 	oldVal := reflect.ValueOf(*old)
+	for oldVal.Kind() == reflect.Ptr {
+		oldVal = oldVal.Elem()
+	}
 	oldULID := ""
 	oldVersionCode := ""
 	oldStatus := ""
