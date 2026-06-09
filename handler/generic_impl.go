@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
@@ -156,6 +157,18 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 								return errs.ErrCascadeUpdateBackfill(rel.HandlerName, txErr)
 							}
 							childData = oldChildren
+
+							// ä¸º backfill æ°æ®è¡¥å id é®ï¼ç¡®ä¿ GetID() è½å¹éå°ä¸»é®
+							for j := range childData {
+								if _, ok := childData[j]["id"]; !ok {
+									for k, v := range childData[j] {
+										if v != nil && v != "" && strings.HasSuffix(strings.ToLower(k), "_ulid") {
+											childData[j]["id"] = v
+											break
+										}
+									}
+								}
+							}
 						} else if !passParentVersioned && oldPK != nil {
 							// 父非版本化且有请求子数据 → 先清理旧子记录（全量替换）
 							if txErr = childHandler.DoDeleteByFK(txCtx, rel.FKField, []any{oldPK}); txErr != nil {
