@@ -16,6 +16,9 @@ func SetFieldValue(entity any, fieldName string, value any) {
 		return
 	}
 	elem := v.Elem()
+	for elem.Kind() == reflect.Ptr {
+		elem = elem.Elem()
+	}
 	if elem.Kind() != reflect.Struct {
 		return
 	}
