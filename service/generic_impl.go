@@ -1232,8 +1232,11 @@ func itoa(n int) string {
 // getStrField 反射读取实体指定字段的 string 值
 func getStrField(_entity any, fieldName string) string {
 	v := reflect.ValueOf(_entity)
-	if v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
 	}
 	f := v.FieldByName(fieldName)
 	if !f.IsValid() {
@@ -1245,8 +1248,11 @@ func getStrField(_entity any, fieldName string) string {
 // getFieldVal 反射读取实体指定字段的原始值（保持类型，用于 DB 精确匹配）
 func getFieldVal(_entity any, fieldName string) any {
 	v := reflect.ValueOf(_entity)
-	if v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
 	}
 	f := v.FieldByName(fieldName)
 	if !f.IsValid() {

@@ -140,6 +140,14 @@ func mergeMapToStructFlat(target any, m map[string]any) {
 // findField 在 struct 中查找与 map key 对应的字段。
 // 优先按 json tag 匹配，其次按 PascalCase / snake_case 推断。
 func findField(v reflect.Value, t reflect.Type, name string) reflect.Value {
+	// 解引用：避免对指针值调用 FieldByName
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return reflect.Value{}
+	}
+
 	// 1. 按 json tag 匹配
 	for i := 0; i < t.NumField(); i++ {
 		tag := t.Field(i).Tag.Get("json")
