@@ -222,6 +222,16 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 		m.SetCreatedBy(userID)
 		m.SetCreatedAt(now)
 		m.SetUpdatedAt(now)
+
+		// 版本化实体：Create 时自动设置初始版本号 v1.0
+		// （Update 时由 _beforeUpdateVersioned 调用 nextVersionCode 递增）
+		if s.config.VersionMode && s.config.VersionFields != nil {
+			vf := s.config.VersionFields
+			if getStrField(&m, vf.VersionField) == "" {
+				common.SetFieldValue(&m, vf.VersionField, "v1.0")
+			}
+		}
+
 		entities = append(entities, &m)
 	}
 

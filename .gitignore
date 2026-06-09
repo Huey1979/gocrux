@@ -24,6 +24,9 @@ storage/
 .DS_Store
 Thumbs.db
 
+# 文档
+doc/
+
 # 依赖
 vendor/
 

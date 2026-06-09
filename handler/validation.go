@@ -54,10 +54,27 @@ func isFrameworkMetaParam(key string) bool {
 // 2. 从 entity struct 自动推导字段规则
 // ============================================================
 
+// frameworkManagedCols 由框架自动管理的字段（SetID/SetDefaults/审计等），
+// 禁止从 gorm not null 自动推导 Required=true，避免用户被迫传入无需关心的字段。
+var frameworkManagedCols = map[string]bool{
+	"is_deleted":     true, // SetDelete() 管理
+	"is_current":     true, // SetDefaults() 管理
+	"version_code":   true, // Service._beforeCreate 自动设 v1.0
+	"version_status": true, // SetDefaults() 管理
+	"version_remark": true, // 版本说明，可为空
+	"created_by":     true, // 审计字段
+	"created_at":     true, // 审计字段
+	"updated_by":     true, // 审计字段
+	"updated_at":     true, // 审计字段
+	"published_by":   true, // 版本发布审计
+	"published_at":   true, // 版本发布审计
+}
+
 // deriveFieldRules 从 entity struct M 反射推导默认 FieldRule。
 // - 从 gorm 标签提取 db column 名 + size/not null 等约束
 // - 从 Go 类型推导期望类型
-// - ULID 类型自动 max_length=26 + format=ulid
+// - ULID 类型自动 max_length=26 + format=ulid，且排除 Required
+// - 框架管理字段（_ulid/is_deleted/version_*/审计字段）不设 Required
 // 仅做类型约束，不做业务级必填/枚举/正则。
 func deriveFieldRules[M any]() EndpointRules {
 	var m M
@@ -82,34 +99,32 @@ func deriveFieldRules[M any]() EndpointRules {
 		// 类型推导
 		rule.Type = goKindToRuleType(sf.Type)
 
-		// gorm 标签约束
-		gormTag := sf.Tag.Get("gorm")
-		if gormTag != "" {
-			if size := parseGormSize(gormTag); size > 0 && rule.Type == "string" {
-				rule.MaxLength = intPtr(size)
-			}
-			if rule.Type != "string" {
-				// not null 处理（string 类型由 gorm size 一起处理）
-				if strings.Contains(gormTag, "not null") {
-					rule.Required = true
-				}
-			} else {
-				if strings.Contains(gormTag, "not null") {
-					rule.Required = true
-				}
-			}
-		}
-
-		// ULID 字段：自动 max_length=26 + format=ulid
+		// 主键/ULID 字段：自动 max_length=26 + format=ulid，不设为 Required
+		// （SetID() 自动生成主键，用户无需传入）
 		if strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
 			rule.MaxLength = intPtr(26)
 			rule.Format = "ulid"
+		} else {
+			// gorm 标签约束（仅对非 ULID 字段生效）
+			gormTag := sf.Tag.Get("gorm")
+			if gormTag != "" {
+				if size := parseGormSize(gormTag); size > 0 && rule.Type == "string" {
+					rule.MaxLength = intPtr(size)
+				}
+				if strings.Contains(gormTag, "not null") {
+					rule.Required = true
+				}
+			}
 		}
 
-		// is_deleted 字段 → int8
+		// 框架管理字段：永不设为 Required
+		if frameworkManagedCols[colName] {
+			rule.Required = false
+		}
+
+		// is_deleted 字段 → int 类型
 		if colName == "is_deleted" {
 			rule.Type = "int"
-			rule.Required = true
 		}
 
 		rules[colName] = rule
