@@ -163,7 +163,13 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							}
 						}
 
-						if txErr = childHandler.DoUpdate(txCtx, rel.FKField, newPK, childData, passParentVersioned); txErr != nil {
+						// è®¡ç®ä¼ éç»å­ Handler ççæ¬åæ å¿
+						passToChild := passParentVersioned
+						// è¡¥åå­æ°æ®æ¶ï¼ç°æå­è®°å½åªéæ´æ° FKï¼ä¸å¼ºå¶åå»º
+						if !hasChildren && oldPK != nil {
+							passToChild = false
+						}
+						if txErr = childHandler.DoUpdate(txCtx, rel.FKField, newPK, childData, passToChild); txErr != nil {
 							return errs.ErrCascadeUpdate(rel.HandlerName, txErr)
 						}
 					}
