@@ -343,7 +343,7 @@ var (
 	rxEmail = regexp.MustCompile(`^[\w.+\-]+@[\w\-]+(\.[\w\-]+)+$`)
 	rxPhone = regexp.MustCompile(`^1[3-9]\d{9}$`)
 	rxURL   = regexp.MustCompile(`^https?://[\w.\-]+(:\d+)?[\w./?=&%#\-_~]*$`)
-	rxULID  = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)
+	rxULID  = regexp.MustCompile(`(?i)^[0-9A-HJKMNP-TV-Z]{24,26}$`)
 )
 
 // timeFormats 尝试解析的常见时间格式。
@@ -401,8 +401,8 @@ func checkFormat(field, format string, val any) error {
 			return errs.ErrFieldValidation(field, "手机号格式不正确")
 		}
 	case "ulid":
-		if len(s) != 26 || !rxULID.MatchString(s) {
-			return errs.ErrFieldValidation(field, "ULID格式不正确(需26位Crockford base32)")
+		if (len(s) < 24 || len(s) > 26) || !rxULID.MatchString(s) {
+			return errs.ErrFieldValidation(field, "ULID格式不正确(需24-26位Crockford base32)")
 		}
 	}
 	return nil
