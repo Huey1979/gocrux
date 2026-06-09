@@ -821,9 +821,16 @@ func (h *GenericHandler[M]) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var rawReqs []map[string]any
-	if err := c.ShouldBindJSON(&rawReqs); err != nil {
-		h.handleError(c, err)
-		return
+	bodyBytes, _ := c.GetRawData()
+	if err := json.Unmarshal(bodyBytes, &rawReqs); err != nil {
+		// 兼容单对象：用户传 {k:v} 而非 [{k:v}] 时自动包裹成数组
+		var single map[string]any
+		if uerr := json.Unmarshal(bodyBytes, &single); uerr == nil {
+			rawReqs = []map[string]any{single}
+		} else {
+			h.handleError(c, err)
+			return
+		}
 	}
 	if len(rawReqs) == 0 {
 		h.handleError(c, errs.ErrInvalidParam)
