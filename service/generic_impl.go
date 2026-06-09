@@ -445,7 +445,8 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 // _beforeUpdateVersioned 版本化更新的 before 处理
 func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data any, old *M, vf *VersionFieldMapping) (any, any, error) {
 	// 1. 深拷贝旧数据
-	newEntity := *old
+	tmp := *(*old)
+	newEntity := &tmp
 
 	// 2. 合并请求字段到新行
 	if data != nil {
