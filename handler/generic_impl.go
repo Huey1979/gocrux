@@ -162,7 +162,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							for j := range childData {
 								if _, ok := childData[j]["id"]; !ok {
 									for k, v := range childData[j] {
-										if v != nil && v != "" && strings.HasSuffix(strings.ToLower(k), "_ulid") {
+										if v != nil && v != "" && (strings.HasSuffix(strings.ToLower(k), "_ulid") || strings.HasSuffix(strings.ToLower(k), "_id")) {
 											childData[j]["id"] = v
 											break
 										}
