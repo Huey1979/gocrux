@@ -1402,13 +1402,18 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 
 // deriveRefResultKey 从逻辑外键字段名推导结果键名。
 // 例：site_ulid → site、dept_ulid → dept、default_menu_ulid → default_menu。
-func deriveRefResultKey(field string) string {
-	s := field
-	if i := len(s) - 5; i > 0 && s[i:] == "_ulid" {
-		s = s[:i]
+	// deriveRefResultKey 从逻辑外键字段名推导展开结果键名。
+	// 例：entity_id → entity_info、site_ulid → site_info。
+	// 使用 _info 后缀避免覆盖原始 FK 字段值。
+	func deriveRefResultKey(field string) string {
+		s := field
+		if after, ok := strings.CutSuffix(s, "_ulid"); ok {
+			s = after
+		} else if after, ok := strings.CutSuffix(s, "_id"); ok {
+			s = after
+		}
+		return s + "_info"
 	}
-	return s
-}
 
 // deriveChildRefResultKey 从 FK 列表字段名推导展开结果键名。
 // 例：tag_ulids → tags、menu_ids → menus、role_ulids → roles。
