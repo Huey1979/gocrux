@@ -1,0 +1,17 @@
+fix: Create handler auto-wraps single object; fix FieldByName panic on ptr
+
+1. handler/generic.go: POST /{prefix}/create now accepts both [{...}] and {...}.
+   When a single JSON object is sent, it is automatically wrapped into a
+   one-element array for Create pipeline processing.
+
+2. handler/request.go: findField() now dereferences pointer before FieldByName.
+   Fixes panic "reflect: call of reflect.Value.FieldByName on ptr Value" when
+   findField receives a pointer reflect.Value.
+
+3. service/generic_impl.go: getStrField() and getFieldVal() use for-loop instead
+   of single if to fully dereference multi-level pointers before FieldByName.
+
+4. service/generic_impl.go: _beforeUpdateVersioned() now dereferences pointer
+   before calling FieldByName on oldVal. Fixes panic "reflect: call of
+   reflect.Value.FieldByName on ptr Value" when M is a pointer type (e.g.
+   *entity.SysSite) and *old still resolves to a Ptr kind.

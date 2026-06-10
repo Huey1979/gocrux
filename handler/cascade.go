@@ -17,6 +17,9 @@ import (
 // 实际递归层数不可超过此值。防止无上限递归。
 const hardMaxExpandDepth = 10
 
+	// defaultExpandDepth 默认展开深度，当 Handler 未显式配置 MaxExpandDepth 时使用。
+	const defaultExpandDepth = 5
+
 type depthCtxKey struct{}
 
 // withDepth 将剩余展开深度写入 context。

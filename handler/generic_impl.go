@@ -360,12 +360,15 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 		}
 	}
 
-	// 深度检查：仅在未设置 depth 或 depth > 0 时展开 References/ChildRefs/Cascades
-	curDepth, hasDepth := getDepth(ctx)
-	childCtx := ctx
-	if hasDepth {
-		childCtx = withDepth(ctx, curDepth-1)
-	}
+		// 深度检查 + visited 防护：防止循环展开
+		curDepth, hasDepth := getDepth(ctx)
+		if isVisited(ctx, h.svcName, "batch") {
+			return result, total, nil
+		}
+		childCtx := addVisited(ctx, h.svcName, "batch")
+		if hasDepth {
+			childCtx = withDepth(childCtx, curDepth-1)
+		}
 
 	// 批量展开 References（向上引用）
 	if (!hasDepth || curDepth > 0) && len(h.config.References) > 0 && h.handlerReg != nil {

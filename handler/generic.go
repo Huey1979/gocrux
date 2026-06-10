@@ -378,9 +378,9 @@ func (h *GenericHandler[M]) checkPerm(c *gin.Context, action string) bool {
 	return true
 }
 
-// injectDepth 从 HTTP query ?depth=N 与 HandlerConfig.MaxExpandDepth 综合计算展开深度，
-// 写入 context。若两者均未设置则不注入（保持旧行为：展开一层不递归）。
-func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) context.Context {
+	// injectDepth 从 HTTP query ?depth=N 与 HandlerConfig.MaxExpandDepth 综合计算展开深度，
+	// 写入 context。默认深度为 defaultExpandDepth（5），?depth=0 可禁用展开。
+	func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) context.Context {
 	qdStr := c.Query("depth")
 	var qd int
 	hasQD := false
@@ -390,33 +390,29 @@ func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) con
 			hasQD = true
 		}
 	}
-
+	
 	maxDepth := h.config.MaxExpandDepth
-
-	// 仅当配置或 query 明确设置了 depth 时才注入 context
-	if maxDepth <= 0 && !hasQD {
-		return ctx // 未设置 → 旧行为
+	if maxDepth <= 0 {
+		maxDepth = defaultExpandDepth
 	}
-
-	depth := 0
+	
+	depth := maxDepth
 	if hasQD {
 		depth = qd // query 优先
-	} else if maxDepth > 0 {
-		depth = maxDepth // fallback 到配置
 	}
-
+	
 	// 上限：配置的 MaxExpandDepth 作为天花板
-	if maxDepth > 0 && depth > maxDepth {
+	if depth > maxDepth {
 		depth = maxDepth
 	}
-
+	
 	// 硬上限：禁止无上限递归（如 ?depth=999 → 裁剪为 hardMaxExpandDepth）
 	if depth > hardMaxExpandDepth {
 		depth = hardMaxExpandDepth
 	}
-
+	
 	return withDepth(ctx, depth)
-}
+	}
 
 // injectIgnore 从 HTTP query params 解析忽略配置，写入 context。
 //
