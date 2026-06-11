@@ -563,19 +563,11 @@ func (h *GenericHandler[M]) _doActivate(ctx context.Context, id any) error {
 					continue
 				}
 
-				children, err := childHandler.DoList(txCtx, rel.FKField, id, false)
-				if err != nil {
-					return errs.ErrCascadeActivateQuery(rel.HandlerName, err)
-				}
-				childPKField := childHandler.PKField()
-				for _, child := range children {
-					childPK := child[childPKField]
-					if childPK == nil {
-						continue
-					}
-					if err := childHandler.DoActivate(txCtx, childPK); err != nil {
+				if err := forEachCascadeChild(txCtx, childHandler, rel.FKField, id,
+				func(txCtx context.Context, child map[string]any, childPK any) error {
+					return childHandler.DoActivate(txCtx, childPK)
+				}); err != nil {
 						return errs.ErrCascadeActivate(rel.HandlerName, err)
-					}
 				}
 			}
 			return nil
@@ -635,20 +627,12 @@ func (h *GenericHandler[M]) _doEditVersion(ctx context.Context, id any, patches 
 					continue
 				}
 
-				children, err := childHandler.DoList(txCtx, rel.FKField, id, false)
-				if err != nil {
-					return errs.ErrCascadeEditVerQuery(rel.HandlerName, err)
-				}
-				childPKField := childHandler.PKField()
-				for _, child := range children {
-					childPK := child[childPKField]
-					if childPK == nil {
-						continue
-					}
-					// DoEditVersion 的返回值被忽略：级联场景下父不关心子返回什么
-					if _, err := childHandler.DoEditVersion(txCtx, childPK, patches); err != nil {
+				if err := forEachCascadeChild(txCtx, childHandler, rel.FKField, id,
+				func(txCtx context.Context, child map[string]any, childPK any) error {
+					_, err := childHandler.DoEditVersion(txCtx, childPK, patches)
+					return err
+				}); err != nil {
 						return errs.ErrCascadeEditVer(rel.HandlerName, err)
-					}
 				}
 			}
 			return nil
@@ -731,5 +715,31 @@ func (h *GenericHandler[M]) expandCascadesBatch(ctx context.Context, childCtx co
 			}
 		}
 	}
+}
+
+// forEachCascadeChild 查询级联子记录并逐个执行回调。
+// 封装 DoList → iterate → 提取 PK → 回调 的通用流程。
+func forEachCascadeChild(
+	ctx context.Context,
+	childHandler CascadeHandler,
+	fkField string,
+	fkValue any,
+	fn func(ctx context.Context, child map[string]any, childPK any) error,
+) error {
+	children, err := childHandler.DoList(ctx, fkField, fkValue, false)
+	if err != nil {
+		return err
+	}
+	pkField := childHandler.PKField()
+	for _, child := range children {
+		childPK := child[pkField]
+		if childPK == nil {
+			continue
+		}
+		if err := fn(ctx, child, childPK); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
