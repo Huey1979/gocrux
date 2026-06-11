@@ -1232,29 +1232,16 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 		return nil, errs.ErrUnmarshalEntity(err)
 	}
 
-	// visited 防循环：若当前记录已在此链条中出现过（如 site→dept→site），停止展开
+	// -------- visited + depth 统一防护 --------
 	pk := extractPKFromResult(result)
-	if isVisited(ctx, h.svcName, fmt.Sprint(pk)) {
+	baseChildCtx, ok := canExpandTo(ctx, h.svcName, fmt.Sprint(pk))
+	if !ok {
 		return out, nil
 	}
-
-	// 深度检查：仅在未设置 depth 或 depth > 0 时展开
-	curDepth, hasDepth := getDepth(ctx)
-
-	// 构造基础子 context：visited 追踪（不含深度，由各字段单独控制）
-	baseChildCtx := ctx
-	if pk != nil && pk != "" {
-		baseChildCtx = addVisited(baseChildCtx, h.svcName, fmt.Sprint(pk))
-		// 同时添加 handler 级别 visited，与 _doList 的 batch 键兼容
-		baseChildCtx = addVisited(baseChildCtx, h.svcName, "batch")
-	}
-	// 基础深度：全局 depth-1
-	if hasDepth {
-		baseChildCtx = withDepth(baseChildCtx, curDepth-1)
-	}
+	baseChildCtx = addVisited(baseChildCtx, h.svcName, "batch")
 
 	// 2. 向上级联：解析本实体的引用字段
-	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+	if h.handlerReg != nil && true {
 		for _, ref := range h.config.References {
 			resultKey := ref.ResultField
 			if resultKey == "" {
@@ -1265,7 +1252,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
-			effDepth, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			effDepth, ok := effectiveExpandDepth(ctx, true, resultKey)
 			if !ok {
 				continue
 			}
@@ -1284,16 +1271,12 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			refCtx := h.buildFieldCtx(baseChildCtx, ref.Field, ref.HandlerName)
 			// 若有字段级限深，覆盖全局深度
 			if fieldLimits := getFieldLimits(ctx); fieldLimits != nil {
-				if _, hasFieldLimit := fieldLimits[resultKey]; hasFieldLimit || effDepth != curDepth {
+				if _, hasFieldLimit := fieldLimits[resultKey]; hasFieldLimit {
 					refCtx = withDepth(refCtx, effDepth-1)
 				}
 			}
 
-			// visited 防自引用：如果引用的目标已在此展开链中，跳过
-			if isVisited(baseChildCtx, ref.HandlerName, fmt.Sprint(fkVal)) {
-				continue
-			}
-			parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
+				parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
 			if err != nil {
 				return nil, errs.ErrRefResolve(ref.HandlerName, err)
 			}
@@ -1303,7 +1286,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	}
 
 	// 2.5. 向下引用：将 FK 列表解析为完整子对象列表（ChildRefs）
-	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+	if h.handlerReg != nil && true {
 		for _, cr := range h.config.ChildRefs {
 			resultKey := cr.ResultField
 			if resultKey == "" {
@@ -1314,7 +1297,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			_, ok := effectiveExpandDepth(ctx, true, resultKey)
 			if !ok {
 				continue
 			}
@@ -1367,14 +1350,14 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	}
 
 	// 3. 向下级联：查询子记录
-	if h.handlerReg != nil && (!hasDepth || curDepth > 0) {
+	if h.handlerReg != nil && true {
 		for _, rel := range h.config.Cascades {
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
 			if shouldIgnoreCascade(ctx) || shouldIgnoreField(ctx, rel.ChildrenField) {
 				continue
 			}
 			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, hasDepth, rel.ChildrenField)
+			_, ok := effectiveExpandDepth(ctx, true, rel.ChildrenField)
 			if !ok {
 				continue
 			}

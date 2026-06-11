@@ -142,6 +142,26 @@ func isVisited(ctx context.Context, handlerName, id string) bool {
 	return vs[fmt.Sprintf("%s:%s", handlerName, id)]
 }
 
+// canExpandToCheck 统一的展开前置检查（visited + depth）。
+// 在每次级联/引用展开到子 handler 之前调用。
+// 返回新 ctx（含 visited 追踪 + 深度递减）和是否允许继续。
+func canExpandTo(ctx context.Context, handlerName, id string) (context.Context, bool) {
+	// 1. visited 防循环：如果目标已在展开链中出现过，停止
+	if isVisited(ctx, handlerName, id) {
+		return ctx, false
+	}
+	// 2. 深度检查：如果深度已耗尽，停止
+	if d, ok := getDepth(ctx); ok && d <= 0 {
+		return ctx, false
+	}
+	// 3. 通过：将目标加入 visited，深度递减
+	newCtx := addVisited(ctx, handlerName, id)
+	if d, ok := getDepth(ctx); ok {
+		newCtx = withDepth(newCtx, d-1)
+	}
+	return newCtx, true
+}
+
 // ============================================================
 // fieldLimitCtx — 字段级展开限制（父 Handler 对子 Handler 的精确控制）
 //

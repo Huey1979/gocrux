@@ -361,17 +361,14 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	}
 
 		// 深度检查 + visited 防护：防止循环展开
-		curDepth, hasDepth := getDepth(ctx)
-		if isVisited(ctx, h.svcName, "batch") {
+		// -------- visited + depth 统一防护 --------
+		childCtx, ok := canExpandTo(ctx, h.svcName, "batch")
+		if !ok {
 			return result, total, nil
-		}
-		childCtx := addVisited(ctx, h.svcName, "batch")
-		if hasDepth {
-			childCtx = withDepth(childCtx, curDepth-1)
 		}
 
 	// 批量展开 References（向上引用）
-	if (!hasDepth || curDepth > 0) && len(h.config.References) > 0 && h.handlerReg != nil {
+	if len(h.config.References) > 0 && h.handlerReg != nil {
 		for _, ref := range h.config.References {
 			resultKey := ref.ResultField
 			if resultKey == "" {
@@ -382,7 +379,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
-			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			_, ok := effectiveExpandDepth(ctx, true, resultKey)
 			if !ok {
 				continue
 			}
@@ -418,10 +415,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 批量查（DoList + slice → OpIn）
 			pkField := refHandler.PKField()
-			// visited 防自引用：如果引用的目标已在此展开链中，跳过
-			if isVisited(childCtx, ref.HandlerName, "batch") {
-				continue
-			}
 			parentRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
@@ -444,7 +437,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	}
 
 	// 批量展开 ChildRefs（向下引用 FK 列表）
-	if (!hasDepth || curDepth > 0) && len(h.config.ChildRefs) > 0 && h.handlerReg != nil {
+	if len(h.config.ChildRefs) > 0 && h.handlerReg != nil {
 		for _, cr := range h.config.ChildRefs {
 			resultKey := cr.ResultField
 			if resultKey == "" {
@@ -455,7 +448,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, hasDepth, resultKey)
+			_, ok := effectiveExpandDepth(ctx, true, resultKey)
 			if !ok {
 				continue
 			}
@@ -517,14 +510,14 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	}
 
 	// 批量展开 Cascades（向下级联子记录）
-	if (!hasDepth || curDepth > 0) && len(h.config.Cascades) > 0 && h.handlerReg != nil {
+	if len(h.config.Cascades) > 0 && h.handlerReg != nil {
 		for _, rel := range h.config.Cascades {
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
 			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
 				continue
 			}
 			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, hasDepth, rel.ChildrenField)
+			_, ok := effectiveExpandDepth(ctx, true, rel.ChildrenField)
 			if !ok {
 				continue
 			}
@@ -558,10 +551,6 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
 
 			// 批量查子记录（DoList + slice → OpIn）
-			// visited 防自引用
-			if isVisited(childCtx, rel.HandlerName, "batch") {
-				continue
-			}
 			children, err := childHandler.DoList(cascCtx, rel.FKField, pkList, rel.FollowPublished)
 			if err != nil {
 				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
