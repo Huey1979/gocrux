@@ -559,8 +559,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 
-			// 批量查子记录（DoList + slice → OpIn）
-			children, err := childHandler.DoList(cascCtx, rel.FKField, pkList, rel.FollowPublished)
+			// 单值时传单值（匹配 expandGet 行为），多值时传数组
+			var fkVal any = pkList
+			if len(pkList) == 1 {
+				fkVal = pkList[0]
+			}
+			children, err := childHandler.DoList(cascCtx, rel.FKField, fkVal, rel.FollowPublished)
 			if err != nil {
 				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
 			}
