@@ -1245,6 +1245,8 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	baseChildCtx := ctx
 	if pk != nil && pk != "" {
 		baseChildCtx = addVisited(baseChildCtx, h.svcName, fmt.Sprint(pk))
+		// 同时添加 handler 级别 visited，与 _doList 的 batch 键兼容
+		baseChildCtx = addVisited(baseChildCtx, h.svcName, "batch")
 	}
 	// 基础深度：全局 depth-1
 	if hasDepth {
