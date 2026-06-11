@@ -1326,7 +1326,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			refCtx := h.buildFieldCtx(baseChildCtx, cr.FKListField, cr.HandlerName)
 
 			pkField := refHandler.PKField()
-			if _, ok := canExpandTo(refCtx, cr.HandlerName, "batch"); !ok {
+			if isVisited(refCtx, cr.HandlerName, "batch") {
 				continue
 			}
 			childRecords, err := refHandler.DoList(refCtx, pkField, strIDs, false)
@@ -1376,7 +1376,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			}
 
 			cascCtx := h.buildFieldCtx(baseChildCtx, rel.ChildrenField, rel.HandlerName)
-			if _, ok := canExpandTo(cascCtx, rel.HandlerName, "batch"); !ok {
+			if isVisited(cascCtx, rel.HandlerName, "batch") {
 				continue
 			}
 

@@ -412,7 +412,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			refCtx := h.buildFieldCtx(childCtx, ref.Field, ref.HandlerName)
-			if _, ok := canExpandTo(refCtx, ref.HandlerName, "batch"); !ok {
+			if isVisited(refCtx, ref.HandlerName, "batch") {
 				continue
 			}
 
@@ -483,7 +483,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			refCtx := h.buildFieldCtx(childCtx, cr.FKListField, cr.HandlerName)
-			if _, ok := canExpandTo(refCtx, cr.HandlerName, "batch"); !ok {
+			if isVisited(refCtx, cr.HandlerName, "batch") {
 				continue
 			}
 
@@ -555,7 +555,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
-			if _, ok := canExpandTo(cascCtx, rel.HandlerName, "batch"); !ok {
+			if isVisited(cascCtx, rel.HandlerName, "batch") {
 				continue
 			}
 
