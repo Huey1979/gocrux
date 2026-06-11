@@ -418,6 +418,10 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 批量查（DoList + slice → OpIn）
 			pkField := refHandler.PKField()
+			// visited 防自引用：如果引用的目标已在此展开链中，跳过
+			if isVisited(childCtx, ref.HandlerName, "batch") {
+				continue
+			}
 			parentRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
 			if err != nil {
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
@@ -554,6 +558,10 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
 
 			// 批量查子记录（DoList + slice → OpIn）
+			// visited 防自引用
+			if isVisited(childCtx, rel.HandlerName, "batch") {
+				continue
+			}
 			children, err := childHandler.DoList(cascCtx, rel.FKField, pkList, rel.FollowPublished)
 			if err != nil {
 				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
