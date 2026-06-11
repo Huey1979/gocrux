@@ -656,8 +656,9 @@ func (h *GenericHandler[M]) _doActivate(ctx context.Context, id any) error {
 				if err != nil {
 					return errs.ErrCascadeActivateQuery(rel.HandlerName, err)
 				}
+				childPKField := childHandler.PKField()
 				for _, child := range children {
-					childPK := extractMapID(child)
+					childPK := child[childPKField]
 					if childPK == nil {
 						continue
 					}
@@ -727,8 +728,9 @@ func (h *GenericHandler[M]) _doEditVersion(ctx context.Context, id any, patches 
 				if err != nil {
 					return errs.ErrCascadeEditVerQuery(rel.HandlerName, err)
 				}
+				childPKField := childHandler.PKField()
 				for _, child := range children {
-					childPK := extractMapID(child)
+					childPK := child[childPKField]
 					if childPK == nil {
 						continue
 					}
