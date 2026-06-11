@@ -1287,6 +1287,10 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				}
 			}
 
+			// visited 防自引用：如果引用的目标已在此展开链中，跳过
+			if isVisited(baseChildCtx, ref.HandlerName, fmt.Sprint(fkVal)) {
+				continue
+			}
 			parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
 			if err != nil {
 				return nil, errs.ErrRefResolve(ref.HandlerName, err)
