@@ -497,70 +497,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 		}
 	}
 
-	// 批量展开 Cascades（向下级联子记录）
-	if len(h.config.Cascades) > 0 && h.handlerReg != nil {
-		for _, rel := range h.config.Cascades {
-			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
-			childHandler, ok := h.shouldExpandField(ctx, childCtx, rel.ChildrenField, rel.HandlerName, false)
-			if !ok {
-				continue
-			}
-
-			// 收集所有父实体 PK（用 PKField 精准定位，避免 extractMapID 随机匹配其他 _ulid 字段）
-			pkField := h.PKField()
-			pkSet := make(map[string]bool)
-			for _, m := range result {
-				pk := m[pkField]
-				if pk != nil {
-					s := fmt.Sprint(pk)
-					if s != "" && s != "<nil>" {
-						pkSet[s] = true
-					}
-				}
-			}
-			if len(pkSet) == 0 {
-				continue
-			}
-
-			pkList := make([]any, 0, len(pkSet))
-			for k := range pkSet {
-				pkList = append(pkList, k)
-			}
-
-			// 构造字段级子 context
-			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
-			if isVisited(cascCtx, rel.HandlerName, "batch") {
-				continue
-			}
-
-			// 单值时传单值（匹配 expandGet 行为），多值时传数组
-			var fkVal any = pkList
-			if len(pkList) == 1 {
-				fkVal = pkList[0]
-			}
-			children, err := childHandler.DoList(cascCtx, rel.FKField, fkVal, rel.FollowPublished)
-			if err != nil {
-				return nil, 0, errs.ErrCascadeBatchQuery(rel.HandlerName, err)
-			}
-
-			// 按 FKField 分组
-			groups := make(map[string][]map[string]any)
-			for _, child := range children {
-				fkVal := fmt.Sprint(child[rel.FKField])
-				groups[fkVal] = append(groups[fkVal], child)
-			}
-
-			// 回填到每条父结果
-			for _, m := range result {
-				pk := m[pkField]
-				if pk != nil {
-					if group, ok := groups[fmt.Sprint(pk)]; ok {
-						m[rel.ChildrenField] = group
-					}
-				}
-			}
-		}
-	}
+	// 批量展开 Cascades → 委托 expandCascadesBatch
+	h.expandCascadesBatch(ctx, childCtx, result)
 
 	// List 字段裁剪：skip 优先于 keep，均未配置时全字段返回。
 	// 仅作用于 _doList（Get 接口不受影响），在所有展开逻辑之后执行。
@@ -727,3 +665,71 @@ func (h *GenericHandler[M]) _afterEditVersion(_ context.Context, result *M) (*M,
 	// 默认：透传
 	return result, nil
 }
+
+// expandCascadesBatch 批量展开级联子记录并回填到父结果。
+// 用于 _doList 的 Cascades 展开，封装收集 PK → 查子记录 → 分组 → 回填 的完整流程。
+func (h *GenericHandler[M]) expandCascadesBatch(ctx context.Context, childCtx context.Context, result []map[string]any) {
+	if len(h.config.Cascades) == 0 || h.handlerReg == nil {
+		return
+	}
+	for _, rel := range h.config.Cascades {
+		childHandler, ok := h.shouldExpandField(ctx, childCtx, rel.ChildrenField, rel.HandlerName, false)
+		if !ok {
+			continue
+		}
+
+		// 收集所有父实体 PK
+		pkField := h.PKField()
+		pkSet := make(map[string]bool)
+		for _, m := range result {
+			pk := m[pkField]
+			if pk != nil {
+				s := fmt.Sprint(pk)
+				if s != "" && s != "<nil>" {
+					pkSet[s] = true
+				}
+			}
+		}
+		if len(pkSet) == 0 {
+			continue
+		}
+
+		pkList := make([]any, 0, len(pkSet))
+		for k := range pkSet {
+			pkList = append(pkList, k)
+		}
+
+		cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
+		if isVisited(cascCtx, rel.HandlerName, "batch") {
+			continue
+		}
+
+		var fkVal any = pkList
+		if len(pkList) == 1 {
+			fkVal = pkList[0]
+		}
+		children, err := childHandler.DoList(cascCtx, rel.FKField, fkVal, rel.FollowPublished)
+		if err != nil {
+			// 级联展开失败静默跳过（不中断整个列表查询）
+			continue
+		}
+
+		// 按 FKField 分组
+		groups := make(map[string][]map[string]any)
+		for _, child := range children {
+			fkVal := fmt.Sprint(child[rel.FKField])
+			groups[fkVal] = append(groups[fkVal], child)
+		}
+
+		// 回填到每条父结果
+		for _, m := range result {
+			pk := m[pkField]
+			if pk != nil {
+				if group, ok := groups[fmt.Sprint(pk)]; ok {
+					m[rel.ChildrenField] = group
+				}
+			}
+		}
+	}
+}
+
