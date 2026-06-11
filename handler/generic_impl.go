@@ -375,17 +375,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				resultKey = deriveRefResultKey(ref.Field)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
-				continue
-			}
-			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
-			_, ok := effectiveExpandDepth(ctx, true, resultKey)
+			refHandler, ok := h.shouldExpandField(ctx, childCtx, resultKey, ref.HandlerName, true)
 			if !ok {
-				continue
-			}
-
-			refHandler := h.handlerReg.Get(ref.HandlerName)
-			if refHandler == nil {
 				continue
 			}
 
@@ -447,17 +438,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(childCtx) || shouldIgnoreField(childCtx, resultKey) {
-				continue
-			}
-			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, true, resultKey)
+			refHandler, ok := h.shouldExpandField(ctx, childCtx, resultKey, cr.HandlerName, true)
 			if !ok {
-				continue
-			}
-
-			refHandler := h.handlerReg.Get(cr.HandlerName)
-			if refHandler == nil {
 				continue
 			}
 
@@ -519,17 +501,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	if len(h.config.Cascades) > 0 && h.handlerReg != nil {
 		for _, rel := range h.config.Cascades {
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
-			if shouldIgnoreCascade(childCtx) || shouldIgnoreField(childCtx, rel.ChildrenField) {
-				continue
-			}
-			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, true, rel.ChildrenField)
+			childHandler, ok := h.shouldExpandField(ctx, childCtx, rel.ChildrenField, rel.HandlerName, false)
 			if !ok {
-				continue
-			}
-
-			childHandler := h.handlerReg.Get(rel.HandlerName)
-			if childHandler == nil {
 				continue
 			}
 

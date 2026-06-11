@@ -1248,17 +1248,8 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				resultKey = deriveRefResultKey(ref.Field)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(ctx) || shouldIgnoreField(ctx, resultKey) {
-				continue
-			}
-			// 字段级截止：检查父 Handler 注入的 fieldLimitMap
-			effDepth, ok := effectiveExpandDepth(ctx, true, resultKey)
+			refHandler, ok := h.shouldExpandField(ctx, baseChildCtx, resultKey, ref.HandlerName, true)
 			if !ok {
-				continue
-			}
-
-			refHandler := h.handlerReg.Get(ref.HandlerName)
-			if refHandler == nil {
 				continue
 			}
 
@@ -1273,14 +1264,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			if isVisited(refCtx, ref.HandlerName, fmt.Sprint(fkVal)) {
 				continue
 			}
-			// 若有字段级限深，覆盖全局深度
-			if fieldLimits := getFieldLimits(ctx); fieldLimits != nil {
-				if _, hasFieldLimit := fieldLimits[resultKey]; hasFieldLimit {
-					refCtx = withDepth(refCtx, effDepth-1)
-				}
-			}
-
-				parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
+			parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
 			if err != nil {
 				return nil, errs.ErrRefResolve(ref.HandlerName, err)
 			}
@@ -1297,17 +1281,8 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
 			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
-			if shouldIgnoreRef(ctx) || shouldIgnoreField(ctx, resultKey) {
-				continue
-			}
-			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, true, resultKey)
+			refHandler, ok := h.shouldExpandField(ctx, baseChildCtx, resultKey, cr.HandlerName, true)
 			if !ok {
-				continue
-			}
-
-			refHandler := h.handlerReg.Get(cr.HandlerName)
-			if refHandler == nil {
 				continue
 			}
 
@@ -1360,17 +1335,8 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	if h.handlerReg != nil && true {
 		for _, rel := range h.config.Cascades {
 			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
-			if shouldIgnoreCascade(ctx) || shouldIgnoreField(ctx, rel.ChildrenField) {
-				continue
-			}
-			// 字段级截止
-			_, ok := effectiveExpandDepth(ctx, true, rel.ChildrenField)
+			childHandler, ok := h.shouldExpandField(ctx, baseChildCtx, rel.ChildrenField, rel.HandlerName, false)
 			if !ok {
-				continue
-			}
-
-			childHandler := h.handlerReg.Get(rel.HandlerName)
-			if childHandler == nil {
 				continue
 			}
 

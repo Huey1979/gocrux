@@ -165,6 +165,35 @@ func canExpandTo(ctx context.Context, handlerName, id string) (context.Context, 
 	return newCtx, true
 }
 
+// shouldExpandField 统一的字段级展开前置检查（ignore + fieldLimit + handler 存在）。
+// 消除 expandGet / _doList 中 6 处重复的 References / ChildRefs / Cascades 循环体头部。
+func (h *GenericHandler[M]) shouldExpandField(
+	ctx context.Context,
+	childCtx context.Context,
+	fieldName string,
+	handlerName string,
+	isRef bool,
+) (CascadeHandler, bool) {
+	if isRef {
+		if shouldIgnoreRef(ctx) || shouldIgnoreField(ctx, fieldName) {
+			return nil, false
+		}
+	} else {
+		if shouldIgnoreCascade(ctx) || shouldIgnoreField(ctx, fieldName) {
+			return nil, false
+		}
+	}
+	_, ok := effectiveExpandDepth(ctx, true, fieldName)
+	if !ok {
+		return nil, false
+	}
+	if h.handlerReg == nil {
+		return nil, false
+	}
+	ch := h.handlerReg.Get(handlerName)
+	return ch, ch != nil
+}
+
 // ============================================================
 // fieldLimitCtx — 字段级展开限制（父 Handler 对子 Handler 的精确控制）
 //
