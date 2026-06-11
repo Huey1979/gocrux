@@ -1326,6 +1326,9 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			refCtx := h.buildFieldCtx(baseChildCtx, cr.FKListField, cr.HandlerName)
 
 			pkField := refHandler.PKField()
+			if _, ok := canExpandTo(refCtx, cr.HandlerName, "batch"); !ok {
+				continue
+			}
 			childRecords, err := refHandler.DoList(refCtx, pkField, strIDs, false)
 			if err != nil {
 				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
@@ -1372,8 +1375,10 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 
-			// 构造字段级子 context
 			cascCtx := h.buildFieldCtx(baseChildCtx, rel.ChildrenField, rel.HandlerName)
+			if _, ok := canExpandTo(cascCtx, rel.HandlerName, "batch"); !ok {
+				continue
+			}
 
 			children, err := childHandler.DoList(cascCtx, rel.FKField, pk, rel.FollowPublished)
 			if err != nil {

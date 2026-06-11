@@ -412,6 +412,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			refCtx := h.buildFieldCtx(childCtx, ref.Field, ref.HandlerName)
+			if _, ok := canExpandTo(refCtx, ref.HandlerName, "batch"); !ok {
+				continue
+			}
 
 			// 批量查（DoList + slice → OpIn）
 			pkField := refHandler.PKField()
@@ -480,6 +483,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			refCtx := h.buildFieldCtx(childCtx, cr.FKListField, cr.HandlerName)
+			if _, ok := canExpandTo(refCtx, cr.HandlerName, "batch"); !ok {
+				continue
+			}
 
 			pkField := refHandler.PKField()
 			childRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
@@ -549,6 +555,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 构造字段级子 context
 			cascCtx := h.buildFieldCtx(childCtx, rel.ChildrenField, rel.HandlerName)
+			if _, ok := canExpandTo(cascCtx, rel.HandlerName, "batch"); !ok {
+				continue
+			}
 
 			// 批量查子记录（DoList + slice → OpIn）
 			children, err := childHandler.DoList(cascCtx, rel.FKField, pkList, rel.FollowPublished)
