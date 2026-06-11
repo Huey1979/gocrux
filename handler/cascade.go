@@ -109,31 +109,37 @@ func shouldIgnoreCascade(ctx context.Context) bool {
 // ============================================================
 // visitedCtx — 展开链条追踪（防跨实体循环引用 A→B→A）
 //
-// expandGet 递归展开时，每条展开线记录已访问的 (handlerName, recordID) 对。
-// 若某层的当前记录已在此链条中出现过，则停止该条线的展开。
-//
-// visited set 通过 context 传递，每次加入新节点时创建新 map（不可变语义），
-// 确保多条并行展开线互不干扰。
+// 使用指针共享的 visitedSet，存入 context。
+// 整个请求的展开链共享同一个实例，避免每次嵌套都 copy map。
 // ============================================================
 
 type visitedCtxKey struct{}
 
 // visitedSet 展开链条上已访问的记录集合。
 // key = "handlerName:recordID"（如 "dept:01J..."）。
+// 指针语义：所有嵌套调用共享同一实例。
 type visitedSet map[string]bool
 
-// addVisited 将 (handlerName, id) 加入 visited set，返回新 ctx。
-func addVisited(ctx context.Context, handlerName, id string) context.Context {
-	existing, _ := ctx.Value(visitedCtxKey{}).(visitedSet)
-	newSet := make(visitedSet, len(existing)+1)
-	for k, v := range existing {
-		newSet[k] = v
+// getOrCreateVisited 从 context 获取或创建 visited set。
+func getOrCreateVisited(ctx context.Context) visitedSet {
+	if vs, ok := ctx.Value(visitedCtxKey{}).(visitedSet); ok && vs != nil {
+		return vs
 	}
-	newSet[handlerName+":"+id] = true
-	return context.WithValue(ctx, visitedCtxKey{}, newSet)
+	return make(visitedSet)
 }
 
-// isVisited 检查 (handlerName, id) 是否已在当前展开链条中出现过。
+// addVisited 将 (handlerName, id) 加入 visited set 并写回 context。
+// 修改的是共享实例，无需返回新 ctx——但为了调用方便仍返回新 ctx。
+func addVisited(ctx context.Context, handlerName, id string) context.Context {
+	vs := getOrCreateVisited(ctx)
+	vs[handlerName+":"+id] = true
+	if _, ok := ctx.Value(visitedCtxKey{}).(visitedSet); ok {
+		return ctx // 已注入，直接改
+	}
+	return context.WithValue(ctx, visitedCtxKey{}, vs)
+}
+
+// isVisited 检查 (handlerName, id) 是否已出现。
 func isVisited(ctx context.Context, handlerName, id string) bool {
 	vs, ok := ctx.Value(visitedCtxKey{}).(visitedSet)
 	if !ok || vs == nil {
