@@ -1269,6 +1269,10 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 
 			// 构造字段级子 context：含字段深度上限 + 截止规则
 			refCtx := h.buildFieldCtx(baseChildCtx, ref.Field, ref.HandlerName)
+			// visited 防自引用
+			if isVisited(refCtx, ref.HandlerName, fmt.Sprint(fkVal)) {
+				continue
+			}
 			// 若有字段级限深，覆盖全局深度
 			if fieldLimits := getFieldLimits(ctx); fieldLimits != nil {
 				if _, hasFieldLimit := fieldLimits[resultKey]; hasFieldLimit {
