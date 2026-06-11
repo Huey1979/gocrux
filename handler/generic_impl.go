@@ -533,10 +533,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 
-			// 收集所有父实体 PK
+			// 收集所有父实体 PK（用 PKField 精准定位，避免 extractMapID 随机匹配其他 _ulid 字段）
+			pkField := h.PKField()
 			pkSet := make(map[string]bool)
 			for _, m := range result {
-				pk := extractMapID(m)
+				pk := m[pkField]
 				if pk != nil {
 					s := fmt.Sprint(pk)
 					if s != "" && s != "<nil>" {
@@ -578,7 +579,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			// 回填到每条父结果
 			for _, m := range result {
-				pk := extractMapID(m)
+				pk := m[pkField]
 				if pk != nil {
 					if group, ok := groups[fmt.Sprint(pk)]; ok {
 						m[rel.ChildrenField] = group
