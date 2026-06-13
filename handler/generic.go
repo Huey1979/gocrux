@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Huey1979/gocrux/expression"
+
 	"github.com/Huey1979/gocrux/constants"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
@@ -130,6 +132,8 @@ type HandlerConfig[M service.Record] struct {
 	//     List:   &EndpointRules{"page_size": &FieldRule{Max: Float64Ptr(200)}},
 	//   }
 	Validate *ValidateConfig
+	// NormalizeFields 需表达式规范化的 JSON 字段名
+	NormalizeFields []string
 }
 
 // GenericHandler 泛型 Handler。
@@ -1796,3 +1800,22 @@ func (h *GenericHandler[M]) handleError(c *gin.Context, err error) {
 	}
 	ErrorWithMsg(c, code, err.Error())
 }
+// normalizeFields 对请求 map 中配置的 JSON 字段做表达式规范化。
+// 在 createPipeline / updatePipeline 验证前调用。
+func (h *GenericHandler[M]) normalizeFields(rawReqs []map[string]any) {
+	if len(h.config.NormalizeFields) == 0 {
+		return
+	}
+	for _, raw := range rawReqs {
+		for _, field := range h.config.NormalizeFields {
+			if v, ok := raw[field]; ok {
+				if s, ok := v.(string); ok && s != "" && s != "{}" {
+					if n, err := expression.Normalize(s); err == nil {
+						raw[field] = n
+					}
+				}
+			}
+		}
+	}
+}
+
