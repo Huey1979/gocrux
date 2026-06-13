@@ -9,7 +9,7 @@ import (
 // commutative 参数顺序不影响结果的函数。
 var commutative = map[string]bool{
 	"And": true, "Or": true,
-	"Add": true, "Mul": true,
+	"Add": true, "Mul": true, "Concat": true,
 	"Eq": true, "Neq": true,
 	"Overlap": true,
 }
