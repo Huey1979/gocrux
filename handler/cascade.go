@@ -159,6 +159,8 @@ func canExpandTo(ctx context.Context, handlerName, id string) (context.Context, 
 	}
 	// 3. 通过：将目标加入 visited，深度递减
 	newCtx := addVisited(ctx, handlerName, id)
+	// 同时加 batch 键，供 _doList 交叉检测
+	newCtx = addVisited(newCtx, handlerName, "batch")
 	if d, ok := getDepth(ctx); ok {
 		newCtx = withDepth(newCtx, d-1)
 	}
