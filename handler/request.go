@@ -53,6 +53,16 @@ func (r *MapRequest[M]) GetID() any {
 			return v
 		}
 	}
+	// 兜底：扫描任意 _ulid 后缀字段（如 layout_ulid、section_ulid）
+	// 排除 _info 后缀的展开字段、FK 字段 form_ulid / entity_ulid（优先级靠后）
+	for k, v := range r.data {
+		if v == nil {
+			continue
+		}
+		if strings.HasSuffix(k, "_ulid") && !strings.HasSuffix(k, "_info") {
+			return v
+		}
+	}
 	return nil
 }
 
