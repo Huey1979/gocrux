@@ -16,6 +16,19 @@ import (
 	"gorm.io/gorm"
 )
 
+// KeywordSearch 关键字搜索配置（通过 context 从 Handler 传递到 Service）。
+type keywordSearchKey struct{}
+
+type KeywordSearch struct {
+	Keyword string
+	Fields  []string
+}
+
+// WithKeywordSearch 将关键字搜索配置注入 context。
+func WithKeywordSearch(ctx context.Context, ks KeywordSearch) context.Context {
+	return context.WithValue(ctx, keywordSearchKey{}, ks)
+}
+
 // ============================================================
 // 内置 before — 钩子优先，否则 fallback 默认实现
 // ============================================================
@@ -825,6 +838,19 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	default:
 		// 无过滤条件，不分页返回全部
 		return s.repo.List(ctx, nil, 1, 0)
+	}
+
+	// keyword 关键字搜索：多字段 OR LIKE 匹配
+	if ks, ok := ctx.Value(keywordSearchKey{}).(KeywordSearch); ok && ks.Keyword != "" {
+		keywordFilters := make([]repository.Filter, 0, len(ks.Fields))
+		for _, field := range ks.Fields {
+			keywordFilters = append(keywordFilters, repository.Filter{
+				Field: field, Op: repository.OpLike, Value: "%" + ks.Keyword + "%",
+			})
+		}
+		f.Filters = append(f.Filters, repository.Filter{
+			Op: "or_group", Value: keywordFilters,
+		})
 	}
 
 	return s.repo.ListByFilters(ctx, f)

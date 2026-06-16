@@ -433,6 +433,17 @@ func applyFilter(db *gorm.DB, f Filter, logic string) *gorm.DB {
 	}
 
 	switch f.Op {
+	case "or_group":
+		// OR 组：多个子 filter 之间用 OR 连接，整体作为 AND 条件
+		subs, _ := f.Value.([]Filter)
+		if len(subs) > 0 {
+			subDB := db.Session(&gorm.Session{NewDB: true})
+			for _, sub := range subs {
+				subDB = applyFilter(subDB, sub, "or")
+			}
+			return db.Where(subDB)
+		}
+		return db
 	case OpEQ:
 		return buildWhere(f.Field+" = ?", f.Value)
 	case OpNEQ:

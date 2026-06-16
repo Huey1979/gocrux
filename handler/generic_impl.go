@@ -657,6 +657,10 @@ func (h *GenericHandler[M]) expandCascadesBatch(ctx context.Context, childCtx co
 		return
 	}
 	for _, rel := range h.config.Cascades {
+		// ListSkipCascades 约定：List 时默认不展开级联，可通过 ?expand 覆写
+		if !h.shouldExpandCascade(ctx, rel.ChildrenField) {
+			continue
+		}
 		childHandler, ok := h.shouldExpandField(ctx, childCtx, rel.ChildrenField, rel.HandlerName, false)
 		if !ok {
 			continue

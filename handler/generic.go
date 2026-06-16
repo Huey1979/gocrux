@@ -122,6 +122,20 @@ type HandlerConfig[M service.Record] struct {
 	// 例：[]string{"form_ulid", "form_code", "form_name", "form_type"}
 	ListKeepFields []string
 
+	// ListSkipCascades List 时默认不展开的级联子表名（约定：List 不展开级联）。
+	// nil = 全部展开（向后兼容）。
+	// []string{} = 全部跳过（推荐）。
+	// []string{"list_layout"} = 仅跳过 list_layout。
+	// GET 参数 ?expand=name1,name2 可临时开启指定级联。
+	// GET 参数 ?expandAll=true 强制全部展开。
+	ListSkipCascades []string
+
+	// KeywordFields 关键字搜索字段列表。
+	// nil = 不支持关键字搜索（向后兼容）。
+	// GET 参数 ?keyword=xxx 在这些字段上做 LIKE %xxx% OR 模糊匹配。
+	// 例：[]string{"form_code", "form_name"}
+	KeywordFields []string
+
 	// Validate 输入校验规则（可选）。
 	// 为 nil 时使用自动推导的默认规则（从 entity struct 反射类型信息）。
 	// 非 nil 时与自动推导规则合并（用户规则覆盖自动规则的同名字段）。
@@ -791,6 +805,46 @@ func (h *GenericHandler[M]) applyResponseMapper(entity *M, expanded map[string]a
 // ============================================================
 // 7. Create — 管线（HTTP → cascade → before → do → after）
 // ============================================================
+
+// listExpandKey 用于在 List handler 中传递级联展开覆写参数。
+type listExpandKey struct{}
+
+type listExpand struct {
+	all    bool   // expandAll=true → 全部展开
+	fields string // expand=name1,name2 → 仅展开指定级联
+}
+
+// shouldExpandCascade 判断 List 时是否应展开指定级联。
+// 优先级：?expandAll=true > ?expand=list > ListSkipCascades 配置 > 默认不展开。
+func (h *GenericHandler[M]) shouldExpandCascade(ctx context.Context, childrenField string) bool {
+	// 1. GET 参数 expandAll=true → 全部展开
+	if v, ok := ctx.Value(listExpandKey{}).(listExpand); ok && v.all {
+		return true
+	}
+	// 2. GET 参数 expand=name1,name2 → 指定展开
+	if v, ok := ctx.Value(listExpandKey{}).(listExpand); ok && v.fields != "" {
+		for _, f := range strings.Split(v.fields, ",") {
+			if strings.TrimSpace(f) == childrenField {
+				return true
+			}
+		}
+		return false
+	}
+	// 3. ListSkipCascades 配置：nil = 全部展开（向后兼容），[]string{} = 全部跳过
+	if h.config.ListSkipCascades == nil {
+		return true // 向后兼容：未配置 = 全部展开
+	}
+	if len(h.config.ListSkipCascades) == 0 {
+		return false // 空切片 = 全部跳过
+	}
+	// 4. 部分跳过：在列表中的跳过
+	for _, skip := range h.config.ListSkipCascades {
+		if skip == childrenField {
+			return false
+		}
+	}
+	return true
+}
 
 // rawCreateMapsKey 用于在 createPipeline 中将原始请求 map 透传给 _doCreate，
 // 以便级联创建时从父请求中提取子表数据。
@@ -1465,6 +1519,27 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	delete(filters, "depth")
 	delete(filters, "fdepth")
 	delete(filters, "fstop")
+	delete(filters, "keyword")
+	delete(filters, "expand")
+	delete(filters, "expandAll")
+
+	// keyword 关键字搜索：注入 context 供 service 层处理
+	if kw := c.Query("keyword"); kw != "" && len(h.config.KeywordFields) > 0 {
+		ctx = service.WithKeywordSearch(ctx, service.KeywordSearch{
+			Keyword: kw,
+			Fields:  h.config.KeywordFields,
+		})
+	}
+
+	// expand 级联展开覆盖：ListSkipCascades 可通过 GET 参数覆写
+	expandAll := c.Query("expandAll") == "true"
+	expandList := c.Query("expand")
+	if expandAll || expandList != "" {
+		ctx = context.WithValue(ctx, listExpandKey{}, listExpand{
+			all:    expandAll,
+			fields: expandList,
+		})
+	}
 
 	// 框架层校验：分页参数 + 过滤字段类型（自动推导 + 用户配置）
 	if err := validateInput(h.validateRules.List, filters, "list"); err != nil {
