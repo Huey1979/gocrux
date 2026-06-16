@@ -654,6 +654,10 @@ func extractChildData(raw map[string]any, field string, wrapKey string) []map[st
 	if !ok || v == nil {
 		return nil
 	}
+	// 兼容单对象：{...} 自动包裹为 [{...}]
+	if m, ok := v.(map[string]any); ok {
+		return []map[string]any{m}
+	}
 	// 反射兜底：兼容 []any / []map[string]any / 标量切片 等任意切片类型
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Slice {
