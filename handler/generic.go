@@ -918,9 +918,13 @@ type rawUpdateMapsKey struct{}
 // DoUpdate CascadeHandler 接口实现。
 // 注入 FK 后统一走 updatePipeline，享受完整的 before→do→after 管线。
 func (h *GenericHandler[M]) DoUpdate(ctx context.Context, fkField string, fkValue any, childrenData []map[string]any, parentVersioned bool) error {
-	// 注入 FK 到每条子数据
+	// 注入 FK 到每条子数据，同时将实体 PK 映射到 "id"（MapRequest.GetID 优先查 "id"）
+	pkField := h.PKField()
 	for i := range childrenData {
 		childrenData[i][fkField] = fkValue
+		if pkVal, ok := childrenData[i][pkField]; ok && pkVal != nil {
+			childrenData[i]["id"] = pkVal
+		}
 	}
 	_, err := h.updatePipeline(ctx, childrenData, parentVersioned)
 	return err
