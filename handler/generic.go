@@ -1234,7 +1234,7 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 
 	// HTTP 出口处执行 ResponseMapper（仅顶层 HTTP handler，管线/级联不参与）
 	result = h.applyResponseMapper(entityHolder, result)
-	Success(c, gin.H{"data": result})
+	Success(c, result)
 }
 
 // getPipeline 统一管线（HTTP 入口共享）。
@@ -1829,7 +1829,7 @@ func (h *GenericHandler[M]) EditVersion(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	Success(c, gin.H{"data": result})
+	Success(c, result)
 }
 
 // editVersionPipeline 统一管线。
