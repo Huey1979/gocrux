@@ -874,34 +874,44 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 // 注意：field__like 的值会自动在前后追加 %，除非已包含 %。
 // ============================================================
 func parseFilterKey(key string, rawValue any) (field string, op repository.FilterOp, value any) {
-	// 1. 查找后缀分隔符 __（双下划线）
-	idx := strings.LastIndex(key, "__")
-	if idx > 0 {
-		suffix := key[idx+2:]
+	// 1. 查找后缀分隔符 __（双下划线）或 _（单下划线）兼容前端习惯
+	parse := func(sep string) bool {
+		idx := strings.LastIndex(key, sep)
+		if idx <= 0 {
+			return false
+		}
+		suffix := key[idx+len(sep):]
 		field = key[:idx]
 		switch suffix {
+		case "eq":
+			op, value = repository.OpEQ, rawValue
 		case "like":
 			s := fmt.Sprintf("%v", rawValue)
 			if !strings.Contains(s, "%") {
 				s = "%" + s + "%"
 			}
-			return field, repository.OpLike, s
+			op, value = repository.OpLike, s
 		case "gt":
-			return field, repository.OpGT, rawValue
+			op, value = repository.OpGT, rawValue
 		case "gte":
-			return field, repository.OpGTE, rawValue
+			op, value = repository.OpGTE, rawValue
 		case "lt":
-			return field, repository.OpLT, rawValue
+			op, value = repository.OpLT, rawValue
 		case "lte":
-			return field, repository.OpLTE, rawValue
+			op, value = repository.OpLTE, rawValue
 		case "ne":
-			return field, repository.OpNEQ, rawValue
+			op, value = repository.OpNEQ, rawValue
 		case "in":
-			return field, repository.OpIn, parseCSVValue(rawValue)
+			op, value = repository.OpIn, parseCSVValue(rawValue)
 		case "between":
-			return field, repository.OpRange, parseCSVValue(rawValue)
+			op, value = repository.OpRange, parseCSVValue(rawValue)
+		default:
+			return false // 未知后缀 → 当作普通字段名的一部分
 		}
-		// 未知后缀 → 当作普通字段名的一部分
+		return true
+	}
+	if parse("__") || parse("_") {
+		return
 	}
 
 	// 2. 无后缀：自动推断 Op
