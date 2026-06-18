@@ -859,59 +859,89 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 // ============================================================
 // parseFilterKey — 解析 URL 查询参数键中的操作符后缀
 //
-// 支持的后缀（双下划线分隔，兼容字段名中的单下划线）：
+// 使用 `:` 分隔（MySQL 列名不含冒号，绝对安全）：
 //
 //	field           → (field, OpEQ / OpIn, value)     自动：切片=OpIn，否则=OpEQ
-//	field__like     → (field, OpLike, value)           LIKE，自动包裹 %value%
-//	field__gt       → (field, OpGT, value)
-//	field__gte      → (field, OpGTE, value)
-//	field__lt       → (field, OpLT, value)
-//	field__lte      → (field, OpLTE, value)
-//	field__ne       → (field, OpNEQ, value)
-//	field__in       → (field, OpIn, value)             逗号分隔字符串 → []any
-//	field__between  → (field, OpRange, value)          逗号分隔字符串 → []any{lo,hi}
+//	field:like      → (field, OpLike, value)           LIKE，自动包裹 %value%
+//	field:gt        → (field, OpGT, value)
+//	field:gte       → (field, OpGTE, value)
+//	field:lt        → (field, OpLT, value)
+//	field:lte       → (field, OpLTE, value)
+//	field:ne        → (field, OpNEQ, value)
+//	field:in        → (field, OpIn, value)             逗号分隔字符串 → []any
+//	field:between   → (field, OpRange, value)          逗号分隔字符串 → []any{lo,hi}
 //
-// 注意：field__like 的值会自动在前后追加 %，除非已包含 %。
+// 注意：field:like 的值会自动在前后追加 %，除非已包含 %。
 // ============================================================
 func parseFilterKey(key string, rawValue any) (field string, op repository.FilterOp, value any) {
-	// 1. 查找后缀分隔符 __（双下划线）或 _（单下划线）兼容前端习惯
-	parse := func(sep string) bool {
-		idx := strings.LastIndex(key, sep)
-		if idx <= 0 {
-			return false
+	// 查找 : 分隔的运算符后缀（如 form_code:like=xxx）。
+	// 使用 : 而非 _ 作为分隔符，避免与字段名中的下划线冲突。
+	// 兼容旧的 __ 后缀（后续移除）
+	parseLegacy := func() bool {
+		if idx := strings.LastIndex(key, "__"); idx > 0 {
+			field = key[:idx]
+			switch key[idx+2:] {
+			case "like", "gt", "gte", "lt", "lte", "ne", "in", "between":
+				return true // fall through to switch below
+			}
 		}
-		suffix := key[idx+len(sep):]
-		field = key[:idx]
+		return false
+	}
+	if parseLegacy() {
+		// 旧后缀已设置 field，下面 switch 会 set op + value
+		suffix := key[strings.LastIndex(key, "__")+2:]
 		switch suffix {
-		case "eq":
-			op, value = repository.OpEQ, rawValue
 		case "like":
 			s := fmt.Sprintf("%v", rawValue)
 			if !strings.Contains(s, "%") {
 				s = "%" + s + "%"
 			}
-			op, value = repository.OpLike, s
+			return field, repository.OpLike, s
 		case "gt":
-			op, value = repository.OpGT, rawValue
+			return field, repository.OpGT, rawValue
 		case "gte":
-			op, value = repository.OpGTE, rawValue
+			return field, repository.OpGTE, rawValue
 		case "lt":
-			op, value = repository.OpLT, rawValue
+			return field, repository.OpLT, rawValue
 		case "lte":
-			op, value = repository.OpLTE, rawValue
+			return field, repository.OpLTE, rawValue
 		case "ne":
-			op, value = repository.OpNEQ, rawValue
+			return field, repository.OpNEQ, rawValue
 		case "in":
-			op, value = repository.OpIn, parseCSVValue(rawValue)
+			return field, repository.OpIn, parseCSVValue(rawValue)
 		case "between":
-			op, value = repository.OpRange, parseCSVValue(rawValue)
-		default:
-			return false // 未知后缀 → 当作普通字段名的一部分
+			return field, repository.OpRange, parseCSVValue(rawValue)
 		}
-		return true
 	}
-	if parse("__") || parse("_") {
-		return
+
+	if idx := strings.LastIndex(key, ":"); idx > 0 {
+		suffix := key[idx+1:]
+		field = key[:idx]
+		switch suffix {
+		case "eq":
+			return field, repository.OpEQ, rawValue
+		case "like":
+			s := fmt.Sprintf("%v", rawValue)
+			if !strings.Contains(s, "%") {
+				s = "%" + s + "%"
+			}
+			return field, repository.OpLike, s
+		case "gt":
+			return field, repository.OpGT, rawValue
+		case "gte":
+			return field, repository.OpGTE, rawValue
+		case "lt":
+			return field, repository.OpLT, rawValue
+		case "lte":
+			return field, repository.OpLTE, rawValue
+		case "ne":
+			return field, repository.OpNEQ, rawValue
+		case "in":
+			return field, repository.OpIn, parseCSVValue(rawValue)
+		case "between":
+			return field, repository.OpRange, parseCSVValue(rawValue)
+		}
+		// 非已知运算符 → 整个 key 当作字段名
 	}
 
 	// 2. 无后缀：自动推断 Op
