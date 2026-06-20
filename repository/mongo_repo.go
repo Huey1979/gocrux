@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/internal/database/mongodb"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -45,6 +46,18 @@ func (r *MongoCRUDRepository[M]) SetColl(coll *mongo.Collection) *MongoCRUDRepos
 	return r
 }
 
+// collWithTx 返回事务安全的 Collection。
+// 若 ctx 中包含 mongo session → 使用 session 绑定集合；否则使用原始集合。
+func (r *MongoCRUDRepository[M]) collWithTx(ctx context.Context) *mongo.Collection {
+	if sess := common.GetMongoSession(ctx); sess != nil {
+		// 使用 session 绑定的 Database 获取 Collection
+		db := r.coll.Database()
+		sessDB := sess.Client().Database(db.Name())
+		return sessDB.Collection(r.coll.Name())
+	}
+	return r.coll
+}
+
 // SetPKField 显式设置主键列名。
 func (r *MongoCRUDRepository[M]) SetPKField(column string) *MongoCRUDRepository[M] {
 	r.pkField = column
@@ -59,7 +72,7 @@ func (r *MongoCRUDRepository[M]) PKField() string { return r.pkField }
 // Insert 插入单条记录。
 func (r *MongoCRUDRepository[M]) Insert(ctx context.Context, entity *M) error {
 	data := toBsonDoc(r, entity)
-	if _, err := r.coll.InsertOne(ctx, data); err != nil {
+	if _, err := r.collWithTx(ctx).InsertOne(ctx, data); err != nil {
 		return fmt.Errorf("MongoDB插入失败: %w", err)
 	}
 	return nil
@@ -71,7 +84,7 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M)
 	for i, e := range entities {
 		docs[i] = toBsonDoc(r, e)
 	}
-	if _, err := r.coll.InsertMany(ctx, docs); err != nil {
+	if _, err := r.collWithTx(ctx).InsertMany(ctx, docs); err != nil {
 		return fmt.Errorf("MongoDB批量插入失败: %w", err)
 	}
 	return nil
@@ -81,7 +94,7 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M)
 func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 	filter := bson.M{r.pkField: id}
 	var result M
-	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.collWithTx(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -94,7 +107,7 @@ func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error
 func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, value any) (*M, error) {
 	filter := bson.M{field: value}
 	var result M
-	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.collWithTx(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -106,7 +119,7 @@ func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, v
 // ExistsByField 检查是否存在。
 func (r *MongoCRUDRepository[M]) ExistsByField(ctx context.Context, field string, value any) (bool, error) {
 	filter := bson.M{field: value}
-	count, err := r.coll.CountDocuments(ctx, filter)
+	count, err := r.collWithTx(ctx).CountDocuments(ctx, filter)
 	if err != nil {
 		return false, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -123,7 +136,7 @@ func (r *MongoCRUDRepository[M]) Save(ctx context.Context, entity *M) error {
 	filter := bson.M{r.pkField: id}
 	update := bson.M{"$set": data}
 	opts := options.Update().SetUpsert(true)
-	if _, err := r.coll.UpdateOne(ctx, filter, update, opts); err != nil {
+	if _, err := r.collWithTx(ctx).UpdateOne(ctx, filter, update, opts); err != nil {
 		return fmt.Errorf("MongoDB保存失败: %w", err)
 	}
 	return nil
@@ -133,7 +146,7 @@ func (r *MongoCRUDRepository[M]) Save(ctx context.Context, entity *M) error {
 func (r *MongoCRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates map[string]any) error {
 	filter := bson.M{r.pkField: id}
 	update := bson.M{"$set": updates}
-	if _, err := r.coll.UpdateOne(ctx, filter, update); err != nil {
+	if _, err := r.collWithTx(ctx).UpdateOne(ctx, filter, update); err != nil {
 		return fmt.Errorf("MongoDB更新失败: %w", err)
 	}
 	return nil
@@ -142,7 +155,7 @@ func (r *MongoCRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates
 // Delete 按主键删除。
 func (r *MongoCRUDRepository[M]) Delete(ctx context.Context, id any) error {
 	filter := bson.M{r.pkField: id}
-	if _, err := r.coll.DeleteOne(ctx, filter); err != nil {
+	if _, err := r.collWithTx(ctx).DeleteOne(ctx, filter); err != nil {
 		return fmt.Errorf("MongoDB删除失败: %w", err)
 	}
 	return nil
@@ -151,7 +164,7 @@ func (r *MongoCRUDRepository[M]) Delete(ctx context.Context, id any) error {
 // DeleteByFK 按外键批量删除。
 func (r *MongoCRUDRepository[M]) DeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
 	filter := bson.M{fkField: bson.M{"$in": fkValues}}
-	if _, err := r.coll.DeleteMany(ctx, filter); err != nil {
+	if _, err := r.collWithTx(ctx).DeleteMany(ctx, filter); err != nil {
 		return fmt.Errorf("MongoDB批量删除失败: %w", err)
 	}
 	return nil
@@ -164,13 +177,13 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	if filter == nil {
 		filter = bson.M{}
 	}
-	total, err := r.coll.CountDocuments(ctx, filter)
+	total, err := r.collWithTx(ctx).CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
 	}
 	skip := int64((page - 1) * pageSize)
 	opts := options.Find().SetSkip(skip).SetLimit(int64(pageSize))
-	cursor, err := r.coll.Find(ctx, filter, opts)
+	cursor, err := r.collWithTx(ctx).Find(ctx, filter, opts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -184,7 +197,7 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 
 // ListAll 全量查询。
 func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{})
+	cursor, err := r.collWithTx(ctx).Find(ctx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -198,7 +211,7 @@ func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
 
 // ListByField 按字段查询全量。
 func (r *MongoCRUDRepository[M]) ListByField(ctx context.Context, field string, value any) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{field: value})
+	cursor, err := r.collWithTx(ctx).Find(ctx, bson.M{field: value})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
