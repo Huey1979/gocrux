@@ -72,7 +72,7 @@ func (r *MongoCRUDRepository[M]) PKField() string { return r.pkField }
 // Insert 插入单条记录。
 func (r *MongoCRUDRepository[M]) Insert(ctx context.Context, entity *M) error {
 	data := toBsonDoc(r, entity)
-	if _, err := r.collWithTx(ctx).InsertOne(ctx, data); err != nil {
+	if _, err := r.coll.InsertOne(ctx, data); err != nil {
 		return fmt.Errorf("MongoDB插入失败: %w", err)
 	}
 	return nil
@@ -84,7 +84,7 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M)
 	for i, e := range entities {
 		docs[i] = toBsonDoc(r, e)
 	}
-	if _, err := r.collWithTx(ctx).InsertMany(ctx, docs); err != nil {
+	if _, err := r.coll.InsertMany(ctx, docs); err != nil {
 		return fmt.Errorf("MongoDB批量插入失败: %w", err)
 	}
 	return nil
@@ -94,7 +94,7 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M)
 func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 	filter := bson.M{r.pkField: id}
 	var result M
-	if err := r.collWithTx(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -107,7 +107,7 @@ func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error
 func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, value any) (*M, error) {
 	filter := bson.M{field: value}
 	var result M
-	if err := r.collWithTx(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -119,7 +119,7 @@ func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, v
 // ExistsByField 检查是否存在。
 func (r *MongoCRUDRepository[M]) ExistsByField(ctx context.Context, field string, value any) (bool, error) {
 	filter := bson.M{field: value}
-	count, err := r.collWithTx(ctx).CountDocuments(ctx, filter)
+	count, err := r.coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return false, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -136,7 +136,7 @@ func (r *MongoCRUDRepository[M]) Save(ctx context.Context, entity *M) error {
 	filter := bson.M{r.pkField: id}
 	update := bson.M{"$set": data}
 	opts := options.Update().SetUpsert(true)
-	if _, err := r.collWithTx(ctx).UpdateOne(ctx, filter, update, opts); err != nil {
+	if _, err := r.coll.UpdateOne(ctx, filter, update, opts); err != nil {
 		return fmt.Errorf("MongoDB保存失败: %w", err)
 	}
 	return nil
@@ -146,7 +146,7 @@ func (r *MongoCRUDRepository[M]) Save(ctx context.Context, entity *M) error {
 func (r *MongoCRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates map[string]any) error {
 	filter := bson.M{r.pkField: id}
 	update := bson.M{"$set": updates}
-	if _, err := r.collWithTx(ctx).UpdateOne(ctx, filter, update); err != nil {
+	if _, err := r.coll.UpdateOne(ctx, filter, update); err != nil {
 		return fmt.Errorf("MongoDB更新失败: %w", err)
 	}
 	return nil
@@ -155,7 +155,7 @@ func (r *MongoCRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates
 // Delete 按主键删除。
 func (r *MongoCRUDRepository[M]) Delete(ctx context.Context, id any) error {
 	filter := bson.M{r.pkField: id}
-	if _, err := r.collWithTx(ctx).DeleteOne(ctx, filter); err != nil {
+	if _, err := r.coll.DeleteOne(ctx, filter); err != nil {
 		return fmt.Errorf("MongoDB删除失败: %w", err)
 	}
 	return nil
@@ -164,7 +164,7 @@ func (r *MongoCRUDRepository[M]) Delete(ctx context.Context, id any) error {
 // DeleteByFK 按外键批量删除。
 func (r *MongoCRUDRepository[M]) DeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
 	filter := bson.M{fkField: bson.M{"$in": fkValues}}
-	if _, err := r.collWithTx(ctx).DeleteMany(ctx, filter); err != nil {
+	if _, err := r.coll.DeleteMany(ctx, filter); err != nil {
 		return fmt.Errorf("MongoDB批量删除失败: %w", err)
 	}
 	return nil
@@ -177,13 +177,13 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	if filter == nil {
 		filter = bson.M{}
 	}
-	total, err := r.collWithTx(ctx).CountDocuments(ctx, filter)
+	total, err := r.coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
 	}
 	skip := int64((page - 1) * pageSize)
 	opts := options.Find().SetSkip(skip).SetLimit(int64(pageSize))
-	cursor, err := r.collWithTx(ctx).Find(ctx, filter, opts)
+	cursor, err := r.coll.Find(ctx, filter, opts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -197,7 +197,7 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 
 // ListAll 全量查询。
 func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
-	cursor, err := r.collWithTx(ctx).Find(ctx, bson.M{})
+	cursor, err := r.coll.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -211,7 +211,7 @@ func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
 
 // ListByField 按字段查询全量。
 func (r *MongoCRUDRepository[M]) ListByField(ctx context.Context, field string, value any) ([]M, error) {
-	cursor, err := r.collWithTx(ctx).Find(ctx, bson.M{field: value})
+	cursor, err := r.coll.Find(ctx, bson.M{field: value})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -221,6 +221,120 @@ func (r *MongoCRUDRepository[M]) ListByField(ctx context.Context, field string, 
 		return nil, fmt.Errorf("MongoDB读取失败: %w", err)
 	}
 	return results, nil
+}
+
+// ---------- Repo[M] 接口 — Batch / Filters / Tx ----------
+
+// RunInTx MongoDB 事务包装。
+func (r *MongoCRUDRepository[M]) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	sess, err := r.coll.Database().Client().StartSession()
+	if err != nil {
+		return err
+	}
+	defer sess.EndSession(ctx)
+
+	_, err = sess.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
+		return nil, fn(sc)
+	})
+	return err
+}
+
+// ListByFilters 结构化过滤查询（将 Filter 转换为 bson）。
+func (r *MongoCRUDRepository[M]) ListByFilters(ctx context.Context, filters ListFilters) ([]M, int64, error) {
+	f := toBsonFilter(filters)
+	return r.List(ctx, f, filters.Page, filters.PageSize)
+}
+
+// BatchSoftDelete 批量软删除。
+func (r *MongoCRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
+	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	return err
+}
+
+// BatchSoftDeleteByFK 按外键批量软删除。
+func (r *MongoCRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
+	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	return err
+}
+
+// BatchFindByPK 批量按主键查询。
+func (r *MongoCRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) ([]M, error) {
+	cursor, err := r.coll.Find(ctx, bson.M{r.pkField: bson.M{"$in": ids}})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var results []M
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// BatchFindByFK 批量按外键查询。
+func (r *MongoCRUDRepository[M]) BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error) {
+	cursor, err := r.coll.Find(ctx, bson.M{fkField: bson.M{"$in": fkValues}})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var results []M
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// BatchHardDelete 批量硬删除。
+func (r *MongoCRUDRepository[M]) BatchHardDelete(ctx context.Context, ids []any) error {
+	_, err := r.coll.DeleteMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}})
+	return err
+}
+
+// BatchHardDeleteByFK 按外键批量硬删除。
+func (r *MongoCRUDRepository[M]) BatchHardDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
+	_, err := r.coll.DeleteMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}})
+	return err
+}
+
+// toBsonFilter 将 ListFilters 转为 MongoDB bson 查询。
+func toBsonFilter(f ListFilters) bson.M {
+	if len(f.Filters) == 0 {
+		return bson.M{}
+	}
+	if len(f.Filters) == 1 {
+		return filterToBson(f.Filters[0])
+	}
+	and := make([]bson.M, len(f.Filters))
+	for i, ft := range f.Filters {
+		and[i] = filterToBson(ft)
+	}
+	return bson.M{"$and": and}
+}
+
+func filterToBson(f Filter) bson.M {
+	switch f.Op {
+	case OpEQ:
+		return bson.M{f.Field: f.Value}
+	case OpNEQ:
+		return bson.M{f.Field: bson.M{"$ne": f.Value}}
+	case OpLike:
+		return bson.M{f.Field: bson.M{"$regex": f.Value, "$options": "i"}}
+	case OpGT:
+		return bson.M{f.Field: bson.M{"$gt": f.Value}}
+	case OpGTE:
+		return bson.M{f.Field: bson.M{"$gte": f.Value}}
+	case OpLT:
+		return bson.M{f.Field: bson.M{"$lt": f.Value}}
+	case OpLTE:
+		return bson.M{f.Field: bson.M{"$lte": f.Value}}
+	case OpIn:
+		return bson.M{f.Field: bson.M{"$in": f.Value}}
+	case OpRange:
+		return bson.M{f.Field: bson.M{"$gte": f.Value, "$lte": f.Value}}
+	default:
+		return bson.M{f.Field: f.Value}
+	}
 }
 
 // ---------- 辅助 ----------

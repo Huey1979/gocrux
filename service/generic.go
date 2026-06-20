@@ -163,7 +163,7 @@ type editVersionCtx[M Record] struct {
 
 type GenericService[M Record] struct {
 	hooks     Hooks[M]
-	repo      *repository.CRUDRepository[M]
+	repo      repository.Repo[M]
 	config    Config[M]
 	opLogRepo *repository.CRUDRepository[entity.SysOperationLog]
 	bakWriter BackupWriteFunc      // 备份日志写入器（非版本化 Update 写旧数据到文件）
@@ -173,8 +173,16 @@ type GenericService[M Record] struct {
 // BackupWriteFunc 备份日志写入函数签名
 type BackupWriteFunc func(ctx context.Context, tableName string, recordID any, operation string, oldData any, requestID string) error
 
-// NewGenericService 创建服务实例
+// NewGenericService 创建服务实例（向后兼容，接受 *CRUDRepository[M]）。
 func NewGenericService[M Record](repo *repository.CRUDRepository[M], cfg Config[M]) *GenericService[M] {
+	return &GenericService[M]{
+		repo:   repo,
+		config: cfg,
+	}
+}
+
+// NewGenericServiceWithRepo 使用任意 Repo[M] 实现创建服务（用于 MongoDB 等）。
+func NewGenericServiceWithRepo[M Record](repo repository.Repo[M], cfg Config[M]) *GenericService[M] {
 	return &GenericService[M]{
 		repo:   repo,
 		config: cfg,
@@ -208,8 +216,16 @@ func (s *GenericService[M]) SetIdemStore(store *IdempotencyStore[M]) {
 }
 
 // Repo 暴露数据访问层给子 Service 和钩子使用
-func (s *GenericService[M]) Repo() *repository.CRUDRepository[M] {
+func (s *GenericService[M]) Repo() repository.Repo[M] {
 	return s.repo
+}
+
+// CRUDRepo 返回 MySQL CRUDRepository（仅当 repo 是 MySQL 时有效，否则 nil）。
+func (s *GenericService[M]) CRUDRepo() *repository.CRUDRepository[M] {
+	if cr, ok := s.repo.(*repository.CRUDRepository[M]); ok {
+		return cr
+	}
+	return nil
 }
 
 // SupportsVersion 返回当前 Service 是否启用了版本管理（VersionMode）。

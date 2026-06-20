@@ -504,6 +504,65 @@ func (r *CRUDRepository[M]) Transaction(ctx context.Context, fn func(tx *gorm.DB
 	return r.DB(ctx).Transaction(fn)
 }
 
+// ListByField 实现 Repo[M] 接口（委托 ListAllByField）。
+func (r *CRUDRepository[M]) ListByField(ctx context.Context, field string, value any) ([]M, error) {
+	return r.ListAllByField(ctx, field, value)
+}
+
+// RunInTx 实现 Repo[M] 接口。GORM 事务包装。
+func (r *CRUDRepository[M]) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	return r.DB(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(common.WithTx(ctx, tx))
+	})
+}
+
+// ============================================================
+// Batch — Repo[M] 接口方法（抽象 GORM DB() 调用）
+// ============================================================
+
+// BatchSoftDelete 批量软删除（按主键 IN）。
+func (r *CRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
+	return r.DB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).Update("is_deleted", int8(1)).Error
+}
+
+// BatchSoftDeleteByFK 批量软删除（按外键 IN）。
+func (r *CRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
+	return r.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Update("is_deleted", int8(1)).Error
+}
+
+// BatchFindByPK 批量按主键查询。
+func (r *CRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) ([]M, error) {
+	var records []M
+	if err := r.DB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// BatchFindByFK 批量按外键查询。
+func (r *CRUDRepository[M]) BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error) {
+	var records []M
+	if err := r.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// BatchHardDelete 批量硬删除（按主键 IN）。
+func (r *CRUDRepository[M]) BatchHardDelete(ctx context.Context, ids []any) error {
+	return r.DB(ctx).Unscoped().Where(r.pkField+" IN ?", ids).Delete(new(M)).Error
+}
+
+// BatchHardDeleteByFK 批量硬删除（按外键 IN）。
+func (r *CRUDRepository[M]) BatchHardDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
+	return r.DB(ctx).Unscoped().Where(fkField+" IN ?", fkValues).Delete(new(M)).Error
+}
+
+// DeleteByFK 按外键批量删除（Repo 接口方法别名）。
+func (r *CRUDRepository[M]) DeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
+	return r.BatchHardDeleteByFK(ctx, fkField, fkValues)
+}
+
 // ============================================================
 // 内部工具
 // ============================================================

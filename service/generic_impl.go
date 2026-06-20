@@ -539,7 +539,8 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 			return nil, errs.ErrVersionFieldsNotSet
 		}
 
-		err := s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+		cr := s.CRUDRepo()
+		err := cr.Transaction(ctx, func(tx *gorm.DB) error {
 			// 旧行退位
 			common.SetFieldValue(pair.Old, vf.CurrentField, int8(0))
 
@@ -703,21 +704,17 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	// 判断实体是否支持软删除
 	m := newRecord[M]()
 	if m.SetDelete() {
-		// 软删除：批量标记 is_deleted=1
-		return s.repo.DB(ctx).Model(new(M)).Where(s.repo.PKField()+" IN ?", ids).Update("is_deleted", int8(1)).Error
+		return s.repo.BatchSoftDelete(ctx, ids)
 	}
 
 	// 物理删除：先备份数据，再硬删除
 	if s.config.EnableOpLog && s.bakWriter != nil {
-		var records []M
-		if err := s.repo.DB(ctx).Model(new(M)).Where(s.repo.PKField()+" IN ?", ids).Find(&records).Error; err != nil {
-			return err
-		}
+		records, _ := s.repo.BatchFindByPK(ctx, ids)
 		for i := range records {
 			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete", &records[i], GetRequestID(ctx))
 		}
 	}
-	return s.repo.DB(ctx).Unscoped().Where(s.repo.PKField()+" IN ?", ids).Delete(new(M)).Error
+	return s.repo.BatchHardDelete(ctx, ids)
 }
 
 // DeleteByFK 按外键字段批量软删除记录（供级联删除使用）。
@@ -730,21 +727,17 @@ func (s *GenericService[M]) DeleteByFK(ctx context.Context, fkField string, fkVa
 
 	m := newRecord[M]()
 	if m.SetDelete() {
-		// 软删除
-		return s.repo.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Update("is_deleted", int8(1)).Error
+		return s.repo.BatchSoftDeleteByFK(ctx, fkField, fkValues)
 	}
 
 	// 物理删除：先备份数据
 	if s.config.EnableOpLog && s.bakWriter != nil {
-		var records []M
-		if err := s.repo.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Find(&records).Error; err != nil {
-			return err
-		}
+		records, _ := s.repo.BatchFindByFK(ctx, fkField, fkValues)
 		for i := range records {
 			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete_by_fk", &records[i], GetRequestID(ctx))
 		}
 	}
-	return s.repo.DB(ctx).Unscoped().Where(fkField+" IN ?", fkValues).Delete(new(M)).Error
+	return s.repo.BatchHardDeleteByFK(ctx, fkField, fkValues)
 }
 
 func (s *GenericService[M]) _afterDelete(ctx context.Context, id, data any) error {
@@ -837,7 +830,11 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 
 	default:
 		// 无过滤条件，不分页返回全部
-		return s.repo.List(ctx, nil, 1, 0)
+			all, err := s.repo.ListAll(ctx)
+			if err != nil {
+				return nil, 0, err
+			}
+			return all, int64(len(all)), nil
 	}
 
 	// keyword 关键字搜索：多字段 OR LIKE 匹配
@@ -1028,7 +1025,8 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	now := time.Now()
 	userULID := GetUserULID(ctx)
 
-	return s.repo.Transaction(ctx, func(tx *gorm.DB) error {
+	cr := s.CRUDRepo()
+	return cr.Transaction(ctx, func(tx *gorm.DB) error {
 		// 同 code 所有行退位
 		if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
 			Update(currentCol, int8(0)).Error; err != nil {
