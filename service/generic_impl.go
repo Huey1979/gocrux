@@ -775,23 +775,35 @@ func (s *GenericService[M]) _doGet(ctx context.Context, id any) (*M, error) {
 }
 func (s *GenericService[M]) _afterGet(ctx context.Context, result *M) (*M, error) { return result, nil }
 
-// _doGetByCode 按业务编码查正式发布版本。
-// 版本化模式：CodeField = code AND StatusField = 'published'。
-// 非版本化模式：退化为 code 字段等值查询（repo.GetByField）。
+// _doGetByCode 按业务编码查当前生效版本。
+// 版本化模式：CodeField = code AND CurrentField = 1（is_current=true，不论是否 published）。
+// 非版本化模式：退化为 CodeField 字段等值查询（repo.GetByField）。
 func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, error) {
 	if !s.config.VersionMode || s.config.VersionFields == nil {
-		// 非版本化模式：退化为 code 字段等值查询
-		return s.repo.GetByField(ctx, "code", code)
+		// 非版本化模式：使用 VersionFields.CodeField，不再硬编码 "code"
+		codeField := "code"
+		if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+			codeField = resolveColumn[M](s.config.VersionFields.CodeField)
+		}
+		result, err := s.repo.GetByField(ctx, codeField, code)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return nil, errs.ErrRecordNotFound
+		}
+		return result, nil
 	}
 
 	vf := s.config.VersionFields
 	codeCol := resolveColumn[M](vf.CodeField)
-	statusCol := resolveColumn[M](vf.StatusField)
+	currentCol := resolveColumn[M](vf.CurrentField)
 
+	// 查当前生效版本（is_current=1），不论是否 published
 	results, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
 		Filters: []repository.Filter{
 			{Field: codeCol, Op: repository.OpEQ, Value: code},
-			{Field: statusCol, Op: repository.OpEQ, Value: string(VersionStatusPublished)},
+			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
 		},
 		Page:     1,
 		PageSize: 1,
