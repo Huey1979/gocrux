@@ -784,8 +784,8 @@ func TestHasCascadesOnCreate(t *testing.T) {
 			h := &GenericHandler[testParent]{
 				config: HandlerConfig[testParent]{Cascades: tt.cascades},
 			}
-			if got := h.hasCascadesOnCreate(); got != tt.want {
-				t.Fatalf("hasCascadesOnCreate() = %v, want %v", got, tt.want)
+			if got := h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnCreate }); got != tt.want {
+				t.Fatalf("hasCascadeFlag(func(r CascadeRelation) bool { return r.OnCreate }) = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1318,8 +1318,8 @@ func TestHasCascadesOnDelete(t *testing.T) {
 			h := &GenericHandler[testParent]{
 				config: HandlerConfig[testParent]{Cascades: tt.cascades},
 			}
-			if got := h.hasCascadesOnDelete(); got != tt.want {
-				t.Fatalf("hasCascadesOnDelete() = %v, want %v", got, tt.want)
+			if got := h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnDelete }); got != tt.want {
+				t.Fatalf("hasCascadeFlag(func(r CascadeRelation) bool { return r.OnDelete }) = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1344,8 +1344,8 @@ func TestHasCascadesOnUpdate(t *testing.T) {
 			h := &GenericHandler[testParent]{
 				config: HandlerConfig[testParent]{Cascades: tt.cascades},
 			}
-			if got := h.hasCascadesOnUpdate(); got != tt.want {
-				t.Fatalf("hasCascadesOnUpdate() = %v, want %v", got, tt.want)
+			if got := h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }); got != tt.want {
+				t.Fatalf("hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }) = %v, want %v", got, tt.want)
 			}
 		})
 	}

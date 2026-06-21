@@ -31,7 +31,7 @@ func (h *GenericHandler[M]) _beforeCreate(_ context.Context, input []service.Cru
 func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudRequest[M]) ([]*M, error) {
 	// 若配置了级联创建且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内编排父实体创建 + 子实体级联创建。
-	if h.hasCascadesOnCreate() && h.txCoord != nil && h.handlerReg != nil {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnCreate }) && h.txCoord != nil && h.handlerReg != nil {
 		var results []*M
 		rawMaps, _ := ctx.Value(rawCreateMapsKey{}).([]map[string]any)
 
@@ -102,7 +102,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 
 	// 若配置了级联更新且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内：逐条更新/创建父实体 → 委托子 Handler 的 DoUpdate 处理子记录。
-	if h.hasCascadesOnUpdate() && h.txCoord != nil && h.handlerReg != nil {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }) && h.txCoord != nil && h.handlerReg != nil {
 		rawMaps, _ := ctx.Value(rawUpdateMapsKey{}).([]map[string]any)
 		isVersioned := h.svc.IsVersionMode()
 
@@ -237,7 +237,7 @@ func (h *GenericHandler[M]) _beforeDelete(_ context.Context, ids, codes any) (an
 func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error {
 	// 若配置了级联删除且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内先删子记录再删父实体。
-	if h.hasCascadesOnDelete() && h.txCoord != nil && h.handlerReg != nil {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnDelete }) && h.txCoord != nil && h.handlerReg != nil {
 		idList, ok := ids.([]any)
 		if !ok || len(idList) == 0 {
 			return h.svc.Delete(ctx, ids, codes)
@@ -245,17 +245,13 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 
 		return h.txCoord.Run(ctx, func(txCtx context.Context) error {
 			// 1. 按 FK 级联删除子记录（先子后父，避免 FK 约束冲突）
-			for _, rel := range h.config.Cascades {
-				if !rel.OnDelete {
-					continue
-				}
-				childHandler := h.handlerReg.Get(rel.HandlerName)
-				if childHandler == nil {
-					continue
-				}
-				if err := childHandler.DoDeleteByFK(txCtx, rel.FKField, idList); err != nil {
-					return errs.ErrCascadeDelete(rel.HandlerName, err)
-				}
+			if err := h.forEachCascade(
+				func(r CascadeRelation) bool { return r.OnDelete },
+				func(rel CascadeRelation, child CascadeHandler) error {
+					return errs.ErrCascadeDelete(rel.HandlerName, child.DoDeleteByFK(txCtx, rel.FKField, idList))
+				},
+			); err != nil {
+				return err
 			}
 			// 2. 删除父实体
 			return h.svc.Delete(txCtx, ids, codes)
@@ -552,23 +548,20 @@ func (h *GenericHandler[M]) _doActivate(ctx context.Context, id any) error {
 	// 2. Cascade: 级联激活子记录
 	//    父激活 → 查子记录（DoList）→ 逐个调用子 Handler 的 DoActivate
 	//    非版本化 Handler 自身空操作，但级联继续向下穿透
-	if h.hasCascadesOnActivate() && h.txCoord != nil && h.handlerReg != nil {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnActivate }) && h.txCoord != nil && h.handlerReg != nil {
 		return h.txCoord.Run(ctx, func(txCtx context.Context) error {
-			for _, rel := range h.config.Cascades {
-				if !rel.OnActivate {
-					continue
-				}
-				childHandler := h.handlerReg.Get(rel.HandlerName)
-				if childHandler == nil {
-					continue
-				}
-
-				if err := forEachCascadeChild(txCtx, childHandler, rel.FKField, id,
-				func(txCtx context.Context, child map[string]any, childPK any) error {
-					return childHandler.DoActivate(txCtx, childPK)
-				}); err != nil {
-						return errs.ErrCascadeActivate(rel.HandlerName, err)
-				}
+			if err := h.forEachCascade(
+				func(r CascadeRelation) bool { return r.OnActivate },
+				func(rel CascadeRelation, ch CascadeHandler) error {
+					return errs.ErrCascadeActivate(rel.HandlerName,
+						forEachCascadeChild(txCtx, ch, rel.FKField, id,
+						func(txCtx context.Context, child map[string]any, childPK any) error {
+							return ch.DoActivate(txCtx, childPK)
+						}),
+					)
+				},
+			); err != nil {
+				return err
 			}
 			return nil
 		})
@@ -616,24 +609,20 @@ func (h *GenericHandler[M]) _doEditVersion(ctx context.Context, id any, patches 
 	}
 
 	// 2. Cascade: 级联编辑子记录的版本元数据
-	if h.hasCascadesOnEditVersion() && h.txCoord != nil && h.handlerReg != nil {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnEditVersion }) && h.txCoord != nil && h.handlerReg != nil {
 		err = h.txCoord.Run(ctx, func(txCtx context.Context) error {
-			for _, rel := range h.config.Cascades {
-				if !rel.OnEditVersion {
-					continue
-				}
-				childHandler := h.handlerReg.Get(rel.HandlerName)
-				if childHandler == nil {
-					continue
-				}
-
-				if err := forEachCascadeChild(txCtx, childHandler, rel.FKField, id,
+			if err := h.forEachCascade(
+				func(r CascadeRelation) bool { return r.OnEditVersion },
+				func(rel CascadeRelation, ch CascadeHandler) error {
+					return errs.ErrCascadeEditVer(rel.HandlerName,
+						forEachCascadeChild(txCtx, ch, rel.FKField, id,
 				func(txCtx context.Context, child map[string]any, childPK any) error {
-					_, err := childHandler.DoEditVersion(txCtx, childPK, patches)
+					_, err := ch.DoEditVersion(txCtx, childPK, patches)
 					return err
-				}); err != nil {
-						return errs.ErrCascadeEditVer(rel.HandlerName, err)
-				}
+				}),
+				)},
+			); err != nil {
+				return err
 			}
 			return nil
 		})
@@ -719,6 +708,36 @@ func (h *GenericHandler[M]) expandCascadesBatch(ctx context.Context, childCtx co
 			}
 		}
 	}
+}
+
+// ============================================================
+// forEachCascade — 级联迭代器
+//
+// 遍历 CascadeRelation 列表，按 onFlag 过滤 → 查 childHandler → 执行回调。
+// 消除 _doCreate/_doUpdate/_doDelete/_doActivate/_doEditVersion 中的重复循环。
+// ============================================================
+
+// forEachCascade 迭代匹配 onFlag 的级联关系，查 handler 后回调 fn。遇错即返回。
+func (h *GenericHandler[M]) forEachCascade(
+	onFlag func(CascadeRelation) bool,
+	fn func(rel CascadeRelation, child CascadeHandler) error,
+) error {
+	if h.handlerReg == nil {
+		return nil
+	}
+	for _, rel := range h.config.Cascades {
+		if !onFlag(rel) {
+			continue
+		}
+		child := h.handlerReg.Get(rel.HandlerName)
+		if child == nil {
+			continue
+		}
+		if err := fn(rel, child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // forEachCascadeChild 查询级联子记录并逐个执行回调。

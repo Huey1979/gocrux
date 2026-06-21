@@ -705,48 +705,13 @@ func toAnySlice(v any) []any {
 }
 
 // ============================================================
-// 6. 级联检查 helper（hasCascadesOnXxx）
+// 6. 级联检查 helper
 // ============================================================
 
-func (h *GenericHandler[M]) hasCascadesOnCreate() bool {
+// hasCascadeFlag 检查是否存在满足 check 条件的级联关系。
+func (h *GenericHandler[M]) hasCascadeFlag(check func(CascadeRelation) bool) bool {
 	for _, rel := range h.config.Cascades {
-		if rel.OnCreate {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *GenericHandler[M]) hasCascadesOnDelete() bool {
-	for _, rel := range h.config.Cascades {
-		if rel.OnDelete {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *GenericHandler[M]) hasCascadesOnUpdate() bool {
-	for _, rel := range h.config.Cascades {
-		if rel.OnUpdate {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *GenericHandler[M]) hasCascadesOnActivate() bool {
-	for _, rel := range h.config.Cascades {
-		if rel.OnActivate {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *GenericHandler[M]) hasCascadesOnEditVersion() bool {
-	for _, rel := range h.config.Cascades {
-		if rel.OnEditVersion {
+		if check(rel) {
 			return true
 		}
 	}
@@ -1035,7 +1000,7 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 	}
 
 	// 若配置了级联更新，将原始 maps 注入 ctx，供 _doUpdate 提取子数据
-	if h.hasCascadesOnUpdate() {
+	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }) {
 		ctx = context.WithValue(ctx, rawUpdateMapsKey{}, rawReqs)
 	}
 

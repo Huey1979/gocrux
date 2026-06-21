@@ -804,6 +804,7 @@ func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, 
 		Filters: []repository.Filter{
 			{Field: codeCol, Op: repository.OpEQ, Value: code},
 			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
+				{Field: "is_deleted", Op: repository.OpEQ, Value: int8(0)},
 		},
 		Page:     1,
 		PageSize: 1,
