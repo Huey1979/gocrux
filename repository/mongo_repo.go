@@ -33,8 +33,10 @@ type MongoCRUDRepository[M any] struct {
 // collectionName: MongoDB 集合名。
 func NewMongoCRUDRepository[M any](collectionName string) *MongoCRUDRepository[M] {
 	r := &MongoCRUDRepository[M]{
-		coll:    mongodb.Database.Collection(collectionName),
 		pkField: "_id",
+	}
+	if mongodb.Database != nil {
+		r.coll = mongodb.Database.Collection(collectionName)
 	}
 	r.detectPK()
 	return r
@@ -364,7 +366,7 @@ func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 // extractPKVal 从 struct 提取主键值。
 func extractPKVal(entity any, pkField string) any {
 	v := reflect.ValueOf(entity)
-	if v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
