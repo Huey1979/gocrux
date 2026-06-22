@@ -342,7 +342,7 @@ func filterToBson(f Filter) bson.M {
 // toBsonDoc 将 struct 转为 bson.D（BSON 文档）。
 func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 	v := reflect.ValueOf(entity)
-	if v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
 	t := v.Type()
