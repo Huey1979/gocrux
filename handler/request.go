@@ -122,6 +122,9 @@ func mergeByJSON[M any](m map[string]any, target *M) error {
 	if err := json.Unmarshal(current, &currentMap); err != nil {
 		return err
 	}
+	if currentMap == nil {
+		currentMap = make(map[string]any)
+	}
 
 	// 3. 用请求 map 覆盖
 	for k, v := range m {
