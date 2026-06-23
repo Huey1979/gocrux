@@ -120,15 +120,13 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	}
 
 	// 默认过滤：版本化 → isCurrent=true；非版本化 → isDeleted=0
-	// 注：MongoDB 使用 camelCase（bson tag），MySQL 使用 snake_case（gorm column）
-	// resolveColumn 返回 gorm column，此处直接用 bson field name
 	if s.config.VersionMode && s.config.VersionFields != nil {
 		f.Filters = append(f.Filters, repository.Filter{
-			Field: "isCurrent", Op: repository.OpEQ, Value: true,
+			Field: resolveColumn[M](s.config.VersionFields.CurrentField), Op: repository.OpEQ, Value: 1,
 		})
 	} else {
 		f.Filters = append(f.Filters, repository.Filter{
-			Field: "isDeleted", Op: repository.OpEQ, Value: int8(0),
+			Field: "is_deleted", Op: repository.OpEQ, Value: int8(0),
 		})
 	}
 
