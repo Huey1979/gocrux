@@ -139,6 +139,10 @@ type Config[M Record] struct {
 
 	// UniqueFields 需要唯一性检查的字段列表，注意联合唯一索引（如 [["mobile"],["dept_id", "role_id"]]表示mobile要唯一，dept_id+role_id也要唯一）。
 	// 仅在 EnableUniqueValidation == true 时生效。
+	DeletedField string
+
+	DeletedValue any
+
 	UniqueFields [][]string
 }
 
