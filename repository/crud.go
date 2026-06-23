@@ -596,6 +596,18 @@ func (r *CRUDRepository[M]) detectPK() {
 	}
 }
 
+// BatchDeprecateVersions 版本化批量废弃（GORM）。
+func (r *CRUDRepository[M]) BatchDeprecateVersions(ctx context.Context, ids []any) error {
+	return r.DB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).
+		Updates(map[string]any{"is_current": 0, "version_status": "deprecated"}).Error
+}
+
+// BatchDeprecateVersionsByFK 版本化按外键批量废弃（GORM）。
+func (r *CRUDRepository[M]) BatchDeprecateVersionsByFK(ctx context.Context, fkField string, fkValues []any) error {
+	return r.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).
+		Updates(map[string]any{"is_current": 0, "version_status": "deprecated"}).Error
+}
+
 // matchPKTag 检查 GORM 标签是否包含 primaryKey
 func matchPKTag(tag string) bool {
 	// 简化分析：遍历 ; 分隔的片段

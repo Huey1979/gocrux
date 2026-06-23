@@ -701,10 +701,14 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 		return errs.ErrDeleteDataInvalid
 	}
 
-	// 判断实体是否支持软删除
+	// 版本化：废弃当前版本
+	if s.config.VersionMode && s.config.VersionFields != nil {
+		return s.repo.BatchDeprecateVersions(ctx, ids)
+	}
+	// 非版本化：软删除或物理删
 	m := newRecord[M]()
 	if m.SetDelete() {
-		return s.repo.BatchSoftDelete(ctx, ids)
+		return s.repo.BatchSoftDelete(ctx, ids) // 设置 isDeleted=1
 	}
 
 	// 物理删除：先备份数据，再硬删除
@@ -804,7 +808,7 @@ func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, 
 		Filters: []repository.Filter{
 			{Field: codeCol, Op: repository.OpEQ, Value: code},
 			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
-				{Field: "is_deleted", Op: repository.OpEQ, Value: int8(0)},
+			{Field: "is_deleted", Op: repository.OpEQ, Value: int8(0)},
 		},
 		Page:     1,
 		PageSize: 1,
@@ -843,11 +847,11 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 
 	default:
 		// 无过滤条件，不分页返回全部
-			all, err := s.repo.ListAll(ctx)
-			if err != nil {
-				return nil, 0, err
-			}
-			return all, int64(len(all)), nil
+		all, err := s.repo.ListAll(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		return all, int64(len(all)), nil
 	}
 
 	// keyword 关键字搜索：多字段 OR LIKE 匹配

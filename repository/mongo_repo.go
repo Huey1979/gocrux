@@ -42,6 +42,21 @@ func NewMongoCRUDRepository[M any](collectionName string) *MongoCRUDRepository[M
 	return r
 }
 
+// BatchDeprecateVersions 版本化批量废弃：将当前版本标记为非当前（isCurrent=false, versionStatus=deprecated）。
+// 供 Service._doDelete 在 VersionMode=true 时调用。
+func (r *MongoCRUDRepository[M]) BatchDeprecateVersions(ctx context.Context, ids []any) error {
+	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}},
+		bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	return err
+}
+
+// BatchDeprecateVersionsByFK 版本化按外键批量废弃：级联删除子记录时使用。
+func (r *MongoCRUDRepository[M]) BatchDeprecateVersionsByFK(ctx context.Context, fkField string, fkValues []any) error {
+	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}},
+		bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	return err
+}
+
 // SetColl 注入自定义 Collection（测试用）。
 func (r *MongoCRUDRepository[M]) SetColl(coll *mongo.Collection) *MongoCRUDRepository[M] {
 	r.coll = coll
@@ -257,13 +272,13 @@ func (r *MongoCRUDRepository[M]) ListByFilters(ctx context.Context, filters List
 
 // BatchSoftDelete 批量软删除。
 func (r *MongoCRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"isDeleted": int8(1)}})
 	return err
 }
 
 // BatchSoftDeleteByFK 按外键批量软删除。
 func (r *MongoCRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"isDeleted": int8(1)}})
 	return err
 }
 

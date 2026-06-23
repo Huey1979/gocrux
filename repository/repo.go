@@ -27,6 +27,8 @@ type Repo[M any] interface {
 	BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error)
 	BatchHardDelete(ctx context.Context, ids []any) error
 	BatchHardDeleteByFK(ctx context.Context, fkField string, fkValues []any) error
+	BatchDeprecateVersions(ctx context.Context, ids []any) error
+	BatchDeprecateVersionsByFK(ctx context.Context, fkField string, fkValues []any) error
 
 	// ===== 列表查询 =====
 	ListByFilters(ctx context.Context, filters ListFilters) ([]M, int64, error)
