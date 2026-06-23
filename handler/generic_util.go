@@ -1,0 +1,592 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/Huey1979/gocrux/expression"
+
+	"github.com/Huey1979/gocrux/constants"
+	"github.com/Huey1979/gocrux/service"
+
+	"github.com/gin-gonic/gin"
+)
+
+// ============================================================
+// 3. map → Request 类型转换
+// ============================================================
+
+// newCrudRequest 将原始 map 转换为 CrudRequest[M]。
+// 若配置了 ReqFactory，通过 JSON 往返反序列化为具体 Request 类型；
+// 否则 fallback 到无 schema 的 MapRequest[M]。
+func (h *GenericHandler[M]) newCrudRequest(raw map[string]any) service.CrudRequest[M] {
+	if h.config.ReqFactory != nil && h.config.ReqFactory.Create != nil {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return &MapRequest[M]{data: raw}
+		}
+		req := h.config.ReqFactory.Create()
+		if err := json.Unmarshal(data, req); err != nil {
+			return &MapRequest[M]{data: raw}
+		}
+		return req
+	}
+	return &MapRequest[M]{data: raw}
+}
+
+// newCrudRequestForUpdate 同 newCrudRequest，但使用 Update 工厂。
+func (h *GenericHandler[M]) newCrudRequestForUpdate(raw map[string]any) service.CrudRequest[M] {
+	factory := h.config.ReqFactory
+	if factory != nil && factory.Update != nil {
+		data, _ := json.Marshal(raw)
+		req := factory.Update()
+		if json.Unmarshal(data, req) == nil {
+			return req
+		}
+	}
+	// fallback: 尝试用 Create 工厂
+	if factory != nil && factory.Create != nil {
+		data, _ := json.Marshal(raw)
+		req := factory.Create()
+		if json.Unmarshal(data, req) == nil {
+			return req
+		}
+	}
+	return &MapRequest[M]{data: raw}
+}
+
+// newListRequest 将原始 map 转为 List 查询结构体。
+// 若未配置 List 工厂，返回原始 map。
+func (h *GenericHandler[M]) newListRequest(raw map[string]any) any {
+	if h.config.ReqFactory != nil && h.config.ReqFactory.List != nil {
+		data, _ := json.Marshal(raw)
+		req := h.config.ReqFactory.List()
+		if json.Unmarshal(data, req) == nil {
+			return req
+		}
+	}
+	return raw
+}
+
+// ============================================================
+// 4. RegisterRoutes — 路由注册
+// ============================================================
+
+// RegisterRoutes 注册标准 CRUD + 版本管理路由到指定 RouterGroup。
+// 版本相关的路由（Activate / ListVersions / EditVersion）仅在 Service 启用了 VersionMode 时注册。
+func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
+	p := h.config.PathPrefix
+	r.POST(p+"/create", h.Create)
+	r.GET(p+"/list", h.List)
+	r.GET(p+"/get", h.Get)
+	r.POST(p+"/update", h.Update)
+	r.POST(p+"/delete", h.Delete)
+	if h.svc.SupportsVersion() {
+		r.POST(p+"/activate", h.Activate)
+		r.GET(p+"/versions", h.ListVersions)
+		r.POST(p+"/edit-version", h.EditVersion)
+	}
+}
+
+// ============================================================
+// 5. 共享 helper
+// ============================================================
+
+// userInfo 从 gin.Context 提取已认证的用户信息。
+// 未配置 Auth 钩子时返回空 UserInfo + false。
+func (h *GenericHandler[M]) userInfo(c *gin.Context) (UserInfo, bool) {
+	if h.config.Auth == nil {
+		return UserInfo{}, false
+	}
+	return h.config.Auth.FromContext(c)
+}
+
+// checkPerm 执行权限校验（如配置了 Perm 钩子）。
+// 校验失败直接通过 c.Abort() 中断请求并返回 403。
+// 返回 true 表示通过或未启用权限检查，调用方继续执行。
+func (h *GenericHandler[M]) checkPerm(c *gin.Context, action string) bool {
+	if h.config.Perm == nil {
+		return true
+	}
+	info, ok := h.userInfo(c)
+	if !ok {
+		ErrorWithMsg(c, constants.CodeUnauthorized, "未登录")
+		return false
+	}
+	if !h.config.Perm.Check(info, h.svcName, action) {
+		ErrorWithMsg(c, constants.CodeForbidden, "无权限")
+		return false
+	}
+	return true
+}
+
+// injectDepth 从 HTTP query ?depth=N 与 HandlerConfig.MaxExpandDepth 综合计算展开深度，
+// 写入 context。默认深度为 defaultExpandDepth（5），?depth=0 可禁用展开。
+func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) context.Context {
+	qdStr := c.Query("depth")
+	var qd int
+	hasQD := false
+	if qdStr != "" {
+		if n, err := strconv.Atoi(qdStr); err == nil && n >= 0 {
+			qd = n
+			hasQD = true
+		}
+	}
+
+	maxDepth := h.config.MaxExpandDepth
+	if maxDepth <= 0 {
+		maxDepth = defaultExpandDepth
+	}
+
+	depth := maxDepth
+	if hasQD {
+		depth = qd // query 优先
+	}
+
+	// 上限：配置的 MaxExpandDepth 作为天花板
+	if depth > maxDepth {
+		depth = maxDepth
+	}
+
+	// 硬上限：禁止无上限递归（如 ?depth=999 → 裁剪为 hardMaxExpandDepth）
+	if depth > hardMaxExpandDepth {
+		depth = hardMaxExpandDepth
+	}
+
+	return withDepth(ctx, depth)
+}
+
+// injectIgnore 从 HTTP query params 解析忽略配置，写入 context。
+//
+// 支持参数：
+//
+//	?ignore=fieldA,fieldB          → 跳过指定字段的展开
+//	?ignoreRef=true                → 跳过所有 References + ChildRefs
+//	?ignoreCascade=true            → 跳过所有 Cascades
+//	?ignoreAll=true                → 跳过全部展开/级联
+//
+// 未传入任何参数时 ctx 不变（无额外开销）。
+func (h *GenericHandler[M]) injectIgnore(ctx context.Context, c *gin.Context) context.Context {
+	ignoreStr := c.Query("ignore")
+	ignoreRef := c.Query("ignoreRef") == "true"
+	ignoreCascade := c.Query("ignoreCascade") == "true"
+	ignoreAll := c.Query("ignoreAll") == "true"
+
+	if ignoreStr == "" && !ignoreRef && !ignoreCascade && !ignoreAll {
+		return ctx
+	}
+
+	cfg := &IgnoreConfig{
+		All:     ignoreAll,
+		Ref:     ignoreRef,
+		Cascade: ignoreCascade,
+	}
+	if ignoreStr != "" {
+		parts := strings.Split(ignoreStr, ",")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cfg.Fields = append(cfg.Fields, p)
+			}
+		}
+	}
+
+	return withIgnore(ctx, cfg)
+}
+
+// injectStop 从 HTTP query params 解析字段级深度/截止配置，写入 context。
+//
+// 支持参数：
+//
+//	?fdepth=dept_ulid:1,site_ulid:2          → 覆盖 FieldDepthLimits
+//	?fstop=dept_ulid=-department:manager      → 覆盖 FieldStopRules
+//
+// 每个 fstop 格式：field=rules（逗号分隔的 [-]handler:field）。
+// 多规则用多个 fstop 参数。
+func (h *GenericHandler[M]) injectStop(ctx context.Context, c *gin.Context) context.Context {
+	fdepthStr := c.Query("fdepth")
+	fstopValues := c.QueryArray("fstop")
+
+	if fdepthStr == "" && len(fstopValues) == 0 {
+		return ctx
+	}
+
+	// 解析 HTTP overrides
+	var fdOverride map[string]int
+	var fsOverride map[string][]StopRule
+
+	if fdepthStr != "" {
+		fdOverride = make(map[string]int)
+		for _, pair := range splitCSV(fdepthStr) {
+			parts := splitN(pair, ":", 2)
+			if len(parts) == 2 && parts[0] != "" {
+				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && n >= 0 {
+					fdOverride[parts[0]] = n
+				}
+			}
+		}
+	}
+
+	for _, fstopVal := range fstopValues {
+		eqIdx := strings.Index(fstopVal, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		field := fstopVal[:eqIdx]
+		rulesStr := fstopVal[eqIdx+1:]
+		rules, err := parseStopRules(rulesStr)
+		if err != nil || len(rules) == 0 {
+			continue
+		}
+		if fsOverride == nil {
+			fsOverride = make(map[string][]StopRule)
+		}
+		fsOverride[field] = rules
+	}
+
+	if fdOverride != nil {
+		ctx = context.WithValue(ctx, fdOverrideCtxKey{}, fdOverride)
+	}
+	if fsOverride != nil {
+		ctx = context.WithValue(ctx, fsOverrideCtxKey{}, fsOverride)
+	}
+	return ctx
+}
+
+// fdOverrideCtxKey / fsOverrideCtxKey HTTP override context keys。
+type fdOverrideCtxKey struct{}
+type fsOverrideCtxKey struct{}
+
+// entityGetCtxKey / entityListCtxKey 用于在管线内部向 HTTP handler 透传 Entity 指针。
+// HTTP handler 创建 holder（*M 或 *[]*M）存入 context，管线内部 _doGet/_doList 写入 Entity，
+// HTTP handler 在管线返回后读取 Entity 并调用 ResponseMapper。
+// 级联调用（DoGetByID/DoList）不创建 holder，因此不会触发映射。
+type entityGetCtxKey struct{}
+type entityListCtxKey struct{}
+
+// getStopCfg 从 context + HandlerConfig 综合获取字段级深度/截止配置。
+// context 中的 HTTP overrides 优先于 HandlerConfig 默认值。
+func (h *GenericHandler[M]) getStopCfg(ctx context.Context) (map[string]int, map[string][]StopRule) {
+	fdLimits := h.config.FieldDepthLimits
+	if ov, ok := ctx.Value(fdOverrideCtxKey{}).(map[string]int); ok {
+		if fdLimits == nil {
+			fdLimits = ov
+		} else {
+			merged := make(map[string]int, len(fdLimits)+len(ov))
+			for k, v := range fdLimits {
+				merged[k] = v
+			}
+			for k, v := range ov {
+				merged[k] = v // override
+			}
+			fdLimits = merged
+		}
+	}
+
+	fdStops := h.config.FieldStopRules
+	if ov, ok := ctx.Value(fsOverrideCtxKey{}).(map[string][]StopRule); ok {
+		if fdStops == nil {
+			fdStops = ov
+		} else {
+			merged := make(map[string][]StopRule, len(fdStops)+len(ov))
+			for k, v := range fdStops {
+				merged[k] = v
+			}
+			for k, v := range ov {
+				merged[k] = v // override
+			}
+			fdStops = merged
+		}
+	}
+
+	return fdLimits, fdStops
+}
+
+// buildFieldCtx 为展开到子 Handler 构建携带字段级限制的子 context。
+// ctx: 当前 handler 的 context（含 depth/visited/fieldLimits）
+// parentField: 当前 handler 上触发展开的字段名（References.Field、Cascades.ChildrenField 等）
+// targetHandlerName: 目标子 handler 的注册名
+func (h *GenericHandler[M]) buildFieldCtx(ctx context.Context, parentField string, targetHandlerName string) context.Context {
+	cCtx := ctx
+
+	fdLimits, fdStops := h.getStopCfg(ctx)
+
+	// 1. 字段级深度上限：覆盖传给子 Handler 的全局深度
+	if fdLimits != nil {
+		if fd, ok := fdLimits[parentField]; ok {
+			curDepth, hasDepth := getDepth(cCtx)
+			if !hasDepth || fd < curDepth {
+				cCtx = withDepth(cCtx, fd)
+			}
+		}
+	}
+
+	// 2. 字段级截止规则 → 转为 fieldLimitMap 注入子 context
+	if fdStops != nil {
+		if rules, ok := fdStops[parentField]; ok {
+			fl := make(fieldLimitMap)
+			for _, r := range rules {
+				if r.OnHandler == targetHandlerName {
+					if r.Stop {
+						fl[r.Field] = 0
+					} else {
+						fl[r.Field] = 1
+					}
+				}
+			}
+			if len(fl) > 0 {
+				cCtx = withFieldLimits(cCtx, fl)
+			}
+		}
+	}
+
+	return cCtx
+}
+
+// effectiveExpandDepth 计算某字段的有效展开深度。
+// ctx: 当前 handler 的 context
+// hasDepth: 是否设置了全局深度
+// fieldName: 当前字段名（resultKey / ChildrenField）
+// 优先使用 fieldLimitMap（父 Handler 注入的截止规则），其次全局深度。
+func effectiveExpandDepth(ctx context.Context, hasDepth bool, fieldName string) (depth int, shouldExpand bool) {
+	fieldLimits := getFieldLimits(ctx)
+	if fieldLimits != nil {
+		if lim, ok := fieldLimits[fieldName]; ok {
+			if lim <= 0 {
+				return 0, false // 截止：完全跳过
+			}
+			return lim, true
+		}
+	}
+	if !hasDepth {
+		return 0, true // 未设置深度 → 展开一层，不递归
+	}
+	curDepth, _ := getDepth(ctx)
+	if curDepth <= 0 {
+		return 0, false
+	}
+	return curDepth, true
+}
+
+// withEffectiveChildCtx 基于字段有效深度构造子 context（深度减一）。
+// ctx: 当前 handler 的 base childCtx
+// fieldName: 字段名
+func withEffectiveChildCtx(ctx context.Context, fieldName string) context.Context {
+	fieldLimits := getFieldLimits(ctx)
+	if fieldLimits != nil {
+		if lim, ok := fieldLimits[fieldName]; ok && lim > 0 {
+			return withDepth(ctx, lim-1)
+		}
+	}
+	return ctx
+}
+
+// extractChildData 从原始请求 map 中提取指定字段的子数据数组。
+// 例如：raw["domains"] → []map[string]any，每个 map 对应对条子记录。
+// 兼容三种数据来源：
+//   - HTTP JSON 反序列化：[]any{map[string]any, ...}
+//   - Go 代码直构：[]map[string]any{...}
+//   - 标量数组 + wrapKey：如 raw["tags"]=[1,2,3] + wrapKey="tag_id" → [{"tag_id":1},{"tag_id":2},{"tag_id":3}]
+func extractChildData(raw map[string]any, field string, wrapKey string) []map[string]any {
+	v, ok := raw[field]
+	if !ok || v == nil {
+		return nil
+	}
+	// 兼容单对象：{...} 自动包裹为 [{...}]
+	if m, ok := v.(map[string]any); ok {
+		return []map[string]any{m}
+	}
+	// 反射兜底：兼容 []any / []map[string]any / 标量切片 等任意切片类型
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice {
+		return nil
+	}
+	result := make([]map[string]any, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		item := rv.Index(i).Interface()
+		if m, ok := item.(map[string]any); ok {
+			result = append(result, m)
+		} else if wrapKey != "" {
+			// 标量值 → 自动包裹为单字段 map（如 1 → {"tag_id": 1}）
+			result = append(result, map[string]any{wrapKey: item})
+		}
+	}
+	return result
+}
+
+// toAnySlice 将任意切片类型（[]any、[]string、[]float64 等）统一转换为 []any。
+// 用于 ChildRefs 中 FK 列表的类型兼容：JSON 反序列化后数字列表可能为 []float64 或 []any。
+func toAnySlice(v any) []any {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice {
+		return nil
+	}
+	result := make([]any, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		result[i] = rv.Index(i).Interface()
+	}
+	return result
+}
+
+// ============================================================
+// 6. 级联检查 helper
+// ============================================================
+
+// hasCascadeFlag 检查是否存在满足 check 条件的级联关系。
+func (h *GenericHandler[M]) hasCascadeFlag(check func(CascadeRelation) bool) bool {
+	for _, rel := range h.config.Cascades {
+		if check(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyResponseMapper 将原始 Entity 通过 ResponseMapper 转换为 DTO map，并合并级联展开数据。
+// entity: 原始实体指针（*M）。
+// expanded: 展开后的完整 map（含 References/Cascades/ChildRefs 注入的额外 key）。
+// 返回：DTO 字段 + 级联数据合并后的 map。
+// ResponseMapper 为 nil 时直接返回 expanded（零开销）。
+func (h *GenericHandler[M]) applyResponseMapper(entity *M, expanded map[string]any) map[string]any {
+	if h.config.ResponseMapper == nil {
+		return expanded
+	}
+
+	dto := h.config.ResponseMapper(*entity)
+	dtoData, err := json.Marshal(dto)
+	if err != nil {
+		return expanded // fallback：映射失败时返回原始数据
+	}
+	var dtoMap map[string]any
+	if err := json.Unmarshal(dtoData, &dtoMap); err != nil {
+		return expanded
+	}
+
+	// 合并级联展开数据：References / ChildRefs / Cascades 的 result key
+	// 这些 key 由 expandGet / _doList 注入到 expanded map 中，不在 Entity 自有字段内
+	for _, ref := range h.config.References {
+		k := ref.ResultField
+		if k == "" {
+			k = deriveRefResultKey(ref.Field)
+		}
+		if v, ok := expanded[k]; ok {
+			dtoMap[k] = v
+		}
+	}
+	for _, cr := range h.config.ChildRefs {
+		k := cr.ResultField
+		if k == "" {
+			k = deriveChildRefResultKey(cr.FKListField)
+		}
+		if v, ok := expanded[k]; ok {
+			dtoMap[k] = v
+		}
+	}
+	for _, rel := range h.config.Cascades {
+		if v, ok := expanded[rel.ChildrenField]; ok {
+			dtoMap[rel.ChildrenField] = v
+		}
+	}
+
+	return dtoMap
+}
+
+// ============================================================
+// 7. Create — 管线（HTTP → cascade → before → do → after）
+// ============================================================
+
+// listExpandKey 用于在 List handler 中传递级联展开覆写参数。
+type listExpandKey struct{}
+
+type listExpand struct {
+	all    bool   // expandAll=true → 全部展开
+	fields string // expand=name1,name2 → 仅展开指定级联
+}
+
+// shouldExpandCascade 判断 List 时是否应展开指定级联。
+// 优先级：?expandAll=true > ?expand=list > ListSkipCascades 配置 > 默认不展开。
+func (h *GenericHandler[M]) shouldExpandCascade(ctx context.Context, childrenField string) bool {
+	// 1. GET 参数 expandAll=true → 全部展开
+	if v, ok := ctx.Value(listExpandKey{}).(listExpand); ok && v.all {
+		return true
+	}
+	// 2. GET 参数 expand=name1,name2 → 指定展开
+	if v, ok := ctx.Value(listExpandKey{}).(listExpand); ok && v.fields != "" {
+		for _, f := range strings.Split(v.fields, ",") {
+			if strings.TrimSpace(f) == childrenField {
+				return true
+			}
+		}
+		return false
+	}
+	// 3. ListSkipCascades 配置：nil = 全部展开（向后兼容），[]string{} = 全部跳过
+	if h.config.ListSkipCascades == nil {
+		return true // 向后兼容：未配置 = 全部展开
+	}
+	if len(h.config.ListSkipCascades) == 0 {
+		return false // 空切片 = 全部跳过
+	}
+	// 4. 部分跳过：在列表中的跳过
+	for _, skip := range h.config.ListSkipCascades {
+		if skip == childrenField {
+			return false
+		}
+	}
+	return true
+}
+
+// rawCreateMapsKey 用于在 createPipeline 中将原始请求 map 透传给 _doCreate，
+// 以便级联创建时从父请求中提取子表数据。
+type rawCreateMapsKey struct{}
+
+// DoCreate CascadeHandler 接口实现。
+// 父 Handler 调用此方法委托子 Handler 创建数据（已在同一事务内）。
+func (h *GenericHandler[M]) DoCreate(ctx context.Context, requests []map[string]any) ([]any, error) {
+	results, err := h.createPipeline(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]any, len(results))
+	for i, r := range results {
+		ids[i] = extractPKFromResult(r)
+	}
+	return ids, nil
+}
+
+// ============================================================
+// 15. handleError — 统一错误映射（基于 errors.Is，不使用字符串匹配）
+// ============================================================
+
+// handleError 将 Service 层 error 映射为 HTTP 响应。
+// 使用 errors.Is 与 errs 包中的哨兵错误精确匹配。
+// 未匹配到的错误归为 InternalError（日志记录 + 友好提示）。
+func (h *GenericHandler[M]) handleError(c *gin.Context, err error) {
+	code := mapServiceError(err)
+	if code == constants.CodeInternalError {
+		InternalError(c, err)
+		return
+	}
+	ErrorWithMsg(c, code, err.Error())
+}
+
+// normalizeFields 对请求 map 中配置的 JSON 字段做表达式规范化。
+// 在 createPipeline / updatePipeline 验证前调用。
+func (h *GenericHandler[M]) normalizeFields(rawReqs []map[string]any) {
+	if len(h.config.NormalizeFields) == 0 {
+		return
+	}
+	for _, raw := range rawReqs {
+		for _, field := range h.config.NormalizeFields {
+			if v, ok := raw[field]; ok {
+				if s, ok := v.(string); ok && s != "" && s != "{}" {
+					if n, err := expression.Normalize(s); err == nil {
+						raw[field] = n
+					}
+				}
+			}
+		}
+	}
+}
