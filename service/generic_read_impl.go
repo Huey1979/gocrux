@@ -119,17 +119,6 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		})
 	}
 
-	// 默认过滤：版本化 → isCurrent=true；非版本化 → isDeleted=0
-	if s.config.VersionMode && s.config.VersionFields != nil {
-		f.Filters = append(f.Filters, repository.Filter{
-			Field: resolveColumn[M](s.config.VersionFields.CurrentField), Op: repository.OpEQ, Value: 1,
-		})
-	} else {
-		f.Filters = append(f.Filters, repository.Filter{
-			Field: "is_deleted", Op: repository.OpEQ, Value: int8(0),
-		})
-	}
-
 	return s.repo.ListByFilters(ctx, f)
 }
 
