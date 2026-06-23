@@ -191,10 +191,18 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	}
 	defer cursor.Close(ctx)
 	var results []M
-	if err := cursor.All(ctx, &results); err != nil {
-		return nil, 0, fmt.Errorf("MongoDB读取失败: %w", err)
+	// 手动迭代解码，支持 []*T 指针类型
+	for cursor.Next(ctx) {
+		var elem M
+		if reflect.TypeOf(elem).Kind() == reflect.Ptr {
+			elem = reflect.New(reflect.TypeOf(elem).Elem()).Interface().(M)
+		}
+		if err := cursor.Decode(&elem); err != nil {
+			return nil, 0, fmt.Errorf("MongoDB解码失败: %w", err)
+		}
+		results = append(results, elem)
 	}
-	return results, total, nil
+	return results, total, cursor.Err()
 }
 
 // ListAll 全量查询。
