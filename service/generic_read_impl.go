@@ -120,7 +120,11 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	}
 
 	// 默认过滤：非版本化 → DeletedField=DeletedValue（默认 is_deleted=0）
-	if !s.config.VersionMode {
+	if s.config.VersionMode && s.config.VersionFields != nil {
+		f.Filters = append(f.Filters, repository.Filter{
+			Field: resolveColumn[M](s.config.VersionFields.CurrentField), Op: repository.OpEQ, Value: int8(1),
+		})
+	} else {
 		m := newRecord[M]()
 		if m.SetDelete() {
 		field := s.config.DeletedField
