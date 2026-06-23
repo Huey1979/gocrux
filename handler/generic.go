@@ -1484,17 +1484,9 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	delete(filters, "depth")
 	delete(filters, "fdepth")
 	delete(filters, "fstop")
-	delete(filters, "keyword")
 	delete(filters, "expand")
 	delete(filters, "expandAll")
-
-	// keyword 关键字搜索：注入 context 供 service 层处理
-	if kw := c.Query("keyword"); kw != "" && len(h.config.KeywordFields) > 0 {
-		ctx = service.WithKeywordSearch(ctx, service.KeywordSearch{
-			Keyword: kw,
-			Fields:  h.config.KeywordFields,
-		})
-	}
+	// keyword 交由 BeforeList hook 处理（业务数据用 fields.xxx 前缀，需动态配置）
 
 	// expand 级联展开覆盖：ListSkipCascades 可通过 GET 参数覆写
 	expandAll := c.Query("expandAll") == "true"
