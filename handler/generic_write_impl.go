@@ -6,8 +6,6 @@ import (
 
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
-
-	"github.com/sirupsen/logrus"
 )
 
 // ============================================================
@@ -314,18 +312,10 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 					return errs.ErrCascadeDelete(rel.HandlerName, child.DoDeleteByFK(cascadeCtx, rel.FKField, idList))
 				},
 			); err != nil {
-				logrus.WithField("svc", h.svcName).WithError(err).Error("cascade delete children failed")
 				return err
 			}
 			// 2. 删除父实体
-			logrus.WithField("svc", h.svcName).Info("cascade done, deleting parent")
-			delErr := h.svc.Delete(txCtx, ids, codes)
-			if delErr != nil {
-				logrus.WithField("svc", h.svcName).WithError(delErr).Error("delete parent after cascade failed")
-			} else {
-				logrus.WithField("svc", h.svcName).Info("delete parent succeeded")
-			}
-			return delErr
+			return h.svc.Delete(txCtx, ids, codes)
 		})
 	}
 
