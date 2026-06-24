@@ -285,15 +285,11 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	}
 	oldULID := ""
 	oldVersionCode := ""
-	oldStatus := ""
 	if f := oldVal.FieldByName(vf.ULIDField); f.IsValid() {
 		oldULID = f.String()
 	}
 	if f := oldVal.FieldByName(vf.VersionField); f.IsValid() {
 		oldVersionCode = f.String()
-	}
-	if f := oldVal.FieldByName(vf.StatusField); f.IsValid() {
-		oldStatus = f.String()
 	}
 
 	// 4. 设置版本字段
@@ -301,10 +297,10 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	common.SetFieldValue(&newEntity, vf.CurrentField, int8(1))
 	common.SetFieldValue(&newEntity, vf.ParentField, oldULID)
 	common.SetFieldValue(&newEntity, vf.VersionField, nextVersionCode(oldVersionCode))
-	// 草稿箱：默认新版本为 draft；若请求明确指定不同状态则保留
+	// 草稿箱：若请求未指定状态，默认新版本为 draft；若用户明确传了值则保留
 	if vf.StatusField != "" {
 		newStatus := getStrField(&newEntity, vf.StatusField)
-		if (*old).SupportsDraft() && (newStatus == "" || newStatus == oldStatus) {
+		if (*old).SupportsDraft() && (newStatus == "") {
 			common.SetFieldValue(&newEntity, vf.StatusField, string(VersionStatusDraft))
 		}
 	}
