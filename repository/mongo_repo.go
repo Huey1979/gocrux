@@ -25,8 +25,9 @@ import (
 // ============================================================
 
 type MongoCRUDRepository[M any] struct {
-	coll    *mongo.Collection
-	pkField string
+	coll     *mongo.Collection // 写库
+	readColl *mongo.Collection // 读库（nil = 回退写库）
+	pkField  string
 }
 
 // NewMongoCRUDRepository 创建 MongoDB 泛型仓储。
@@ -57,10 +58,27 @@ func (r *MongoCRUDRepository[M]) BatchDeprecateVersionsByFK(ctx context.Context,
 	return err
 }
 
-// SetColl 注入自定义 Collection（测试用）。
+// SetColl 注入写库 Collection。
 func (r *MongoCRUDRepository[M]) SetColl(coll *mongo.Collection) *MongoCRUDRepository[M] {
 	r.coll = coll
 	return r
+}
+
+// SetReadColl 注入读库 Collection（读写分离）。nil 时回退写库。
+func (r *MongoCRUDRepository[M]) SetReadColl(coll *mongo.Collection) *MongoCRUDRepository[M] {
+	r.readColl = coll
+	return r
+}
+
+// ReadColl 返回读库 Collection。未配置或事务中回退写库。
+func (r *MongoCRUDRepository[M]) ReadColl(ctx context.Context) *mongo.Collection {
+	if sess := common.GetMongoSession(ctx); sess != nil {
+		return r.collWithTx(ctx) // 事务中走写库
+	}
+	if r.readColl != nil {
+		return r.readColl
+	}
+	return r.coll
 }
 
 // collWithTx 返回事务安全的 Collection。
@@ -111,7 +129,7 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M)
 func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 	filter := bson.M{r.pkField: id}
 	var result M
-	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.ReadColl(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -124,7 +142,7 @@ func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error
 func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, value any) (*M, error) {
 	filter := bson.M{field: value}
 	var result M
-	if err := r.coll.FindOne(ctx, filter).Decode(&result); err != nil {
+	if err := r.ReadColl(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, fmt.Errorf("record not found")
 		}
@@ -194,13 +212,13 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	if filter == nil {
 		filter = bson.M{}
 	}
-	total, err := r.coll.CountDocuments(ctx, filter)
+	total, err := r.ReadColl(ctx).CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
 	}
 	skip := int64((page - 1) * pageSize)
 	opts := options.Find().SetSkip(skip).SetLimit(int64(pageSize))
-	cursor, err := r.coll.Find(ctx, filter, opts)
+	cursor, err := r.ReadColl(ctx).Find(ctx, filter, opts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -222,7 +240,7 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 
 // ListAll 全量查询。
 func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{})
+	cursor, err := r.ReadColl(ctx).Find(ctx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -236,7 +254,7 @@ func (r *MongoCRUDRepository[M]) ListAll(ctx context.Context) ([]M, error) {
 
 // ListByField 按字段查询全量。
 func (r *MongoCRUDRepository[M]) ListByField(ctx context.Context, field string, value any) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{field: value})
+	cursor, err := r.ReadColl(ctx).Find(ctx, bson.M{field: value})
 	if err != nil {
 		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
 	}
@@ -284,7 +302,7 @@ func (r *MongoCRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkFiel
 
 // BatchFindByPK 批量按主键查询。
 func (r *MongoCRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{r.pkField: bson.M{"$in": ids}})
+	cursor, err := r.ReadColl(ctx).Find(ctx, bson.M{r.pkField: bson.M{"$in": ids}})
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +316,7 @@ func (r *MongoCRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) (
 
 // BatchFindByFK 批量按外键查询。
 func (r *MongoCRUDRepository[M]) BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error) {
-	cursor, err := r.coll.Find(ctx, bson.M{fkField: bson.M{"$in": fkValues}})
+	cursor, err := r.ReadColl(ctx).Find(ctx, bson.M{fkField: bson.M{"$in": fkValues}})
 	if err != nil {
 		return nil, err
 	}

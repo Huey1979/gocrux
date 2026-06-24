@@ -31,7 +31,8 @@ import (
 // CRUDRepository 泛型仓储
 // M = GORM Model 类型（必须为 struct 指针的零值语义型，如 entity.SysRole）
 type CRUDRepository[M any] struct {
-	db *gorm.DB
+	db     *gorm.DB // 写库
+	readDB *gorm.DB // 读库（nil = 回退到写库）
 
 	// 允许外部配置字段列名，默认自动推导
 	pkField string // 主键列名（默认 "id"；若已知模型 PK 列名可在 NewXxx 中覆盖）
@@ -61,10 +62,15 @@ func NewCRUDWithDB[M any](db *gorm.DB) *CRUDRepository[M] {
 	return r
 }
 
-// SetDB 注入 DB 实例（用于事务切换或测试替换）
-// 返回自身以支持链式调用。
+// SetDB 注入写库实例。
 func (r *CRUDRepository[M]) SetDB(db *gorm.DB) *CRUDRepository[M] {
 	r.db = db
+	return r
+}
+
+// SetReadDB 注入读库实例（读写分离）。nil 时回退到写库。
+func (r *CRUDRepository[M]) SetReadDB(db *gorm.DB) *CRUDRepository[M] {
+	r.readDB = db
 	return r
 }
 
@@ -79,13 +85,24 @@ func (r *CRUDRepository[M]) PKField() string {
 	return r.pkField
 }
 
-// DB 返回当前持有的 *gorm.DB（已附加请求 context）。
-// 若 ctx 中存在事务 tx（由 TxCoordinator 注入），优先使用事务实例。
+// DB 返回写库 *gorm.DB（已附加请求 context）。
+// 事务中始终走写库。
 func (r *CRUDRepository[M]) DB(ctx context.Context) *gorm.DB {
 	if tx := common.GetTx(ctx); tx != nil {
 		return tx.WithContext(ctx)
 	}
 	return r.db.WithContext(ctx)
+}
+
+// ReadDB 返回读库 *gorm.DB。事务中或未配置 readDB 时回退到写库。
+func (r *CRUDRepository[M]) ReadDB(ctx context.Context) *gorm.DB {
+	if tx := common.GetTx(ctx); tx != nil {
+		return tx.WithContext(ctx) // 事务中走写库保证一致性
+	}
+	if r.readDB != nil {
+		return r.readDB.WithContext(ctx)
+	}
+	return r.db.WithContext(ctx) // 未配读库则回退写库
 }
 
 // ============================================================
@@ -109,7 +126,7 @@ func (r *CRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M) erro
 // 通过 detectPK 推导的主键列名来显式构造 WHERE 条件。
 func (r *CRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 	var m M
-	err := r.DB(ctx).Where(r.pkField+" = ?", id).First(&m).Error
+	err := r.ReadDB(ctx).Where(r.pkField+" = ?", id).First(&m).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, gorm.ErrRecordNotFound
@@ -123,7 +140,7 @@ func (r *CRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 // 示例: repo.GetByField(ctx, "site_code", "S001")
 func (r *CRUDRepository[M]) GetByField(ctx context.Context, field string, value any) (*M, error) {
 	var m M
-	err := r.DB(ctx).Where(field+" = ?", value).First(&m).Error
+	err := r.ReadDB(ctx).Where(field+" = ?", value).First(&m).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, gorm.ErrRecordNotFound
@@ -142,7 +159,7 @@ func (r *CRUDRepository[M]) GetByCode(ctx context.Context, code string) (*M, err
 // ExistsByField 检查是否存在满足条件的记录
 func (r *CRUDRepository[M]) ExistsByField(ctx context.Context, field string, value any) (bool, error) {
 	var count int64
-	err := r.DB(ctx).Model(new(M)).Where(field+" = ?", value).Count(&count).Error
+	err := r.ReadDB(ctx).Model(new(M)).Where(field+" = ?", value).Count(&count).Error
 	return count > 0, err
 }
 
@@ -324,7 +341,7 @@ type ListFilters struct {
 // page/ pageSize：当 pageSize <= 0 时不分页、返回全部（不走 count）；否则按标准分页。
 // 返回：记录列表、总数（不分页时返回 len(results)）、错误
 func (r *CRUDRepository[M]) List(ctx context.Context, query func(*gorm.DB) *gorm.DB, page, pageSize int) ([]M, int64, error) {
-	db := r.DB(ctx).Model(new(M))
+	db := r.ReadDB(ctx).Model(new(M))
 	if query != nil {
 		db = query(db)
 	}
@@ -499,7 +516,7 @@ func (r *CRUDRepository[M]) RawQuery(ctx context.Context, dest any, sql string, 
 
 // Count 按条件计数
 func (r *CRUDRepository[M]) Count(ctx context.Context, query func(*gorm.DB) *gorm.DB) (int64, error) {
-	db := r.DB(ctx).Model(new(M))
+	db := r.ReadDB(ctx).Model(new(M))
 	if query != nil {
 		db = query(db)
 	}
@@ -548,7 +565,7 @@ func (r *CRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField str
 // BatchFindByPK 批量按主键查询。
 func (r *CRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) ([]M, error) {
 	var records []M
-	if err := r.DB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).Find(&records).Error; err != nil {
+	if err := r.ReadDB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
@@ -557,7 +574,7 @@ func (r *CRUDRepository[M]) BatchFindByPK(ctx context.Context, ids []any) ([]M, 
 // BatchFindByFK 批量按外键查询。
 func (r *CRUDRepository[M]) BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error) {
 	var records []M
-	if err := r.DB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Find(&records).Error; err != nil {
+	if err := r.ReadDB(ctx).Model(new(M)).Where(fkField+" IN ?", fkValues).Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
