@@ -265,5 +265,23 @@ func parseCSVValue(rawValue any) []any {
 	return result
 }
 func (s *GenericService[M]) _afterList(ctx context.Context, list []M, total int64) ([]M, int64, error) {
+	// 版本化实体草稿可见性：已发布所有人可见，草稿仅创建者可见
+	vf := s.config.VersionFields
+	if s.config.VersionMode && vf != nil && vf.StatusField != "" {
+		userID := GetUserULID(ctx)
+		filtered := make([]M, 0, len(list))
+		for i := range list {
+			status := getStrField(&list[i], vf.StatusField)
+			if status == string(VersionStatusPublished) {
+				filtered = append(filtered, list[i])
+			} else if status == string(VersionStatusDraft) && userID != "" {
+				createdBy := getStrField(&list[i], "CreatedBy")
+				if createdBy == "" || createdBy == userID {
+					filtered = append(filtered, list[i])
+				}
+			}
+		}
+		return filtered, int64(len(filtered)), nil
+	}
 	return list, total, nil
 }
