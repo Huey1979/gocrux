@@ -29,7 +29,18 @@ func (h *GenericHandler[M]) _beforeCreate(_ context.Context, input []service.Cru
 func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudRequest[M]) ([]*M, error) {
 	// 若配置了级联创建且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内编排父实体创建 + 子实体级联创建。
+	//
+	// visited + depth 防环/防无限深度（与 Get/List 管线中 canExpandTo 一致）：
+	// - 若当前 Handler 已在级联链中出现过（A→B→A）→ 退化为简单创建
+	// - 若级联深度已耗尽 → 退化为简单创建
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnCreate }) && h.txCoord != nil && h.handlerReg != nil {
+		if isVisited(ctx, h.svcName, "batch") {
+			return h.svc.Create(ctx, input)
+		}
+		if d, ok := getDepth(ctx); ok && d <= 0 {
+			return h.svc.Create(ctx, input)
+		}
+
 		var results []*M
 		rawMaps, _ := ctx.Value(rawCreateMapsKey{}).([]map[string]any)
 
@@ -45,6 +56,20 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 			if rawMaps == nil {
 				return nil
 			}
+
+			// 将当前 Handler 加入 visited set，传给所有子 Handler。
+			// 复用 cascade.go 的不可变 visitedSet（addVisited 创建新 map 副本），
+			// 同层多个子 Handler 各自独立，互不干扰。
+			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
+
+			// 深度控制：首层默认 hardMaxExpandDepth（10）层，每级联一层 -1。
+			// 到 0 时子 Handler 的 getDepth 检查会阻止继续展开。
+			if d, ok := getDepth(txCtx); ok {
+				cascadeCtx = withDepth(cascadeCtx, d-1)
+			} else {
+				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
+			}
+
 			for _, rel := range h.config.Cascades {
 				if !rel.OnCreate {
 					continue
@@ -67,7 +92,8 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 				if childHandler == nil {
 					continue
 				}
-				if _, txErr = childHandler.DoCreate(txCtx, allChildData); txErr != nil {
+				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
+				if _, txErr = childHandler.DoCreate(cascadeCtx, allChildData); txErr != nil {
 					return errs.ErrCascadeCreate(rel.HandlerName, txErr)
 				}
 			}
@@ -101,11 +127,27 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 	// 若配置了级联更新且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内：逐条更新/创建父实体 → 委托子 Handler 的 DoUpdate 处理子记录。
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }) && h.txCoord != nil && h.handlerReg != nil {
+		// visited + depth 防环/防无限深度：退化为逐条更新/创建（不展开子表级联）
+		if isVisited(ctx, h.svcName, "batch") {
+			return h.updateOrCreate(ctx, reqs, forceCreate)
+		}
+		if d, ok := getDepth(ctx); ok && d <= 0 {
+			return h.updateOrCreate(ctx, reqs, forceCreate)
+		}
+
 		rawMaps, _ := ctx.Value(rawUpdateMapsKey{}).([]map[string]any)
 		isVersioned := h.svc.IsVersionMode()
 
 		var results []*M
 		err := h.txCoord.Run(ctx, func(txCtx context.Context) error {
+			// 在事务 context 上叠加 visited + depth 标记，传给子 Handler
+			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
+			if d, ok := getDepth(txCtx); ok {
+				cascadeCtx = withDepth(cascadeCtx, d-1)
+			} else {
+				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
+			}
+
 			for i, req := range reqs {
 				var result *M
 				var oldPK any
@@ -156,7 +198,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							}
 							childData = oldChildren
 
-							// ä¸º backfill æ°æ®è¡¥å id é®ï¼ç¡®ä¿ GetID() è½å¹éå°ä¸»é®
+							// 为 backfill 数据补充 id 键，确保 GetID() 能匹配到主键
 							for j := range childData {
 								if _, ok := childData[j]["id"]; !ok {
 									for k, v := range childData[j] {
@@ -174,13 +216,14 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							}
 						}
 
-						// è®¡ç®ä¼ éç»å­ Handler ççæ¬åæ å¿
+						// 计算传递给子 Handler 的版本化标志
 						passToChild := passParentVersioned
-						// è¡¥åå­æ°æ®æ¶ï¼ç°æå­è®°å½åªéæ´æ° FKï¼ä¸å¼ºå¶åå»º
+						// 补充子数据时，现有子记录只需更新 FK，不强制创建
 						if !hasChildren && oldPK != nil {
 							passToChild = false
 						}
-						if txErr = childHandler.DoUpdate(txCtx, rel.FKField, newPK, childData, passToChild); txErr != nil {
+						// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
+						if txErr = childHandler.DoUpdate(cascadeCtx, rel.FKField, newPK, childData, passToChild); txErr != nil {
 							return errs.ErrCascadeUpdate(rel.HandlerName, txErr)
 						}
 					}
@@ -196,10 +239,14 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 	}
 
 	// 无级联
+	return h.updateOrCreate(ctx, reqs, forceCreate)
+}
+
+// updateOrCreate 逐条更新或创建（无级联），供 visited/depth 耗尽时回退使用。
+func (h *GenericHandler[M]) updateOrCreate(ctx context.Context, reqs []service.CrudRequest[M], forceCreate bool) ([]*M, error) {
 	if forceCreate {
 		return h.svc.Create(ctx, reqs)
 	}
-	// 逐条更新 / 无 ID 时创建
 	var results []*M
 	for _, req := range reqs {
 		id := req.GetID()
@@ -236,17 +283,33 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 	// 若配置了级联删除且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内先删子记录再删父实体。
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnDelete }) && h.txCoord != nil && h.handlerReg != nil {
+		// visited + depth 防环/防无限深度：退化为简单删除（不级联子表）
+		if isVisited(ctx, h.svcName, "batch") {
+			return h.svc.Delete(ctx, ids, codes)
+		}
+		if d, ok := getDepth(ctx); ok && d <= 0 {
+			return h.svc.Delete(ctx, ids, codes)
+		}
+
 		idList, ok := ids.([]any)
 		if !ok || len(idList) == 0 {
 			return h.svc.Delete(ctx, ids, codes)
 		}
 
 		return h.txCoord.Run(ctx, func(txCtx context.Context) error {
+			// 加入 visited set，传递给子 Handler（防跨级联回路）
+			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
+			if d, ok := getDepth(txCtx); ok {
+				cascadeCtx = withDepth(cascadeCtx, d-1)
+			} else {
+				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
+			}
+
 			// 1. 按 FK 级联删除子记录（先子后父，避免 FK 约束冲突）
 			if err := h.forEachCascade(
 				func(r CascadeRelation) bool { return r.OnDelete },
 				func(rel CascadeRelation, child CascadeHandler) error {
-					return errs.ErrCascadeDelete(rel.HandlerName, child.DoDeleteByFK(txCtx, rel.FKField, idList))
+					return errs.ErrCascadeDelete(rel.HandlerName, child.DoDeleteByFK(cascadeCtx, rel.FKField, idList))
 				},
 			); err != nil {
 				return err
