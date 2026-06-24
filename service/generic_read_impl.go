@@ -128,12 +128,25 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		// 草稿可见性：未登录仅看已发布，登录后看已发布+自己的草稿
 		if vf.StatusField != "" {
 			userID := GetUserULID(ctx)
+			statusCol := resolveColumn[M](vf.StatusField)
 			if userID == "" {
 				f.Filters = append(f.Filters, repository.Filter{
-					Field: resolveColumn[M](vf.StatusField), Op: repository.OpEQ, Value: string(VersionStatusPublished),
+					Field: statusCol, Op: repository.OpEQ, Value: string(VersionStatusPublished),
+				})
+			} else {
+				// 登录用户：published OR (draft AND created_by=user)
+				createdByCol := resolveColumn[M]("CreatedBy")
+				f.Filters = append(f.Filters, repository.Filter{
+					Op: "or_group",
+					Value: []repository.Filter{
+						{Field: statusCol, Op: repository.OpEQ, Value: string(VersionStatusPublished)},
+						{Op: repository.OpRaw, Value: []any{
+							statusCol + " = ? AND " + createdByCol + " = ?",
+							string(VersionStatusDraft), userID,
+						}},
+					},
 				})
 			}
-			// TODO: 登录用户 → published OR (draft AND created_by=user)
 		}
 	} else {
 		m := newRecord[M]()

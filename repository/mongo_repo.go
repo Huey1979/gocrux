@@ -357,6 +357,9 @@ func filterToBson(f Filter) bson.M {
 		return bson.M{f.Field: bson.M{"$in": f.Value}}
 	case OpRange:
 		return bson.M{f.Field: bson.M{"$gte": f.Value, "$lte": f.Value}}
+	case OpRaw:
+		// MongoDB 不支持原生 SQL，返回空条件（需在调用方避免依赖 OpRaw 做关键过滤）
+		return bson.M{}
 	default:
 		return bson.M{f.Field: f.Value}
 	}

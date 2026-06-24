@@ -181,6 +181,7 @@ const (
 	OpLTE   FilterOp = "lte"
 	OpIn    FilterOp = "in"
 	OpRange FilterOp = "between"
+	OpRaw   FilterOp = "raw"   // 原生 SQL 条件（Value 为 (string, []any) 或仅 string）
 )
 
 // Filter 单个过滤条件
@@ -444,6 +445,20 @@ func applyFilter(db *gorm.DB, f Filter, logic string) *gorm.DB {
 			return db.Where(subDB)
 		}
 		return db
+	case OpRaw:
+		switch v := f.Value.(type) {
+		case string:
+			return buildWhere(v)
+		case []any:
+			if len(v) >= 2 {
+				if cond, ok := v[0].(string); ok {
+					return buildWhere(cond, v[1:]...)
+				}
+			}
+			return db
+		default:
+			return db
+		}
 	case OpEQ:
 		return buildWhere(f.Field+" = ?", f.Value)
 	case OpNEQ:
