@@ -336,15 +336,17 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 
 		cr := s.CRUDRepo()
 		err := cr.Transaction(ctx, func(tx *gorm.DB) error {
-			// 旧行退位
-			common.SetFieldValue(pair.Old, vf.CurrentField, int8(0))
-
+			// 同 code 全部退位：确保只有一个当前版本
+			code := getStrField(pair.New, vf.CodeField)
+			codeCol := resolveColumn[M](vf.CodeField)
+			currentCol := resolveColumn[M](vf.CurrentField)
+			if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
+				Update(currentCol, int8(0)).Error; err != nil {
+				return err
+			}
 			// 草稿箱：根据新版本状态处理旧正式版
-			if (*pair.New).SupportsDraft() {
+			if (*pair.New).SupportsDraft() && vf.StatusField != "" {
 				newStatus := getStrField(pair.New, vf.StatusField)
-				code := getStrField(pair.New, vf.CodeField)
-				oldStatus := getStrField(pair.Old, vf.StatusField)
-				codeCol := resolveColumn[M](vf.CodeField)
 				statusCol := resolveColumn[M](vf.StatusField)
 
 				if newStatus == string(VersionStatusPublished) {
@@ -354,17 +356,10 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 					).Update(statusCol, string(VersionStatusDeprecated)).Error; err != nil {
 						return err
 					}
-					// 同步内存，防止后续 Save 覆盖 DB 改动
-					if oldStatus == string(VersionStatusPublished) {
-						common.SetFieldValue(pair.Old, vf.StatusField, string(VersionStatusDeprecated))
-					}
 				}
 				// 新版本为草稿：旧正式版保持 published 不变（已退位即可）
 			}
 
-			if err := tx.Save(pair.Old).Error; err != nil {
-				return err
-			}
 			return tx.Create(pair.New).Error
 		})
 		if err != nil {
