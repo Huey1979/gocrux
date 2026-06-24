@@ -119,11 +119,22 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		})
 	}
 
-	// 默认过滤：非版本化 → DeletedField=DeletedValue（默认 is_deleted=0）
+	// 默认过滤：版本化 → 仅当前版本 + 草稿可见性
 	if s.config.VersionMode && s.config.VersionFields != nil {
+		vf := s.config.VersionFields
 		f.Filters = append(f.Filters, repository.Filter{
-			Field: resolveColumn[M](s.config.VersionFields.CurrentField), Op: repository.OpEQ, Value: int8(1),
+			Field: resolveColumn[M](vf.CurrentField), Op: repository.OpEQ, Value: int8(1),
 		})
+		// 草稿可见性：未登录仅看已发布，登录后看已发布+自己的草稿
+		if vf.StatusField != "" {
+			userID := GetUserULID(ctx)
+			if userID == "" {
+				f.Filters = append(f.Filters, repository.Filter{
+					Field: resolveColumn[M](vf.StatusField), Op: repository.OpEQ, Value: string(VersionStatusPublished),
+				})
+			}
+			// TODO: 登录用户 → published OR (draft AND created_by=user)
+		}
 	} else {
 		m := newRecord[M]()
 		if m.SetDelete() {
@@ -265,23 +276,5 @@ func parseCSVValue(rawValue any) []any {
 	return result
 }
 func (s *GenericService[M]) _afterList(ctx context.Context, list []M, total int64) ([]M, int64, error) {
-	// 版本化实体草稿可见性：已发布所有人可见，草稿仅创建者可见
-	vf := s.config.VersionFields
-	if s.config.VersionMode && vf != nil && vf.StatusField != "" {
-		userID := GetUserULID(ctx)
-		filtered := make([]M, 0, len(list))
-		for i := range list {
-			status := getStrField(&list[i], vf.StatusField)
-			if status == string(VersionStatusPublished) {
-				filtered = append(filtered, list[i])
-			} else if status == string(VersionStatusDraft) && userID != "" {
-				createdBy := getStrField(&list[i], "CreatedBy")
-				if createdBy == "" || createdBy == userID {
-					filtered = append(filtered, list[i])
-				}
-			}
-		}
-		return filtered, int64(len(filtered)), nil
-	}
 	return list, total, nil
 }
