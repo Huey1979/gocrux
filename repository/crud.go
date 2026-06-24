@@ -38,15 +38,20 @@ type CRUDRepository[M any] struct {
 	pkField string // 主键列名（默认 "id"；若已知模型 PK 列名可在 NewXxx 中覆盖）
 }
 
-// NewCRUDRepository 创建泛型仓储实例
-// 默认使用 mysql.DB.InternalDB()（无请求上下文的 GORM 实例），
-// 每个方法内部调用 r.db.WithContext(ctx) 注入请求上下文。
+// DefaultReadDB 全局读库实例。heims 启动时注入，所有 NewCRUDRepository 自动拾取。
+var DefaultReadDB *gorm.DB
+
+// SetDefaultReadDB 注入全局读库（由 heims main 调用）。
+func SetDefaultReadDB(db *gorm.DB) { DefaultReadDB = db }
+
+// NewCRUDRepository 创建泛型仓储实例。
+// 若通过 SetDefaultReadDB 注入了读库，自动配置读写分离。
 func NewCRUDRepository[M any]() *CRUDRepository[M] {
 	r := &CRUDRepository[M]{
 		db:      mysql.DB.InternalDB(),
+		readDB:  DefaultReadDB,
 		pkField: "id",
 	}
-	// 尝试从 M 的 GORM 标签自动推导主键列名
 	r.detectPK()
 	return r
 }

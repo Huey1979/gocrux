@@ -30,14 +30,22 @@ type MongoCRUDRepository[M any] struct {
 	pkField  string
 }
 
+// DefaultReadCollProvider 全局读库 Collection 获取器。
+var DefaultReadCollProvider func(collectionName string) *mongo.Collection
+
+// SetReadCollProvider 注入读库 Collection 获取器。
+func SetReadCollProvider(fn func(string) *mongo.Collection) { DefaultReadCollProvider = fn }
+
 // NewMongoCRUDRepository 创建 MongoDB 泛型仓储。
-// collectionName: MongoDB 集合名。
 func NewMongoCRUDRepository[M any](collectionName string) *MongoCRUDRepository[M] {
 	r := &MongoCRUDRepository[M]{
 		pkField: "_id",
 	}
 	if mongodb.Database != nil {
 		r.coll = mongodb.Database.Collection(collectionName)
+	}
+	if DefaultReadCollProvider != nil {
+		r.readColl = DefaultReadCollProvider(collectionName)
 	}
 	r.detectPK()
 	return r
