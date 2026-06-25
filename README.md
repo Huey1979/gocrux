@@ -22,14 +22,18 @@ go get github.com/Huey1979/gocrux
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
 - [输入校验](#输入校验)
+  - [BatchErrorMode](#batcherrormode--批量错误收集)
 - [级联机制](#级联机制)
+  - [级联创建跨实体引用](#级联创建跨实体引用)
 - [版本管理](#版本管理)
   - [草稿可见性过滤](#草稿可见性过滤)
 - [身份认证与授权](#身份认证与授权)
 - [幂等支持](#幂等支持)
 - [操作日志与备份](#操作日志与备份)
 - [运行时日志（Request/Response/Business）](#运行时日志requestresponsebusiness)
+  - [管线 Trace 日志](#管线-trace-日志)
 - [列表查询条件](#列表查询条件)
+  - [RawList — 原生查询](#rawlist--原生查询)
 - [配置文件](#配置文件)
 - [代码生成器 gentity](#代码生成器-gentity)
 - [项目结构](#项目结构)
@@ -1038,6 +1042,32 @@ HTTP Body
 - **框架校验**：字段级别的类型、长度、范围、枚举 — **零配置即可用**
 - **业务校验**：跨字段逻辑、数据库唯一性、状态迁移 — 按需覆盖
 
+### BatchErrorMode — 批量错误收集
+
+`HandlerConfig.BatchErrorMode` 控制批量 Create 时的错误处理行为：
+
+```go
+HandlerConfig[entity.SysSite]{
+    BatchErrorMode: "collect", // 默认 "all_or_nothing"
+}
+```
+
+| 模式 | 行为 |
+|------|------|
+| `"all_or_nothing"`（默认） | 第一个校验错误即返回，不写入任何数据。向后兼容 |
+| `"collect"` | 逐条收集所有校验错误，标注每条出错数据的**索引**和**字段名**，统一返回。全部通过才开事务 |
+
+错误返回示例（`collect` 模式）：
+
+```
+共 3 条数据校验失败:
+  [1] 第2条 site_code: 不能为空
+  [2] 第3条 domain: 格式不正确，期望 URL
+  [3] 第7条 sort_order: 应为整数
+```
+
+> 注意：`collect` 模式仅影响**错误报告方式**——仍然全部通过才写入，不产生部分成功/部分失败的情况。用户修复所有报错后重新全量提交即可。
+
 ---
 
 ## 级联机制
@@ -1142,6 +1172,34 @@ handlerReg.Register("tag",    tagHandler)
 // 注入到需要级联的 Handler
 siteHandler.SetHandlerReg(handlerReg)
 ```
+
+### 级联创建跨实体引用
+
+级联 Create 时，若后续批次的子实体 FK 需要引用**同请求中前面批次刚创建的子实体**（ULID 尚未分配），可使用占位符机制：
+
+**1. 在源数据中标记 `_temp_ref`**：
+
+```json
+{
+  "form_code": "F001",
+  "form_fields": [
+    {"_temp_ref": "ff1", "field_code": "name"},
+    {"_temp_ref": "ff2", "field_code": "age"}
+  ],
+  "write_fields": [
+    {"form_field_ulid": "__ref:form_field:ff1__"}
+  ]
+}
+```
+
+**2. 在引用处使用占位符** `__ref:<handler_name>:<temp_ref>__`，框架在级联创建过程中自动替换为真实 ULID。
+
+**工作原理**：
+1. 创建 `form_fields` 前，框架收集 `_temp_ref` → 临时标记映射
+2. `form_fields` 创建完成，`ff1` → `01JXXXX...`，`ff2` → `01JYYYY...`
+3. 创建 `write_fields` 前，框架将 `__ref:form_field:ff1__` 替换为 `01JXXXX...`
+
+> `_temp_ref` 字段不会写入数据库，仅用于级联期间的临时引用。
 
 ---
 
@@ -1400,6 +1458,24 @@ logger.LogBusiness(c, "internal_error", ...)
 - **logrus 通道**：遵循配置的格式和输出（stdout/JSON/text），便于运维实时监控和日志采集
 - **BusinessLog 通道**：按天独立文件 + `request_id` 串联完整请求链路，便于事后排查
 
+### 管线 Trace 日志
+
+框架在 **6 个管线**的入口和出口自动记录结构化 trace 日志，写入 `BusinessLog`：
+
+| 管线 | 节点名 | 记录内容 |
+|------|--------|---------|
+| Create | `{svcName}.create.start` / `.end` | `count`、`elapsed_ms`、`error` |
+| Update | `{svcName}.update.start` / `.end` | 同上 |
+| Delete | `{svcName}.delete.start` / `.end` | `ids`、`elapsed_ms`、`error` |
+| Get | `{svcName}.get.start` / `.end` | `id`、`code`、`elapsed_ms` |
+| List | `{svcName}.list.start` / `.end` | `follow_published`、`elapsed_ms` |
+| Activate | `{svcName}.activate.start` / `.end` | `id`、`elapsed_ms` |
+| EditVersion | `{svcName}.edit_version.start` / `.end` | `id`、`elapsed_ms` |
+
+每条日志自动携带 `log_id`（request_id），可串联同一请求的所有管线节点和级联子调用。日志在 `logs/business_YYYY-MM-DD.log` 中按 `TRACE` 级别输出。
+
+**无需配置**——框架自动埋点，零侵入。
+
 ---
 
 ### KeywordFields — 关键字搜索
@@ -1480,6 +1556,24 @@ records, total, err := repo.ListByFilters(ctx, repository.ListFilters{
     PageSize: 20,
 })
 ```
+
+### RawList — 原生查询
+
+当 `ListByFilters` 无法表达复杂查询（JOIN、子查询、聚合等）时，可通过 `RawList` 直接执行原生 SQL / MQL：
+
+```go
+// MySQL: 直接执行 SQL
+var results []MyJoinView
+err := repo.RawList(ctx, &results,
+    "SELECT a.*, b.name FROM form a LEFT JOIN form_field b ON a.form_ulid = b.form_ulid",
+)
+
+// MongoDB: 传入 bson.M 过滤器
+var docs []entity.Product
+err := repo.RawList(ctx, &docs, bson.M{"status": "active"})
+```
+
+`RawList` 是 `Repo[M]` 接口方法，MySQL（GORM）和 MongoDB 均支持。
 
 ---
 
