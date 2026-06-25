@@ -249,19 +249,19 @@ func (d *BaseDAO) invalidateCacheByULID(ulid string) {
 	// TODO: 实现缓存失效逻辑
 }
 
-// ========== 错误定义 ==========
-
+// DAO 操作哨兵错误。
 var (
 	ErrRecordNotFound = &DAOError{Code: "E10001", Message: "记录不存在"}
 	ErrRecordExists   = &DAOError{Code: "E10002", Message: "记录已存在"}
 )
 
-// DAOError DAO错误
+// DAOError DAO 层错误类型，包含业务错误码。
 type DAOError struct {
-	Code    string
-	Message string
+	Code    string // 业务错误码
+	Message string // 错误描述
 }
 
+// Error 实现 error 接口。
 func (e *DAOError) Error() string {
 	return e.Message
 }

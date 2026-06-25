@@ -8,9 +8,11 @@ import (
 	"strings"
 )
 
-// KeywordSearch 关键字搜索配置（通过 context 从 Handler 传递到 Service）。
+// keywordSearchKey context key（内部使用）。
 type keywordSearchKey struct{}
 
+// KeywordSearch 关键字搜索配置，通过 context 从 Handler 传递到 Service。
+// Keyword 为搜索词，Fields 为需要做 LIKE 模糊匹配的 DB 列名列表。
 type KeywordSearch struct {
 	Keyword string
 	Fields  []string

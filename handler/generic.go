@@ -135,6 +135,11 @@ type HandlerConfig[M service.Record] struct {
 	Validate *ValidateConfig
 	// NormalizeFields 需表达式规范化的 JSON 字段名
 	NormalizeFields []string
+
+	// BatchErrorMode 批量操作错误处理模式（Create）。
+	//   "all_or_nothing"（默认）：第一个错误即返回，不写入任何数据。
+	//   "collect"：收集所有校验错误后统一返回，标注每条出错数据的索引和字段。
+	BatchErrorMode string
 }
 
 // GenericHandler 泛型 Handler。

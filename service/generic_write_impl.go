@@ -256,8 +256,7 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 
 // _beforeUpdateVersioned 版本化更新的 before 处理
 func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data any, old *M, vf *VersionFieldMapping) (any, any, error) {
-	// 1. 深拷贝旧数据
-	// æ·±æ·è´ï¼ä¸è½ç´æ¥ *(M)
+	// 1. 深拷贝旧数据（通过反射复制，避免指针共享）
 	oldPtrVal := reflect.ValueOf(*old)
 	for oldPtrVal.Kind() == reflect.Ptr {
 		oldPtrVal = oldPtrVal.Elem()

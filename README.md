@@ -17,12 +17,14 @@ go get github.com/Huey1979/gocrux
 - [忽略控制](#忽略控制)
 - [自关联展开](#自关联展开)
 - [List 字段裁剪](#list-字段裁剪)
+- [List 级联展开控制](#list-级联展开控制listskipcascades--expand)
 - [Entity → DTO 响应映射](#entity--dto-响应映射)
 - [路由注册](#路由注册)
 - [钩子系统](#钩子系统)
 - [输入校验](#输入校验)
 - [级联机制](#级联机制)
 - [版本管理](#版本管理)
+  - [草稿可见性过滤](#草稿可见性过滤)
 - [身份认证与授权](#身份认证与授权)
 - [幂等支持](#幂等支持)
 - [操作日志与备份](#操作日志与备份)
@@ -89,6 +91,7 @@ func (s *Site) SetUpdatedBy(userID string)  {}
 func (s *Site) SupportsDraft() bool         { return false }
 func (s *Site) SetDelete() bool             { s.IsDeleted = 1; return true }
 func (s *Site) PKField() string             { return "site_ulid" }
+func (s *Site) SelfFKField() string         { return "" }
 ```
 
 ### 2. 定义请求类型
@@ -225,6 +228,8 @@ type Repo[M any] interface {
     BatchFindByFK(ctx context.Context, fkField string, fkValues []any) ([]M, error)
     BatchHardDelete(ctx context.Context, ids []any) error
     BatchHardDeleteByFK(ctx context.Context, fkField string, fkValues []any) error
+    BatchDeprecateVersions(ctx context.Context, ids []any) error
+    BatchDeprecateVersionsByFK(ctx context.Context, fkField string, fkValues []any) error
 
     ListByFilters(ctx context.Context, filters ListFilters) ([]M, int64, error)
     ListAll(ctx context.Context) ([]M, error)
@@ -305,6 +310,7 @@ type Record interface {
     SupportsDraft() bool              // 是否支持草稿箱（版本管理）
     SetDelete() bool                  // 软删除标记（返回 true=软删, false=物理删）
     PKField() string                  // 主键数据库列名
+    SelfFKField() string              // 自关联外键字段名（如 "parent_ulid"）；空字符串=无自关联
 }
 ```
 
@@ -312,6 +318,13 @@ type Record interface {
 
 - `SetDelete() bool` 返回 `true`：实体有 `is_deleted` 字段，删除时执行 `UPDATE SET is_deleted=1`
 - 返回 `false`：物理删除，先写备份日志再 `DELETE`
+
+`ServiceConfig` 中的 `DeletedField` / `DeletedValue` 控制 List 查询时自动添加的软删除过滤条件：
+
+- `DeletedField`：软删除字段列名（默认 `"is_deleted"`）
+- `DeletedValue`：未删除时的字段值（默认 `int8(0)`）
+
+`_doList` 执行前会自动检查 `SetDelete()` 返回值：若为 `true` 则追加 `WHERE {DeletedField} = {DeletedValue}` 过滤器，确保列表查询不返回已软删除的记录。不支持软删的实体（`SetDelete()` 返回 `false`）不添加此过滤。
 
 ### SupportsDraft
 
@@ -332,6 +345,8 @@ type Config[M Record] struct {
     VersionMode            bool          // 启用版本管理模式
     VersionFields          *VersionFieldMapping // 版本字段映射
     UniqueFields           [][]string    // 唯一字段组
+    DeletedField           string        // 软删除字段列名（默认 "is_deleted"）
+    DeletedValue           any           // 软删除标记值（默认 1）
 }
 ```
 
@@ -403,6 +418,12 @@ type HandlerConfig[M service.Record] struct {
     FieldDepthLimits map[string]int       // 单字段深度上限（如 {"dept_ulid": 1}）
     FieldStopRules   map[string][]StopRule // 字段级截止规则（如 dept_ulid→-department:manager）
     ResponseMapper   func(M) any          // Entity→DTO 响应映射（可选，仅 HTTP 出口生效）
+    ListSkipFields   []string             // List 黑名单字段（优先级高于 ListKeepFields）
+    ListKeepFields   []string             // List 白名单字段（仅 Skip 为空时生效）
+    ListSkipCascades []string             // List 默认不展开的级联子表名（nil=全部展开，[]string{}=全部跳过）
+    KeywordFields    []string             // 关键字搜索字段列表（?keyword=xxx OR LIKE）
+    Validate         *ValidateConfig      // 输入校验规则（nil=自动推导）
+    NormalizeFields  []string             // 需表达式规范化的 JSON 字段名
 }
 ```
 
@@ -526,11 +547,12 @@ GET /api/v1/users/get?fstop=dept_ulid=-department:manager,department:parent_id
 
 | 参数 | 作用 |
 |------|------|
-| `?ignore=ref` | 跳过 References 展开 |
-| `?ignore=cascade` | 跳过 Cascades 展开 |
-| `?ignore=all` | 跳过所有展开 |
-| `?ignoreRef=site_ulid` | 跳过特定 References 字段 |
-| `?ignoreCascade=domains` | 跳过特定 Cascades 字段 |
+| `?ignore=fieldA,fieldB` | 跳过指定字段的展开（逗号分隔，匹配 ResultField/ChildrenField） |
+| `?ignoreRef=true` | 跳过所有 References + ChildRefs 展开 |
+| `?ignoreCascade=true` | 跳过所有 Cascades 展开 |
+| `?ignoreAll=true` | 跳过所有展开（仅返回裸数据） |
+
+优先级：`ignoreAll > ignoreRef/ignoreCascade > ignore`。未传入任何参数时无额外开销。
 
 ### 自关联展开
 
@@ -605,6 +627,29 @@ HandlerConfig[entity.SysForm]{
 **优先级**：`ListSkipFields` > `ListKeepFields`。两者同时配置时 hanya 生效 Skip，Keep 被忽略。均未配置时全字段返回（向后兼容）。
 
 **执行时机**：所有级联展开（References/ChildRefs/Cascades）完成之后执行，级联数据不受裁剪影响。
+
+### List 级联展开控制（`ListSkipCascades` + `?expand`）
+
+**约定**：List 接口默认不展开 Cascades 级联数据（与 Get 行为不同），通过 `ListSkipCascades` 配置和 `?expand` 参数精确控制。
+
+**`ListSkipCascades`** 配置：
+
+```go
+HandlerConfig[entity.SysForm]{
+    ListSkipCascades: []string{},              // 空切片 = 全部跳过（推荐）
+    // ListSkipCascades: nil,                  // nil = 全部展开（向后兼容）
+    // ListSkipCascades: []string{"list_layout"}, // 仅跳过 list_layout
+}
+```
+
+**HTTP 覆盖**：
+
+| 参数 | 作用 |
+|------|------|
+| `?expand=name1,name2` | 仅展开指定的级联（逗号分隔） |
+| `?expandAll=true` | 强制全部展开（覆盖 `ListSkipCascades`） |
+
+优先级：`?expandAll=true > ?expand=list > ListSkipCascades 配置 > 默认不展开`。
 
 ### Entity → DTO 响应映射
 
@@ -1173,6 +1218,17 @@ GET /api/v1/sites/get?id=xxx&follow_published=true
 GET /api/v1/sites/get?code=S001     # 按 code 查当前生效版本（is_current=1, is_deleted=0）
 ```
 
+### 草稿可见性过滤
+
+版本化模式下 `_doList` 自动在 SQL 层添加草稿可见性过滤：
+
+| 场景 | 可见范围 |
+|------|---------|
+| 未登录用户 | 仅 `version_status = 'published'` |
+| 登录用户 | `published` OR (`draft` AND `created_by = 当前用户`) |
+
+这确保前端列表接口默认不暴露他人的草稿数据。Service 层通过 `GetUserULID(ctx)` 获取当前用户，若 ctx 中无用户信息则按未登录处理。过滤在 SQL 层执行（而非 `_afterList` 内存过滤），保证分页准确性。
+
 ---
 
 ## 身份认证与授权
@@ -1406,6 +1462,8 @@ type Filter struct {
 | 小于等于 | `OpLTE` | `field <= ?` | 数字/时间 |
 | IN | `OpIn` | `field IN (?,?)` | 切片 |
 | BETWEEN | `OpRange` | `field BETWEEN ? AND ?` | 长度为 2 的切片 |
+| 原生 SQL | `OpRaw` | 直接拼接 SQL 片段 | `(string, []any)` 或仅 `string` |
+| OR 组合 | `or_group` | 子条件 OR 连接，整体 AND 嵌入 | `[]Filter` 切片 |
 
 ### 使用示例
 
@@ -1645,10 +1703,17 @@ blues.RegisterUser(apiGroup)
 gocrux/
 ├── cmd/                    # 入口示例
 ├── handler/                # HTTP 处理层
-│   ├── generic.go          # GenericHandler 定义 + before/do/after
-│   ├── generic_impl.go     # 内置 _before/_do/_after 默认实现
+│   ├── generic.go          # GenericHandler 定义 + HandlerConfig
+│   ├── generic_impl.go     # 内置 _before/_do/_after 默认实现 + expandCascadesBatch
+│   ├── generic_read.go     # Get/List 入口 + expandGet + depth/ignore 注入
+│   ├── generic_read_impl.go # _doList 批量展开 + ListSkipCascades + expand 控制
+│   ├── generic_write.go    # Create/Update/Delete 入口 + createPipeline
+│   ├── generic_write_impl.go # _doCreate/_doUpdate/_doDelete 级联编排
+│   ├── generic_version.go  # Activate/ListVersions/EditVersion 入口
+│   ├── generic_version_impl.go # 版本操作默认实现
+│   ├── generic_util.go     # injectDepth/injectIgnore/injectStop + ResponseMapper + aux
+│   ├── cascade.go          # depthCtx/ignoreCtx/visitedCtx/fieldLimitCtx + CascadeRelation/StopRule
 │   ├── hooks.go            # HandlerHooks 钩子类型定义
-│   ├── cascade.go          # CascadeHandler 接口 + CascadeRelation/ReferenceRelation/ChildRefRelation
 │   ├── registry.go         # HandlerRegistry 注册表
 │   ├── txcoordinator.go    # TxCoordinator 事务编排器
 │   ├── request.go          # RequestFactory + MapRequest + map→struct 合并
@@ -1656,10 +1721,15 @@ gocrux/
 │   ├── response.go         # Response 结构 + Success/Error/InternalError
 │   ├── auth_hooks.go       # UserInfo + Authenticator + Authorizer 接口
 │   ├── errors.go           # Service error → HTTP BusinessCode 映射
+│   ├── validation.go       # 输入校验核心（类型转换 + 格式校验）
+│   ├── validation_config.go # 校验规则 YAML 加载
 │   └── utils.go            # extractPK/extractMapID/removeMapID
 ├── service/                # 业务逻辑层
-│   ├── generic.go          # GenericService 定义 + CrudRequest/Record 接口
+│   ├── generic.go          # GenericService 定义 + Record/CrudRequest 接口 + Config
 │   ├── generic_impl.go     # 内置 _before/_do/_after 默认实现
+│   ├── generic_read_impl.go # _doList 读取实现（含软删除/draft 过滤）
+│   ├── generic_write_impl.go # _doCreate/_doUpdate/_doDelete 写入实现（含版本化/级联）
+│   ├── generic_version_impl.go # 版本操作实现（Activate/ListVersions/EditVersion）
 │   ├── hooks.go            # Hooks 钩子类型定义
 │   ├── registry.go         # ServiceRegistry 注册表
 │   ├── request.go          # CrudRequest/Mergeable/Identifiable/Validatable 接口
@@ -1668,7 +1738,9 @@ gocrux/
 ├── repository/             # 数据访问层
 │   ├── crud.go             # CRUDRepository 泛型仓储 + ListFilters + FilterOp
 │   ├── base.go             # BaseRepository + VersionRepository
-│   └── dao.go              # BaseDAO（缓存/审计扩展点）
+│   ├── dao.go              # BaseDAO（缓存/审计扩展点）
+│   ├── repo.go             # Repo[M] 统一仓储接口
+│   └── mongo_repo.go       # MongoCRUDRepository MongoDB 仓储
 ├── internal/               # 框架内部
 │   ├── bootstrap/          # 启动引导（Init/InitMySQL/InitOther/Migrate/Close）
 │   ├── config/             # 配置加载（Config/Load + 各配置段结构体）

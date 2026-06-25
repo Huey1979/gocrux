@@ -38,6 +38,39 @@ type ValidateConfig struct {
 	List   *EndpointRules `json:"list" yaml:"list"`
 }
 
+// ============================================================
+// 1.5 批量错误类型
+// ============================================================
+
+// BatchError 单条数据的校验错误详情。
+type BatchError struct {
+	Index   int    // 数据在批量请求中的位置（0-based）
+	Field   string // 出错字段名（"" 表示非字段级错误，如唯一性冲突）
+	Message string // 错误描述
+}
+
+// BatchErrors 批量错误集合，实现 error 接口。
+type BatchErrors struct {
+	Errors []BatchError
+}
+
+// Error 返回所有错误的汇总信息。
+func (e *BatchErrors) Error() string {
+	if len(e.Errors) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("共 %d 条数据校验失败:", len(e.Errors)))
+	for i, be := range e.Errors {
+		if be.Field != "" {
+			sb.WriteString(fmt.Sprintf("\n  [%d] 第%d条 %s: %s", i+1, be.Index+1, be.Field, be.Message))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n  [%d] 第%d条: %s", i+1, be.Index+1, be.Message))
+		}
+	}
+	return sb.String()
+}
+
 // isFrameworkMetaParam 判断是否为框架控制参数（不计入业务校验）。
 func isFrameworkMetaParam(key string) bool {
 	switch key {
@@ -478,6 +511,114 @@ func validateInput(rules EndpointRules, data map[string]any, endpoint string) er
 		}
 	}
 	return nil
+}
+
+// validateInputCollect 与 validateInput 相同，但不返回第一个错误，而是收集所有字段的校验错误。
+// 返回 nil 表示全部通过；返回 *BatchErrors 包含每条数据的错误详情。
+func validateInputCollect(rules EndpointRules, data map[string]any, endpoint string, index int) *BatchErrors {
+	var batchErrs *BatchErrors
+	for field, rule := range rules {
+		val, exists := data[field]
+
+		// 必填检查
+		if rule.Required && (!exists || isEmpty(val)) {
+			if batchErrs == nil {
+				batchErrs = &BatchErrors{}
+			}
+			batchErrs.Errors = append(batchErrs.Errors, BatchError{
+				Index: index, Field: field, Message: "不能为空",
+			})
+			continue
+		}
+		if !exists || val == nil {
+			continue
+		}
+		if !rule.Required && isEmpty(val) {
+			continue
+		}
+
+		// 类型转换
+		if rule.Type != "" {
+			newVal, err := coerceValue(field, rule.Type, val)
+			if err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+			data[field] = newVal
+			val = newVal
+		}
+
+		// 格式校验
+		if rule.Format != "" {
+			if err := checkFormat(field, rule.Format, val); err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+		}
+
+		// 数值范围
+		if rule.Type == "int" || rule.Type == "float" {
+			if err := checkNumericRange(field, rule, val); err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+		}
+
+		// 字符串长度
+		if rule.MinLength != nil || rule.MaxLength != nil {
+			if err := checkStringLength(field, rule, val); err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+		}
+
+		// 枚举
+		if len(rule.Enum) > 0 {
+			if err := checkEnum(field, rule.Enum, val); err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+		}
+
+		// 正则
+		if rule.Pattern != "" {
+			if err := checkPattern(field, rule.Pattern, val); err != nil {
+				if batchErrs == nil {
+					batchErrs = &BatchErrors{}
+				}
+				batchErrs.Errors = append(batchErrs.Errors, BatchError{
+					Index: index, Field: field, Message: err.Error(),
+				})
+				continue
+			}
+		}
+	}
+	return batchErrs
 }
 
 // isEmpty 判断值是否为空（nil / 空字符串）。

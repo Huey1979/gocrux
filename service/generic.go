@@ -67,6 +67,7 @@ const (
 
 type ctxKey string
 
+// CtxKeyUserULID context key — 当前用户 ULID（由 auth middleware 注入）。
 const CtxKeyUserULID ctxKey = "user_ulid"
 
 // GetUserULID 从 ctx 提取用户 ULID，可能为空
@@ -83,6 +84,7 @@ func GetUserULID(ctx context.Context) string {
 // ctx key — 请求 ID（由 middleware 注入，关联日志文件）
 // ============================================================
 
+// CtxKeyRequestID context key — 请求 ID（由 middleware 注入，串联日志）。
 const CtxKeyRequestID ctxKey = "log_id"
 
 // GetRequestID 从 ctx 提取请求 ID
@@ -139,11 +141,14 @@ type Config[M Record] struct {
 
 	// UniqueFields 需要唯一性检查的字段列表，注意联合唯一索引（如 [["mobile"],["dept_id", "role_id"]]表示mobile要唯一，dept_id+role_id也要唯一）。
 	// 仅在 EnableUniqueValidation == true 时生效。
+	UniqueFields [][]string
+
+	// DeletedField 软删除标记字段的 DB 列名（默认 "is_deleted"）。
+	// _doList 自动追加 DeletedField = DeletedValue 过滤。
 	DeletedField string
 
+	// DeletedValue 未删除时的字段值（默认 int8(0)）。配合 DeletedField 使用。
 	DeletedValue any
-
-	UniqueFields [][]string
 }
 
 // updatePair 版本化更新时，在 _beforeUpdate 与 _doUpdate 之间传递新旧实体。
@@ -332,6 +337,8 @@ func (s *GenericService[M]) Create(ctx context.Context, input []CrudRequest[M]) 
 	return result, err
 }
 
+// Update 更新单条记录（版本化模式下创建新版本行，非原地修改）。
+// id 为记录主键，data 为 map[string]any 或 CrudRequest[M]。
 func (s *GenericService[M]) Update(ctx context.Context, id, data any) (*M, error) {
 	pid, pdata, err := s.beforeUpdate(ctx, id, data)
 	if err != nil {
@@ -358,6 +365,8 @@ func (s *GenericService[M]) Delete(ctx context.Context, ids, codes any) error {
 	return s.afterDelete(ctx, pid, pdata)
 }
 
+// Get 按主键查询单条记录（不含展开，仅数据库查询）。
+// 若需级联展开数据，使用 Handler 层的 DoGetByID。
 func (s *GenericService[M]) Get(ctx context.Context, id any) (*M, error) {
 	pid, err := s.beforeGet(ctx, id)
 	if err != nil {
@@ -399,6 +408,8 @@ func (s *GenericService[M]) ResolveOneToPublished(ctx context.Context, record *M
 	return &records[0], nil
 }
 
+// List 分页查询记录列表。query 为 map[string]any 或 ListFilters。
+// 自动追加软删除过滤（SetDelete()=true 时）和版本化过滤（VersionMode 时）。
 func (s *GenericService[M]) List(ctx context.Context, query any) ([]M, int64, error) {
 	pq, err := s.beforeList(ctx, query)
 	if err != nil {
@@ -428,6 +439,8 @@ func (s *GenericService[M]) Activate(ctx context.Context, id any) error {
 	return s.afterActivate(ctx, pid)
 }
 
+// ListVersions 查询指定 code 的所有历史版本，按版本号降序排列。
+// 仅版本化模式生效；id 和 code 至少传一个。
 func (s *GenericService[M]) ListVersions(ctx context.Context, id any, code string) ([]M, error) {
 	pid, err := s.beforeListVersions(ctx, id, code)
 	if err != nil {

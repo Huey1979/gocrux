@@ -515,6 +515,15 @@ func (r *CRUDRepository[M]) RawQuery(ctx context.Context, dest any, sql string, 
 	return r.DB(ctx).Raw(sql, args...).Scan(dest).Error
 }
 
+// RawList 实现 Repo[M] 接口。委托 RawQuery 执行原生 SQL。
+func (r *CRUDRepository[M]) RawList(ctx context.Context, dest any, query any, args ...any) error {
+	sql, ok := query.(string)
+	if !ok {
+		return errors.New("CRUDRepository.RawList: query must be string (SQL)")
+	}
+	return r.RawQuery(ctx, dest, sql, args...)
+}
+
 // ============================================================
 // 聚合
 // ============================================================

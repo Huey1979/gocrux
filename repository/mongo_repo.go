@@ -14,16 +14,12 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// ============================================================
-// MongoCRUDRepository MongoDB 泛型仓储
+// MongoCRUDRepository MongoDB 泛型仓储，提供与 CRUDRepository 一致的 CRUD 接口。
 //
-// 提供与 CRUDRepository 一致的 CRUD 接口，但底层使用 MongoDB。
 // 用法：
 //
 //	repo := NewMongoCRUDRepository[entity.Product]("products")
 //	product, err := repo.GetByID(ctx, "01Jxxx...")
-// ============================================================
-
 type MongoCRUDRepository[M any] struct {
 	coll     *mongo.Collection // 写库
 	readColl *mongo.Collection // 读库（nil = 回退写库）
@@ -33,10 +29,11 @@ type MongoCRUDRepository[M any] struct {
 // DefaultReadCollProvider 全局读库 Collection 获取器。
 var DefaultReadCollProvider func(collectionName string) *mongo.Collection
 
-// SetReadCollProvider 注入读库 Collection 获取器。
+// SetReadCollProvider 注入读库 Collection 获取器（由应用启动时调用）。
 func SetReadCollProvider(fn func(string) *mongo.Collection) { DefaultReadCollProvider = fn }
 
 // NewMongoCRUDRepository 创建 MongoDB 泛型仓储。
+// 若已通过 SetReadCollProvider 注入读库获取器，自动配置读写分离。
 func NewMongoCRUDRepository[M any](collectionName string) *MongoCRUDRepository[M] {
 	r := &MongoCRUDRepository[M]{
 		pkField: "_id",
@@ -296,6 +293,25 @@ func (r *MongoCRUDRepository[M]) ListByFilters(ctx context.Context, filters List
 	return r.List(ctx, f, filters.Page, filters.PageSize)
 }
 
+// RawList 实现 Repo[M] 接口。query 为 bson.M 过滤器。
+func (r *MongoCRUDRepository[M]) RawList(ctx context.Context, dest any, query any, args ...any) error {
+	filter, ok := query.(bson.M)
+	if !ok {
+		return fmt.Errorf("MongoCRUDRepository.RawList: query must be bson.M")
+	}
+	results, _, err := r.List(ctx, filter, 1, 0)
+	if err != nil {
+		return err
+	}
+	// dest 必须为 *[]M，通过反射赋值
+	dv := reflect.ValueOf(dest)
+	if dv.Kind() != reflect.Ptr || dv.IsNil() {
+		return fmt.Errorf("RawList dest must be a non-nil pointer to slice, got %T", dest)
+	}
+	dv.Elem().Set(reflect.ValueOf(results))
+	return nil
+}
+
 // BatchSoftDelete 批量软删除。
 func (r *MongoCRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
 	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"isDeleted": int8(1)}})
@@ -348,7 +364,8 @@ func (r *MongoCRUDRepository[M]) BatchHardDeleteByFK(ctx context.Context, fkFiel
 	return err
 }
 
-// toBsonFilter 将 ListFilters 转为 MongoDB bson 查询。
+// toBsonFilter 将 ListFilters 转为 MongoDB bson 查询条件。
+// 单个 Filter 直接转换，多个 Filter 用 $and 包装。
 func toBsonFilter(f ListFilters) bson.M {
 	if len(f.Filters) == 0 {
 		return bson.M{}
@@ -363,6 +380,7 @@ func toBsonFilter(f ListFilters) bson.M {
 	return bson.M{"$and": and}
 }
 
+// filterToBson 将单个 Filter 转为 MongoDB bson 查询条件。
 func filterToBson(f Filter) bson.M {
 	switch f.Op {
 	case OpEQ:

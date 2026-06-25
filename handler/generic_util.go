@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -570,6 +571,101 @@ func (h *GenericHandler[M]) handleError(c *gin.Context, err error) {
 		return
 	}
 	ErrorWithMsg(c, code, err.Error())
+}
+
+// ============================================================
+// 8. 跨实体引用解析（级联 create 时子实体引用同批次其他子实体的 ULID）
+// ============================================================
+
+// cascadeRefMap 级联创建过程中的临时引用→真实 ULID 映射表。
+// key 为 "handlerName:tempRef"，value 为创建后分配的真实 ULID。
+// 级联创建多批子实体时共享此映射，后续批次可引用前面已创建实体的 ULID。
+type cascadeRefMap map[string]string
+
+// crossRefMarker 占位符前缀。子数据中 FK 值以此前缀开头时，表示需要跨实体引用解析。
+// 格式: __ref:handler_name:temp_ref_id__
+const crossRefMarker = "__ref:"
+
+// resolveCrossRefs 扫描 data 中所有 map 和 string 值，将 __ref:handler:temp__ 占位符
+// 替换为 refMap 中对应的真实 ULID。若占位符引用的目标尚未创建（不在 refMap 中），保持不变。
+func resolveCrossRefs(data []map[string]any, refMap cascadeRefMap) {
+	if len(refMap) == 0 {
+		return
+	}
+	for _, d := range data {
+		resolveCrossRefsInMap(d, refMap)
+	}
+}
+
+// resolveCrossRefsInMap 递归解析单个 map 中的跨实体引用占位符。
+func resolveCrossRefsInMap(m map[string]any, refMap cascadeRefMap) {
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			if strings.HasPrefix(val, crossRefMarker) {
+				if resolved, ok := refMap[val]; ok {
+					m[k] = resolved
+				}
+			}
+		case map[string]any:
+			resolveCrossRefsInMap(val, refMap)
+		case []any:
+			for i, item := range val {
+				if sm, ok := item.(map[string]any); ok {
+					resolveCrossRefsInMap(sm, refMap)
+				} else if s, ok := item.(string); ok && strings.HasPrefix(s, crossRefMarker) {
+					if resolved, ok := refMap[s]; ok {
+						val[i] = resolved
+					}
+				}
+			}
+		}
+	}
+}
+
+// collectTempRefs 从子数据中收集 _temp_ref → handlerName 的映射。
+// 返回 map[_temp_ref]handlerName，供 DoCreate 返回后用真实 ULID 替换。
+func collectTempRefs(data []map[string]any, handlerName string) map[string]string {
+	out := make(map[string]string)
+	for _, d := range data {
+		if ref, ok := d["_temp_ref"].(string); ok && ref != "" {
+			out[ref] = handlerName
+			delete(d, "_temp_ref") // 不写入数据库
+		}
+	}
+	return out
+}
+
+// updateRefMap 根据 DoCreate 返回的 PK 列表建立引用映射。
+// 假设 data[i] 对应 pks[i]（DoCreate 按顺序返回 PK），
+// 但 _temp_ref 已被 collectTempRefs 删除，因此需要额外的 tempRefOrder 来记录顺序。
+// 简化方案：在 collectTempRefs 中同时记录 tempRef → index 的对应关系。
+type tempRefEntry struct {
+	handlerName string
+	index       int // 在 childData 切片中的位置
+}
+
+// collectTempRefsOrdered 收集 _temp_ref → (handlerName, index) 的映射。
+func collectTempRefsOrdered(data []map[string]any, handlerName string) map[string]tempRefEntry {
+	out := make(map[string]tempRefEntry)
+	for i, d := range data {
+		if ref, ok := d["_temp_ref"].(string); ok && ref != "" {
+			out[ref] = tempRefEntry{handlerName: handlerName, index: i}
+			delete(d, "_temp_ref") // 不写入数据库
+		}
+	}
+	return out
+}
+
+// updateRefMap 根据 DoCreate 返回的 PK 列表，将 _temp_ref → PK 写入 refMap。
+// tempRefs 为 collectTempRefsOrdered 的返回值，pks 为 DoCreate 按序返回的主键列表。
+func updateRefMap(refMap cascadeRefMap, tempRefs map[string]tempRefEntry, pks []any) {
+	for ref, entry := range tempRefs {
+		if entry.index < len(pks) {
+			fullKey := crossRefMarker + entry.handlerName + ":" + ref + "__"
+			refMap[fullKey] = fmt.Sprint(pks[entry.index])
+		}
+	}
 }
 
 // normalizeFields 对请求 map 中配置的 JSON 字段做表达式规范化。

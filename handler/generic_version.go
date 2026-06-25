@@ -3,8 +3,11 @@ package handler
 import (
 	"context"
 	"encoding/json"
+
 	errs "github.com/Huey1979/gocrux/errors"
+
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 )
 
 // ============================================================
@@ -47,7 +50,9 @@ func (h *GenericHandler[M]) Activate(c *gin.Context) {
 }
 
 // activatePipeline 统一管线。
-func (h *GenericHandler[M]) activatePipeline(ctx context.Context, id any) error {
+func (h *GenericHandler[M]) activatePipeline(ctx context.Context, id any) (err error) {
+	start := traceStart(ctx, h.svcName+".activate", logrus.Fields{"id": id})
+	defer func() { traceEnd(ctx, h.svcName+".activate", start, err) }()
 	pid, err := h.beforeActivate(ctx, id)
 	if err != nil {
 		return err
@@ -226,7 +231,9 @@ func (h *GenericHandler[M]) EditVersion(c *gin.Context) {
 }
 
 // editVersionPipeline 统一管线。
-func (h *GenericHandler[M]) editVersionPipeline(ctx context.Context, id any, patches map[string]any) (*M, error) {
+func (h *GenericHandler[M]) editVersionPipeline(ctx context.Context, id any, patches map[string]any) (_ *M, err error) {
+	start := traceStart(ctx, h.svcName+".edit_version", logrus.Fields{"id": id})
+	defer func() { traceEnd(ctx, h.svcName+".edit_version", start, err) }()
 	pid, ppatches, err := h.beforeEditVersion(ctx, id, patches)
 	if err != nil {
 		return nil, err

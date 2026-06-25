@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/gin-gonic/gin"
 )
@@ -94,7 +95,9 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 }
 
 // getPipeline 统一管线（HTTP 入口共享）。
-func (h *GenericHandler[M]) getPipeline(ctx context.Context, req *GetRequest) (map[string]any, error) {
+func (h *GenericHandler[M]) getPipeline(ctx context.Context, req *GetRequest) (_ map[string]any, err error) {
+	start := traceStart(ctx, h.svcName+".get", logrus.Fields{"id": req.ID, "code": req.Code})
+	defer func() { traceEnd(ctx, h.svcName+".get", start, err) }()
 	preq, err := h.beforeGet(ctx, req)
 	if err != nil {
 		return nil, err
@@ -427,7 +430,9 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 }
 
 // listPipeline 统一管线。
-func (h *GenericHandler[M]) listPipeline(ctx context.Context, query any, followPublished bool) ([]map[string]any, int64, error) {
+func (h *GenericHandler[M]) listPipeline(ctx context.Context, query any, followPublished bool) (_ []map[string]any, _ int64, err error) {
+	start := traceStart(ctx, h.svcName+".list", logrus.Fields{"follow_published": followPublished})
+	defer func() { traceEnd(ctx, h.svcName+".list", start, err) }()
 	pq, err := h.beforeList(ctx, query)
 	if err != nil {
 		return nil, 0, err

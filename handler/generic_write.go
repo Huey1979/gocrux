@@ -3,10 +3,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 )
 
 // PKField CascadeHandler 接口实现，返回实体 M 的主键数据库列名。
@@ -49,11 +51,29 @@ func (h *GenericHandler[M]) Create(c *gin.Context) {
 }
 
 // createPipeline 统一管线：HTTP 和级联共享。
-func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[string]any) ([]*M, error) {
+func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[string]any) (_ []*M, err error) {
+	start := traceStart(ctx, h.svcName+".create", logrus.Fields{"count": len(rawReqs)})
+	defer func() { traceEnd(ctx, h.svcName+".create", start, err) }()
+
 	// 框架层校验：类型/长度/必填等（自动推导 + 用户配置）
-	for i, raw := range rawReqs {
-		if err := validateInput(h.validateRules.Create, raw, "create"); err != nil {
-			return nil, errs.ErrReqValidation(i, err)
+	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
+		var collected *BatchErrors
+		for i, raw := range rawReqs {
+			if berrs := validateInputCollect(h.validateRules.Create, raw, "create", i); berrs != nil {
+				if collected == nil {
+					collected = &BatchErrors{}
+				}
+				collected.Errors = append(collected.Errors, berrs.Errors...)
+			}
+		}
+		if collected != nil {
+			return nil, collected
+		}
+	} else {
+		for i, raw := range rawReqs {
+			if err := validateInput(h.validateRules.Create, raw, "create"); err != nil {
+				return nil, errs.ErrReqValidation(i, err)
+			}
 		}
 	}
 
@@ -63,9 +83,26 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 	}
 
 	// 业务字段校验（具体 Request 的 Validate()，MapRequest 为 no-op）
-	for i, r := range reqs {
-		if err := r.Validate(); err != nil {
-			return nil, errs.ErrReqValidation(i, err)
+	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
+		var collected *BatchErrors
+		for i, r := range reqs {
+			if err := r.Validate(); err != nil {
+				if collected == nil {
+					collected = &BatchErrors{}
+				}
+				collected.Errors = append(collected.Errors, BatchError{
+					Index: i, Message: err.Error(),
+				})
+			}
+		}
+		if collected != nil {
+			return nil, collected
+		}
+	} else {
+		for i, r := range reqs {
+			if err := r.Validate(); err != nil {
+				return nil, errs.ErrReqValidation(i, err)
+			}
 		}
 	}
 
@@ -160,7 +197,9 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。
 // rawReqs 为待处理的原始请求 map 列表；parentVersioned 表示父链是否已出现版本化节点。
-func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[string]any, parentVersioned bool) ([]*M, error) {
+func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[string]any, parentVersioned bool) (_ []*M, err error) {
+	start := traceStart(ctx, h.svcName+".update", logrus.Fields{"count": len(rawReqs)})
+	defer func() { traceEnd(ctx, h.svcName+".update", start, err) }()
 	// 框架层校验：类型/长度等（自动推导 + 用户配置）
 	for i, raw := range rawReqs {
 		if err := validateInput(h.validateRules.Update, raw, "update"); err != nil {
@@ -266,7 +305,9 @@ func (h *GenericHandler[M]) Delete(c *gin.Context) {
 }
 
 // deletePipeline 统一管线。
-func (h *GenericHandler[M]) deletePipeline(ctx context.Context, ids, codes any) error {
+func (h *GenericHandler[M]) deletePipeline(ctx context.Context, ids, codes any) (err error) {
+	start := traceStart(ctx, h.svcName+".delete", logrus.Fields{"ids": ids})
+	defer func() { traceEnd(ctx, h.svcName+".delete", start, err) }()
 	pid, pdata, err := h.beforeDelete(ctx, ids, codes)
 	if err != nil {
 		return err
