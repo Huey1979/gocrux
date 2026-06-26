@@ -11,11 +11,16 @@ import (
 // keywordSearchKey context key（内部使用）。
 type keywordSearchKey struct{}
 
+// KwField 关键字搜索字段配置（service 层，避免循环引用 handler 包）。
+type KwField struct {
+	Field string // DB 列名
+	Exact bool   // true=精确匹配(=), false=模糊匹配(LIKE %keyword%)
+}
+
 // KeywordSearch 关键字搜索配置，通过 context 从 Handler 传递到 Service。
-// Keyword 为搜索词，Fields 为需要做 LIKE 模糊匹配的 DB 列名列表。
 type KeywordSearch struct {
 	Keyword string
-	Fields  []string
+	Fields  []KwField
 }
 
 // WithKeywordSearch 将关键字搜索配置注入 context。

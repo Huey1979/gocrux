@@ -106,13 +106,19 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		return all, int64(len(all)), nil
 	}
 
-	// keyword 关键字搜索：多字段 OR LIKE 匹配
+	// keyword 关键字搜索：多字段 OR 匹配（支持模糊/精确）
 	if ks, ok := ctx.Value(keywordSearchKey{}).(KeywordSearch); ok && ks.Keyword != "" {
 		keywordFilters := make([]repository.Filter, 0, len(ks.Fields))
-		for _, field := range ks.Fields {
-			keywordFilters = append(keywordFilters, repository.Filter{
-				Field: field, Op: repository.OpLike, Value: "%" + ks.Keyword + "%",
-			})
+		for _, kf := range ks.Fields {
+			if kf.Exact {
+				keywordFilters = append(keywordFilters, repository.Filter{
+					Field: kf.Field, Op: repository.OpEQ, Value: ks.Keyword,
+				})
+			} else {
+				keywordFilters = append(keywordFilters, repository.Filter{
+					Field: kf.Field, Op: repository.OpLike, Value: "%" + ks.Keyword + "%",
+				})
+			}
 		}
 		f.Filters = append(f.Filters, repository.Filter{
 			Op: "or_group", Value: keywordFilters,

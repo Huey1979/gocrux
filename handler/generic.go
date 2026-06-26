@@ -15,6 +15,20 @@ type GetRequest struct {
 	FollowPublished bool   // 是否解析为已发布版本（?follow_published=true）
 }
 
+// KeywordMatch 关键词匹配模式
+type KeywordMatch string
+
+const (
+	KeywordFuzzy KeywordMatch = "fuzzy" // LIKE %keyword%
+	KeywordExact KeywordMatch = "exact" // = keyword
+)
+
+// KeywordField 关键词搜索字段配置
+type KeywordField struct {
+	Field string       // DB 列名
+	Match KeywordMatch // 匹配模式，默认 fuzzy
+}
+
 // ============================================================
 // 2. 基础定义：Config / Handler / 构造函数 / 注入
 // ============================================================
@@ -119,9 +133,9 @@ type HandlerConfig[M service.Record] struct {
 
 	// KeywordFields 关键字搜索字段列表。
 	// nil = 不支持关键字搜索（向后兼容）。
-	// GET 参数 ?keyword=xxx 在这些字段上做 LIKE %xxx% OR 模糊匹配。
-	// 例：[]string{"form_code", "form_name"}
-	KeywordFields []string
+	// GET 参数 ?keyword=xxx 在这些字段上做 OR 模糊/精确匹配。
+	// 例：[]KeywordField{{Field:"form_code",Match:KeywordExact},{Field:"form_name",Match:KeywordFuzzy}}
+	KeywordFields []KeywordField
 
 	// Validate 输入校验规则（可选）。
 	// 为 nil 时使用自动推导的默认规则（从 entity struct 反射类型信息）。
