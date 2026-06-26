@@ -11,6 +11,7 @@ import (
 var (
 	ErrUniqueValidationFailed = errors.New("unique validation failed")
 	ErrInvalidParam           = errors.New("参数无效")
+	ErrDuplicateCode          = errors.New("编码已存在，请更换 form_code 或使用 Update 更新现有表单")
 )
 
 // ============================================================
