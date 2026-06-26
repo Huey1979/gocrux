@@ -134,9 +134,12 @@ func deriveFieldRules[M any]() EndpointRules {
 
 		// 主键/ULID 字段：自动 max_length=26 + format=ulid，不设为 Required
 		// （SetID() 自动生成主键，用户无需传入）
-		if strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
+		isPK := strings.Contains(sf.Tag.Get("gorm"), "primaryKey")
+		if isPK && strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
 			rule.MaxLength = intPtr(26)
 			rule.Format = "ulid"
+		} else if strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
+			rule.MaxLength = intPtr(26)
 		} else {
 			// gorm 标签约束（仅对非 ULID 字段生效）
 			gormTag := sf.Tag.Get("gorm")
