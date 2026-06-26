@@ -126,8 +126,15 @@ func mergeByJSON[M any](m map[string]any, target *M) error {
 		currentMap = make(map[string]any)
 	}
 
-	// 3. 用请求 map 覆盖
+	// 3. 用请求 map 覆盖（空字符串不覆盖 target 已有非空值，保护 SetDefaults）
 	for k, v := range m {
+		if strVal, ok := v.(string); ok && strVal == "" {
+			if existing, exists := currentMap[k]; exists {
+				if existStr, ok := existing.(string); ok && existStr != "" {
+					continue
+				}
+			}
+		}
 		currentMap[k] = v
 	}
 
