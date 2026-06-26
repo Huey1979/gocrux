@@ -19,6 +19,9 @@ func mapServiceError(err error) constants.BusinessCode {
 	if errors.Is(err, errs.ErrInvalidParam) {
 		return constants.CodeParamError
 	}
+	if errors.Is(err, errs.ErrDuplicateCode) {
+		return constants.CodeConflict
+	}
 
 	// 版本管理
 	if errors.Is(err, errs.ErrVersionNotEnabled) {
