@@ -133,16 +133,13 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 	if s.config.VersionMode && s.config.VersionFields != nil && len(input) > 0 {
 		cr := s.CRUDRepo()
 		vf := s.config.VersionFields
-		codeCol := resolveColumn[M](vf.CodeField)
-		currentCol := resolveColumn[M](vf.CurrentField)
 		for _, ent := range input {
 			code := getStrField(ent, vf.CodeField)
 			if code == "" {
 				continue
 			}
 			if err := cr.Transaction(ctx, func(tx *gorm.DB) error {
-				if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
-					Update(currentCol, int8(0)).Error; err != nil {
+				if err := s.deprecateByCode(tx, code); err != nil {
 					return err
 				}
 				return tx.Create(ent).Error
@@ -163,6 +160,16 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 type opLogEntry struct {
 	EntityID  string
 	Operation string
+}
+
+// deprecateByCode 将指定 code 的所有记录设为 is_current=0。
+// 供 Create/Update/Activate 复用。
+func (s *GenericService[M]) deprecateByCode(tx *gorm.DB, code string) error {
+	vf := s.config.VersionFields
+	codeCol := resolveColumn[M](vf.CodeField)
+	currentCol := resolveColumn[M](vf.CurrentField)
+	return tx.Model(new(M)).Where(codeCol+" = ?", code).
+		Update(currentCol, int8(0)).Error
 }
 
 func (s *GenericService[M]) _afterCreate(ctx context.Context, result []*M) ([]*M, error) {
