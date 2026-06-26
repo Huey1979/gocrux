@@ -129,6 +129,30 @@ func (s *GenericService[M]) checkUniqueDB(ctx context.Context, ent *M, group []s
 }
 
 func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, error) {
+	// 版本化实体：插入新版本前，先退位所有同 code 的旧版本
+	if s.config.VersionMode && s.config.VersionFields != nil && len(input) > 0 {
+		cr := s.CRUDRepo()
+		vf := s.config.VersionFields
+		codeCol := resolveColumn[M](vf.CodeField)
+		currentCol := resolveColumn[M](vf.CurrentField)
+		for _, ent := range input {
+			code := getStrField(ent, vf.CodeField)
+			if code == "" {
+				continue
+			}
+			if err := cr.Transaction(ctx, func(tx *gorm.DB) error {
+				if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
+					Update(currentCol, int8(0)).Error; err != nil {
+					return err
+				}
+				return tx.Create(ent).Error
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return input, nil
+	}
+
 	if err := s.repo.InsertBatch(ctx, input); err != nil {
 		return nil, err
 	}
