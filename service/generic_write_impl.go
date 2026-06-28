@@ -298,6 +298,9 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	newPtrVal.Elem().Set(oldPtrVal)
 	newEntity := newPtrVal.Interface().(M)
 
+	// 1b. 重置版本默认值：深拷贝保留了旧值，新版应重新初始化
+	newEntity.SetDefaults()
+
 	// 2. 合并请求字段到新行
 	if data != nil {
 		if req, ok := data.(CrudRequest[M]); ok {
