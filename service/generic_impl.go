@@ -344,6 +344,10 @@ func resolveColumn[M Record](fieldName string) string {
 	if col := extractGormColumn(gormTag); col != "" {
 		return col
 	}
+	// MongoDB: 回退到 bson tag（如 BizRecord）
+	if bsonTag := f.Tag.Get("bson"); bsonTag != "" {
+		return bsonTag
+	}
 	return toCamelSnake(fieldName)
 }
 
