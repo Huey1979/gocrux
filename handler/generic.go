@@ -154,6 +154,10 @@ type HandlerConfig[M service.Record] struct {
 	//   "all_or_nothing"（默认）：第一个错误即返回，不写入任何数据。
 	//   "collect"：收集所有校验错误后统一返回，标注每条出错数据的索引和字段。
 	BatchErrorMode string
+
+	// SkipAutoValidate 跳过框架自动字段校验（用于动态 schema 实体如 BizRecord）。
+	// 为 true 时不从 entity struct tag 反射校验规则，完全交由钩子处理。
+	SkipAutoValidate bool
 }
 
 // GenericHandler 泛型 Handler。
@@ -240,6 +244,14 @@ func NewGenericHandlerWithSvc[M service.Record](
 
 // initValidation 构建合并后的校验规则。
 func (h *GenericHandler[M]) initValidation() {
+	if h.config.SkipAutoValidate {
+		// 动态 schema 实体：跳过自动字段校验，完全交由钩子处理
+		h.validateRules.Create = make(EndpointRules)
+		h.validateRules.Update = make(EndpointRules)
+		h.validateRules.List = make(EndpointRules)
+		return
+	}
+
 	auto := deriveFieldRules[M]()
 	if auto == nil {
 		auto = make(EndpointRules)

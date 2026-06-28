@@ -217,6 +217,12 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	if filter == nil {
 		filter = bson.M{}
 	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	total, err := r.ReadColl(ctx).CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
