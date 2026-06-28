@@ -366,36 +366,42 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 			return nil, errs.ErrVersionFieldsNotSet
 		}
 
-		cr := s.CRUDRepo()
-		err := cr.Transaction(ctx, func(tx *gorm.DB) error {
-			// 同 code 全部退位：确保只有一个当前版本
-			code := getStrField(pair.New, vf.CodeField)
-			codeCol := resolveColumn[M](vf.CodeField)
-			currentCol := resolveColumn[M](vf.CurrentField)
-			if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
-				Update(currentCol, int8(0)).Error; err != nil {
-				return err
-			}
-			// 草稿箱：根据新版本状态处理旧正式版
-			if (*pair.New).SupportsDraft() && vf.StatusField != "" {
-				newStatus := getStrField(pair.New, vf.StatusField)
-				statusCol := resolveColumn[M](vf.StatusField)
+		code := getStrField(pair.New, vf.CodeField)
+		codeCol := resolveColumn[M](vf.CodeField)
+		currentCol := resolveColumn[M](vf.CurrentField)
 
-				if newStatus == string(VersionStatusPublished) {
-					// 新版本为正式版 → 同 code 旧正式版 → 已废弃
-					if err := tx.Model(new(M)).Where(
-						codeCol+" = ? AND "+statusCol+" = ?", code, string(VersionStatusPublished),
-					).Update(statusCol, string(VersionStatusDeprecated)).Error; err != nil {
-						return err
+		if cr := s.CRUDRepo(); cr != nil {
+			// MySQL：GORM 事务内批量退位 + 插入新版本
+			var txErr error
+			txErr = cr.Transaction(ctx, func(tx *gorm.DB) error {
+				if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
+					Update(currentCol, int8(0)).Error; err != nil {
+					return err
+				}
+				if (*pair.New).SupportsDraft() && vf.StatusField != "" {
+					newStatus := getStrField(pair.New, vf.StatusField)
+					statusCol := resolveColumn[M](vf.StatusField)
+					if newStatus == string(VersionStatusPublished) {
+						if err := tx.Model(new(M)).Where(
+							codeCol+" = ? AND "+statusCol+" = ?", code, string(VersionStatusPublished),
+						).Update(statusCol, string(VersionStatusDeprecated)).Error; err != nil {
+							return err
+						}
 					}
 				}
-				// 新版本为草稿：旧正式版保持 published 不变（已退位即可）
+				return tx.Create(pair.New).Error
+			})
+			if txErr != nil {
+				return nil, txErr
 			}
-
-			return tx.Create(pair.New).Error
-		})
-		if err != nil {
-			return nil, err
+		} else {
+			// MongoDB：逐条退位 + 插入新版本（repo 层方法）
+			if err := s.repo.BatchDeprecateVersionsByFK(ctx, codeCol, []any{code}); err != nil {
+				return nil, err
+			}
+			if err := s.repo.Insert(ctx, pair.New); err != nil {
+				return nil, err
+			}
 		}
 		return pair.New, nil
 	}
