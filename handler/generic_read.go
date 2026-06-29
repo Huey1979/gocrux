@@ -77,6 +77,8 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 	ctx = h.injectIgnore(ctx, c)
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
+	// 字段裁剪：query ?fields=a;b:c;d:[e,f]
+	ctx = withFields(ctx, c.Query("fields"))
 
 	// 创建 Entity holder：_doGet 会将原始实体写入此指针，供 HTTP 出口处 ResponseMapper 使用。
 	// 级联调用（DoGetByID）不经过此路径，因此不会触发映射。
@@ -370,6 +372,8 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	ctx = h.injectIgnore(ctx, c)
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
+	// 字段裁剪：query ?fields=a;b:c;d:[e,f]
+	ctx = withFields(ctx, c.Query("fields"))
 	// 从 filters 中移除控制参数（避免误传到 Service 层）
 	delete(filters, "ignore")
 	delete(filters, "ignoreRef")

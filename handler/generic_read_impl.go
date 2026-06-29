@@ -60,8 +60,11 @@ func (h *GenericHandler[M]) _doGet(ctx context.Context, req *GetRequest) (map[st
 	return h.expandGet(ctx, result)
 }
 
-func (h *GenericHandler[M]) _afterGet(_ context.Context, result map[string]any) (map[string]any, error) {
-	// 默认：透传
+func (h *GenericHandler[M]) _afterGet(ctx context.Context, result map[string]any) (map[string]any, error) {
+	// 字段裁剪：?fields=a;b:c;d:[e,f]
+	if f := getFields(ctx); f != "" {
+		result = pruneFields(result, f)
+	}
 	return result, nil
 }
 
@@ -293,7 +296,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	return result, total, nil
 }
 
-func (h *GenericHandler[M]) _afterList(_ context.Context, list []map[string]any, total int64) ([]map[string]any, int64, error) {
-	// 默认：透传
+func (h *GenericHandler[M]) _afterList(ctx context.Context, list []map[string]any, total int64) ([]map[string]any, int64, error) {
+	// 字段裁剪：?fields=a;b:c;d:[e,f]
+	if f := getFields(ctx); f != "" {
+		for i, item := range list {
+			list[i] = pruneFields(item, f)
+		}
+	}
 	return list, total, nil
 }

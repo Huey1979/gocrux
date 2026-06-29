@@ -686,3 +686,84 @@ func (h *GenericHandler[M]) normalizeFields(rawReqs []map[string]any) {
 		}
 	}
 }
+
+// pruneFields 按 fields 规则裁剪 map，返回新 map（不修改原数据）。
+// 规则格式: key;key:sub;key:[sub1,sub2]
+//   "a"       → 保留顶层 a
+//   "b:c"     → b 下只留 c
+//   "b:[c,d]" → b 下只留 c,d
+//   "e:f"     → 数组 e 每个元素只留 f
+func pruneFields(data map[string]any, fields string) map[string]any {
+	if fields == "" || data == nil {
+		return data
+	}
+	out := make(map[string]any)
+	rules := strings.Split(fields, ";")
+	for _, rule := range rules {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		key, subs := splitRule(rule)
+		val, ok := data[key]
+		if !ok {
+			continue
+		}
+		if subs == nil {
+			// 无子规则：直接保留
+			out[key] = val
+		} else if arr, isArr := val.([]any); isArr {
+			// 数组：每个元素按子规则裁剪
+			prunedArr := make([]any, 0, len(arr))
+			for _, item := range arr {
+				if m, ok := item.(map[string]any); ok {
+					prunedArr = append(prunedArr, pickKeys(m, subs))
+				} else {
+					prunedArr = append(prunedArr, item)
+				}
+			}
+			out[key] = prunedArr
+		} else if m, ok := val.(map[string]any); ok {
+			// 对象：按子规则裁剪
+			out[key] = pickKeys(m, subs)
+		} else {
+			out[key] = val
+		}
+	}
+	return out
+}
+
+// splitRule 解析 "key:subs" → ("key", []string{...})。
+// "a" → ("a", nil); "b:c" → ("b", []string{"c"}); "b:[c,d]" → ("b", []string{"c","d"})
+func splitRule(rule string) (string, []string) {
+	idx := strings.Index(rule, ":")
+	if idx < 0 {
+		return rule, nil
+	}
+	key := rule[:idx]
+	sub := strings.TrimSpace(rule[idx+1:])
+	if strings.HasPrefix(sub, "[") && strings.HasSuffix(sub, "]") {
+		inner := sub[1 : len(sub)-1]
+		parts := strings.Split(inner, ",")
+		cleaned := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				cleaned = append(cleaned, p)
+			}
+		}
+		return key, cleaned
+	}
+	return key, []string{sub}
+}
+
+// pickKeys 从 map 中提取指定 key。
+func pickKeys(m map[string]any, keys []string) map[string]any {
+	out := make(map[string]any, len(keys))
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}

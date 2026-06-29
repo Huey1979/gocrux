@@ -107,6 +107,29 @@ func shouldIgnoreCascade(ctx context.Context) bool {
 }
 
 // ============================================================
+// fieldsCtx — 字段裁剪控制
+//
+// 通过 context 传递 ?fields= 参数到 _afterGet/_afterList，实现响应瘦身。
+// 格式: key;key:sub;key:[sub1,sub2]
+// ============================================================
+
+type fieldsCtxKey struct{}
+
+// withFields 将字段裁剪规则写入 context。
+func withFields(ctx context.Context, fields string) context.Context {
+	if fields == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, fieldsCtxKey{}, fields)
+}
+
+// getFields 从 context 获取字段裁剪规则。
+func getFields(ctx context.Context) string {
+	f, _ := ctx.Value(fieldsCtxKey{}).(string)
+	return f
+}
+
+// ============================================================
 // visitedCtx — 展开链条追踪（防跨实体循环引用 A→B→A）
 //
 // 使用不可变语义的 visitedSet，存入 context。
