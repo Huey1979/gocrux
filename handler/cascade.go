@@ -107,11 +107,7 @@ func shouldIgnoreCascade(ctx context.Context) bool {
 }
 
 // ============================================================
-// fieldsCtx — 字段裁剪控制
-//
-// 通过 context 传递 ?fields= 参数到 _afterGet/_afterList，实现响应瘦身。
-// 格式: key;key:sub;key:[sub1,sub2]
-// ============================================================
+
 
 type fieldsCtxKey struct{}
 
@@ -263,7 +259,7 @@ func getFieldLimits(ctx context.Context) fieldLimitMap {
 // HTTP compact 格式 (fstop=) 中同样使用此格式。
 // ============================================================
 
-// StopRule 描述对目标 Handler 上某个字段的截止控制。
+// // StopRule 描述对目标 Handler 上某个字段的截止控制。
 type StopRule struct {
 	OnHandler string // 目标 Handler 注册名（如 "department"）
 	Field     string // 目标 Handler 上的字段名（如 "manager", "parent_ulid"）

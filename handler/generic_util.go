@@ -693,48 +693,7 @@ func (h *GenericHandler[M]) normalizeFields(rawReqs []map[string]any) {
 //   "b:c"     → b 下只留 c
 //   "b:[c,d]" → b 下只留 c,d
 //   "e:f"     → 数组 e 每个元素只留 f
-func pruneFields(data map[string]any, fields string) map[string]any {
-	if fields == "" || data == nil {
-		return data
-	}
-	out := make(map[string]any)
-	rules := strings.Split(fields, ";")
-	for _, rule := range rules {
-		rule = strings.TrimSpace(rule)
-		if rule == "" {
-			continue
-		}
-		key, subs := splitRule(rule)
-		val, ok := data[key]
-		if !ok {
-			continue
-		}
-		if subs == nil {
-			// 无子规则：直接保留
-			out[key] = val
-		} else if arr, isArr := val.([]any); isArr {
-			// 数组：每个元素按子规则裁剪
-			prunedArr := make([]any, 0, len(arr))
-			for _, item := range arr {
-				if m, ok := item.(map[string]any); ok {
-					prunedArr = append(prunedArr, pickKeys(m, subs))
-				} else {
-					prunedArr = append(prunedArr, item)
-				}
-			}
-			out[key] = prunedArr
-		} else if m, ok := val.(map[string]any); ok {
-			// 对象：按子规则裁剪
-			out[key] = pickKeys(m, subs)
-		} else {
-			out[key] = val
-		}
-	}
-	return out
-}
 
-// splitRule 解析 "key:subs" → ("key", []string{...})。
-// "a" → ("a", nil); "b:c" → ("b", []string{"c"}); "b:[c,d]" → ("b", []string{"c","d"})
 func splitRule(rule string) (string, []string) {
 	idx := strings.Index(rule, ":")
 	if idx < 0 {

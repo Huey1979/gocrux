@@ -384,7 +384,9 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	delete(filters, "fstop")
 	delete(filters, "expand")
 	delete(filters, "expandAll")
-	// keyword 交由 BeforeList hook 处理（业务数据用 fields.xxx 前缀，需动态配置）
+	// keyword 交由 BeforeList hook 处理
+	// 字段裁剪：query ?fields=...
+	ctx = withFields(ctx, c.Query("fields"))
 
 	// expand 级联展开覆盖：ListSkipCascades 可通过 GET 参数覆写
 	expandAll := c.Query("expandAll") == "true"
