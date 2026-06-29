@@ -180,7 +180,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				continue
 			}
 
-			fkVal, ok := out[ref.Field]
+			fkVal, ok := getByPath(out, ref.Field)
 			if !ok || fkVal == nil || fkVal == "" {
 				continue
 			}

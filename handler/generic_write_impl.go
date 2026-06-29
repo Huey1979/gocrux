@@ -84,7 +84,7 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 						parentPK := extractPKFromResult(parent)
 						childData := extractChildData(rawMaps[i], rel.ChildrenField, rel.ChildrenWrapKey)
 						for j := range childData {
-							childData[j][rel.FKField] = parentPK
+							setByPath(childData[j], rel.FKField, parentPK)
 						}
 						allChildData = append(allChildData, childData...)
 					}
