@@ -150,7 +150,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			// 收集所有 FK 值（去重）
 			fkSet := make(map[string]bool)
 			for _, m := range result {
-				fkVal, ok := m[ref.Field]
+				fkVal, ok := getByPath(m, ref.Field)
 				if !ok || fkVal == nil {
 					continue
 				}
@@ -190,8 +190,10 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			}
 
 			for _, m := range result {
-				if parent, ok := parentMap[fmt.Sprint(m[ref.Field])]; ok {
+				if fkVal, fkOk := getByPath(m, ref.Field); fkOk && fkVal != nil {
+					if parent, ok := parentMap[fmt.Sprint(fkVal)]; ok {
 					m[resultKey] = parent
+					}
 				}
 			}
 		}

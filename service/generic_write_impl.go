@@ -457,70 +457,51 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 		return idList, nil, nil
 	}
 
-	// 版本化：收集所有 code
-	vf := s.config.VersionFields
-	if vf == nil {
-		return nil, nil, errs.ErrVersionFieldsNotSet
-	}
-	codeCol := resolveColumn[M](vf.CodeField)
-
-	var codeList []string
+	// 版本化：若调用方显式传了 codes → 按 code 族全量删除。
+	// 若仅有 ids → 仅标记指定 ULID，不扩展 code 族（BUG-001 修复）。
 	if codes != nil {
-		if cs, ok := codes.([]any); ok {
-			for _, c := range cs {
-				codeList = append(codeList, fmt.Sprintf("%v", c))
+		if cs, ok := codes.([]any); ok && len(cs) > 0 {
+			vf := s.config.VersionFields
+			if vf == nil {
+				return nil, nil, errs.ErrVersionFieldsNotSet
 			}
+			codeCol := resolveColumn[M](vf.CodeField)
+			codeList := make([]string, len(cs))
+			for i, c := range cs {
+				codeList[i] = fmt.Sprintf("%v", c)
+			}
+
+			// 按 code 批量查全族 ULID（去重）
+			ulidSet := make(map[string]struct{})
+			allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+				Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpIn, Value: codeList}},
+				Page:     1,
+				PageSize: 0,
+			})
+			if err != nil {
+				return nil, nil, errs.ErrQueryRecordFailed(err)
+			}
+			for i := range allRecords {
+				ulidSet[getStrField(&allRecords[i], vf.ULIDField)] = struct{}{}
+			}
+			ulidList := make([]any, 0, len(ulidSet))
+			for u := range ulidSet {
+				ulidList = append(ulidList, u)
+			}
+			if len(ulidList) == 0 {
+				return nil, nil, errs.ErrRecordNotFound
+			}
+			return ulidList, nil, nil
 		}
 	}
 
-	if len(codeList) == 0 {
-		// codes 为空 → 用 IN 查询一次取出所有记录，再从结果集取 codes（去重）
-		records, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-			Filters:  []repository.Filter{{Field: s.repo.PKField(), Op: repository.OpIn, Value: idList}},
-			Page:     1,
-			PageSize: 0,
-		})
-		if err != nil {
-			return nil, nil, errs.ErrQueryRecordFailed(err)
-		}
-		codeSet := make(map[string]struct{})
-		for i := range records {
-			codeSet[getStrField(&records[i], vf.CodeField)] = struct{}{}
-		}
-		for c := range codeSet {
-			codeList = append(codeList, c)
-		}
-	}
-
-	if len(codeList) == 0 {
+	// 仅指定 ULID：直接透传，不扩展 code 族
+	if len(idList) == 0 {
 		return nil, nil, errs.ErrRecordNotFound
 	}
-
-	// 按 code 批量查全族 ULID（去重）—— 用 IN 一次查询
-	ulidSet := make(map[string]struct{})
-	allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-		Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpIn, Value: codeList}},
-		Page:     1,
-		PageSize: 0,
-	})
-	if err != nil {
-		return nil, nil, errs.ErrQueryRecordFailed(err)
-	}
-	for i := range allRecords {
-		ulidSet[getStrField(&allRecords[i], vf.ULIDField)] = struct{}{}
-	}
-
-	ulidList := make([]any, 0, len(ulidSet))
-	for u := range ulidSet {
-		ulidList = append(ulidList, u)
-	}
-
-	if len(ulidList) == 0 {
-		return nil, nil, errs.ErrRecordNotFound
-	}
-
-	return ulidList, nil, nil
+	return idList, nil, nil
 }
+
 
 func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	// 归一化：单个 id → [id]
