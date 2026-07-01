@@ -1,46 +1,83 @@
 # GlobalStore 内存缓存 — heims 需求
 
-> 日期：2026-07-01 | 仅描述 heims 使用需求，不限制实现方式
+> 日期：2026-07-01 | 仅描述接口约定和数据流，不限制实现方式
+> ⚠️ 以下代码为设计示意，gocrux 开发者需补足空值判定、并发安全等工程细节
 
-## 需求概述
-
-heims 的配置类实体（form、flow、dept、role 等）读频繁写少，希望指定一个内存中的全局变量作为中间垫，handler 的增删查改自动读写该变量，减少 MySQL 查询。
-
-## 使用方式
-
-配置 `HandlerConfig` 时传入一个 `GlobalStore`：
+## 接口定义
 
 ```go
-var formCache = &sync.Map{}
-
-type MapStore struct{ m *sync.Map }
-func (s *MapStore) Get(key string) (any, bool) { return s.m.Load(key) }
-func (s *MapStore) Set(key string, val any)    { s.m.Store(key, val) }
-func (s *MapStore) Del(key string)             { s.m.Delete(key) }
-
-HandlerConfig[*entity.SysForm]{
-    GlobalStore: &MapStore{formCache},
-    // ...
+// GlobalStore 全局内存缓存接口。heims 侧提供实现，gocrux handler 管线自动调用。
+type GlobalStore[M any] interface {
+    GetUlidByCode() *map[string]string   // code → ulid 索引
+    GetEntityMap()   *map[string]*M       // ulid → 实体
+    SaveCode(M)                           // 写入 code → ulid 索引
+    DelCode(M)                            // 删除 code → ulid 索引
 }
 ```
 
-## 期望行为
+## 公共帮助函数（gocrux 侧实现，示意代码）
 
-| 操作 | 期望 |
+```go
+// GlobalStoreGet 优先用 ulid 查找，无 ulid 时从 code 索引转换后查找。
+func GlobalStoreGet[M any](store GlobalStore[M], ulid string, code string) (*M, error) {
+    if ulid == "" {
+        if code == "" { return nil, fmt.Errorf("ulid 和 code 不能同时为空") }
+        ulid = (*store.GetUlidByCode())[code]
+        if ulid == "" { return nil, nil } // 缓存未命中
+    }
+    return (*store.GetEntityMap())[ulid], nil
+}
+
+// GlobalStoreSet 写入实体并更新 code 索引。
+func GlobalStoreSet[M any](store GlobalStore[M], ulid string, entity *M) {
+    (*store.GetEntityMap())[ulid] = entity
+    store.SaveCode(*entity)
+}
+
+// GlobalStoreDel 删除实体和 code 索引。
+func GlobalStoreDel[M any](store GlobalStore[M], ulid string, code string) {
+    if ulid == "" {
+        if code == "" { return }
+        ulid = (*store.GetUlidByCode())[code]
+    }
+    if entity := (*store.GetEntityMap())[ulid]; entity != nil {
+        store.DelCode(*entity)
+    }
+    delete((*store.GetEntityMap()), ulid)
+}
+```
+
+## 管线行为
+
+| 操作 | 调用 |
 |------|------|
-| `GET ?code=staff_form` | 先 `Get("staff_form")` → 命中返回；未命中走 DB → `Set("staff_form", result)` |
-| `GET ?id=01KW...` | 先 `Get("01KW...")` → 命中返回；未命中走 DB → `Set("form_code", result)` |
-| `Create` | DB 写入成功后 `Set(form_code, result)` |
-| `Update` | DB 更新成功后 `Set(form_code, result)`（旧值覆盖） |
-| `Delete` | DB 删除成功后 `Del(form_code)` |
+| `_doGet(id, code)` | `GlobalStoreGet(store, id, code)` → 命中返回；未命中走 DB → `GlobalStoreSet(store, pk, result)` |
+| `_afterCreate` | `GlobalStoreSet(store, pk, result)` |
+| `_afterUpdate` | `GlobalStoreSet(store, pk, result)` |
+| `_afterDelete` | `GlobalStoreDel(store, id, code)` |
 
-**Key 约定**：Get 用请求参数作为 key（code 或 id）；Create/Update/Delete 用实体的 `*_code` 或 `*_ulid` 字段作为 key。
+## heims 侧实现示例（同样为示意代码）
 
-**非阻塞**：Set/Del 失败不中断主流程。
+```go
+type FormSettings struct {
+    data      map[string]*entity.SysForm
+    codeIndex map[string]string
+}
+
+func (s *FormSettings) GetUlidByCode() *map[string]string { return &s.codeIndex }
+func (s *FormSettings) GetEntityMap() *map[string]*entity.SysForm { return &s.data }
+func (s *FormSettings) SaveCode(f entity.SysForm) { s.codeIndex[f.FormCode] = f.FormULID }
+func (s *FormSettings) DelCode(f entity.SysForm)  { delete(s.codeIndex, f.FormCode) }
+
+// 配置：
+HandlerConfig[*entity.SysForm]{
+    GlobalStore: &FormSettings{data: make(...), codeIndex: make(...)},
+}
+```
 
 ## 不要求
 
-- 不限实现方式（sync.Map / interface / 泛型）
-- 不限 key 推导方式
-- 不做过期淘汰（heims 侧自行管理实例生命周期）
-- 不做 List 缓存（查询条件多变）
+- 不限实现方式（泛型/interface/struct）
+- 不限并发模型（sync.Map / mutex）
+- 不做过期淘汰（heims 侧在 AfterDelete 等时机主动 Del）
+- 不做 List 缓存
