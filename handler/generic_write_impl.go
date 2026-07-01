@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	errs "github.com/Huey1979/gocrux/errors"
@@ -122,8 +123,11 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 	return h.svc.Create(ctx, input)
 }
 
-func (h *GenericHandler[M]) _afterCreate(_ context.Context, result []*M) ([]*M, error) {
-	// 默认：透传
+func (h *GenericHandler[M]) _afterCreate(ctx context.Context, result []*M) ([]*M, error) {
+	// GlobalStore：写入缓存
+	for _, r := range result {
+		h.cacheSet(ctx, r)
+	}
 	return result, nil
 }
 
@@ -280,8 +284,11 @@ func (h *GenericHandler[M]) updateOrCreate(ctx context.Context, reqs []service.C
 	return results, nil
 }
 
-func (h *GenericHandler[M]) _afterUpdate(_ context.Context, results []*M, _ bool) ([]*M, error) {
-	// 默认：透传
+func (h *GenericHandler[M]) _afterUpdate(ctx context.Context, results []*M, _ bool) ([]*M, error) {
+	// GlobalStore：更新缓存
+	for _, r := range results {
+		h.cacheSet(ctx, r)
+	}
 	return results, nil
 }
 
@@ -336,7 +343,14 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 	return h.svc.Delete(ctx, ids, codes)
 }
 
-func (h *GenericHandler[M]) _afterDelete(_ context.Context) error {
-	// 默认：空操作
+func (h *GenericHandler[M]) _afterDelete(ctx context.Context) error {
+	// GlobalStore：清理缓存（ids 从 ctx 获取）
+	if store := h.config.GlobalStore; store != nil {
+		if ids, ok := ctx.Value(deleteCacheIDsKey{}).([]any); ok {
+			for _, id := range ids {
+				store.Del(ctx, cacheKeyULID(fmt.Sprint(id)))
+			}
+		}
+	}
 	return nil
 }

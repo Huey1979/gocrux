@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Huey1979/gocrux/repository"
 	"github.com/Huey1979/gocrux/service"
 )
 
@@ -158,6 +159,10 @@ type HandlerConfig[M service.Record] struct {
 	// SkipAutoValidate 跳过框架自动字段校验（用于动态 schema 实体如 BizRecord）。
 	// 为 true 时不从 entity struct tag 反射校验规则，完全交由钩子处理。
 	SkipAutoValidate bool
+
+	// GlobalStore 内存缓存（可选）。nil 时不启用。
+	// 内置默认实现：repository.NewMapStore()。
+	GlobalStore repository.GlobalStore
 }
 
 // GenericHandler 泛型 Handler。

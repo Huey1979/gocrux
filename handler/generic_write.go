@@ -317,6 +317,8 @@ func (h *GenericHandler[M]) deletePipeline(ctx context.Context, ids, codes any) 
 		return err
 	}
 
+	// 将 ids 注入 ctx，供 _afterDelete 的 GlobalStore 缓存清理使用
+	ctx = context.WithValue(ctx, deleteCacheIDsKey{}, ids)
 	return h.afterDelete(ctx)
 }
 

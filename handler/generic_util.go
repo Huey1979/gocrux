@@ -726,3 +726,35 @@ func pickKeys(m map[string]any, keys []string) map[string]any {
 	}
 	return out
 }
+
+// ============================================================
+// 9. GlobalStore 内存缓存辅助
+// ============================================================
+
+// cacheKeyULID 生成 ulid 前缀的缓存 key。
+func cacheKeyULID(ulid string) string { return "ulid:" + ulid }
+
+// cacheKeyCode 生成 code 前缀的缓存 key。
+func cacheKeyCode(code string) string { return "code:" + code }
+
+// cacheGet 从 GlobalStore 查缓存，提取 entity 的 ulid 和 code 用于多 key 索引。
+func (h *GenericHandler[M]) cacheSet(ctx context.Context, entity *M) {
+	if h.config.GlobalStore == nil {
+		return
+	}
+	// 尝试提取主键
+	if pk := extractPKFromResult(entity); pk != nil {
+		h.config.GlobalStore.Set(ctx, cacheKeyULID(fmt.Sprint(pk)), entity)
+	}
+}
+
+// cacheDelByID 按 ulid 和 code 删除缓存。
+func (h *GenericHandler[M]) cacheDelByID(ctx context.Context, id any) {
+	if h.config.GlobalStore == nil {
+		return
+	}
+	h.config.GlobalStore.Del(ctx, cacheKeyULID(fmt.Sprint(id)))
+}
+
+// deleteCacheIDsKey 用于在 deletePipeline 中将 ids 传递给 _afterDelete 的缓存清理。
+type deleteCacheIDsKey struct{}

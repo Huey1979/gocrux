@@ -31,14 +31,36 @@ func (h *GenericHandler[M]) _doGet(ctx context.Context, req *GetRequest) (map[st
 	var result *M
 	var err error
 
-	switch {
-	case req.Code != "":
-		result, err = h.svc.GetByCode(ctx, req.Code)
-	default:
-		result, err = h.svc.Get(ctx, req.ID)
+	// GlobalStore 缓存：先查缓存，命中跳过 DB
+	if store := h.config.GlobalStore; store != nil {
+		if req.ID != nil {
+			if v, ok := store.Get(ctx, cacheKeyULID(fmt.Sprint(req.ID))); ok {
+				result = v.(*M)
+			}
+		}
+		if result == nil && req.Code != "" {
+			if v, ok := store.Get(ctx, cacheKeyCode(req.Code)); ok {
+				result = v.(*M)
+			}
+		}
 	}
-	if err != nil {
-		return nil, err
+
+	if result == nil {
+		switch {
+		case req.Code != "":
+			result, err = h.svc.GetByCode(ctx, req.Code)
+		default:
+			result, err = h.svc.Get(ctx, req.ID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		// 写入缓存
+		if store := h.config.GlobalStore; store != nil {
+			if pk := extractPKFromResult(result); pk != nil {
+				store.Set(ctx, cacheKeyULID(fmt.Sprint(pk)), result)
+			}
+		}
 	}
 
 	// FollowPublished：按 ID 取出的记录可能是非 published 版本，
