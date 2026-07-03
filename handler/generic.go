@@ -163,6 +163,10 @@ type HandlerConfig[M service.Record] struct {
 	// GlobalStore 内存缓存（可选）。nil 时不启用。
 	// 内置默认实现：repository.NewMapStore()。
 	GlobalStore repository.GlobalStore
+
+	// DateTimeFormat 日期时间格式化字符串（可选）。
+	// 例："2006-01-02 15:04:05"。为空时使用 Go 默认 RFC3339 格式。
+	DateTimeFormat string
 }
 
 // GenericHandler 泛型 Handler。

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Huey1979/gocrux/expression"
 
@@ -759,3 +760,57 @@ func (h *GenericHandler[M]) cacheDelByID(ctx context.Context, id any) {
 
 // deleteCacheIDsKey 用于在 deletePipeline 中将 ids 传递给 _afterDelete 的缓存清理。
 type deleteCacheIDsKey struct{}
+
+// ============================================================
+// 10. 日期时间格式化
+// ============================================================
+
+// formatDateTimes 递归遍历 map，将 RFC3339 格式的时间字符串按 DateTimeFormat 重新格式化。
+func formatDateTimes(m map[string]any, layout string) {
+	if layout == "" {
+		return
+	}
+	formatDateTimesRecursive(m, layout)
+}
+
+// formatDateTimesRecursive 递归处理 map、slice、string 中的时间字符串。
+func formatDateTimesRecursive(v any, layout string) {
+	switch val := v.(type) {
+	case map[string]any:
+		for k, vv := range val {
+			if s, ok := vv.(string); ok {
+				if t, err := parseTimeString(s); err == nil {
+					val[k] = t.Format(layout)
+				}
+			} else {
+				formatDateTimesRecursive(vv, layout)
+			}
+		}
+	case []any:
+		for i, item := range val {
+			if m, ok := item.(map[string]any); ok {
+				formatDateTimesRecursive(m, layout)
+			} else if s, ok := item.(string); ok {
+				if t, err := parseTimeString(s); err == nil {
+					val[i] = t.Format(layout)
+				}
+			}
+		}
+	}
+}
+
+// parseTimeString 尝试解析常见时间格式（RFC3339 / JSON 默认时间格式）。
+func parseTimeString(s string) (time.Time, error) {
+	formats := []string{
+		time.RFC3339Nano, // "2006-01-02T15:04:05.999999999Z07:00"
+		time.RFC3339,     // "2006-01-02T15:04:05Z07:00"
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05.000Z",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("not a time string: %s", s)
+}

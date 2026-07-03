@@ -87,6 +87,8 @@ func (h *GenericHandler[M]) _afterGet(ctx context.Context, result map[string]any
 	if f := getFields(ctx); f != "" {
 		result = pruneFields(result, f)
 	}
+	// 日期时间格式化
+	formatDateTimes(result, h.config.DateTimeFormat)
 	return result, nil
 }
 
@@ -326,6 +328,10 @@ func (h *GenericHandler[M]) _afterList(ctx context.Context, list []map[string]an
 		for i, item := range list {
 			list[i] = pruneFields(item, f)
 		}
+	}
+	// 日期时间格式化
+	for _, item := range list {
+		formatDateTimes(item, h.config.DateTimeFormat)
 	}
 	return list, total, nil
 }
