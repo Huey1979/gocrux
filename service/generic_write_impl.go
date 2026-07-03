@@ -339,13 +339,17 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 			common.SetFieldValue(&newEntity, vf.StatusField, string(VersionStatusDraft))
 		}
 	}
-	if vf.RemarkField != "" {
-		remark := "更新操作"
-		if vr, ok := data.(interface{ GetVersionRemark() string }); ok && vr.GetVersionRemark() != "" {
-			remark = vr.GetVersionRemark()
+		if vf.RemarkField != "" {
+			// 若用户已在请求中传了 version_remark（步骤2合并后非空），保留用户值
+			existingRemark := getStrField(&newEntity, vf.RemarkField)
+			if existingRemark == "" {
+				remark := "更新操作"
+				if vr, ok := data.(interface{ GetVersionRemark() string }); ok && vr.GetVersionRemark() != "" {
+					remark = vr.GetVersionRemark()
+				}
+				common.SetFieldValue(&newEntity, vf.RemarkField, remark)
+			}
 		}
-		common.SetFieldValue(&newEntity, vf.RemarkField, remark)
-	}
 
 	// 5. 唯一性校验（版本化：同 code 族豁免；新行尚无 DB 记录，无需自排除）
 	if s.config.EnableUniqueValidation {

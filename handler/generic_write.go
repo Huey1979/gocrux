@@ -192,7 +192,7 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	Success(c, gin.H{"data": results[0]})
+	Success(c, gin.H{"item": results[0]})
 }
 
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。

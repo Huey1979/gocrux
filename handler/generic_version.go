@@ -132,7 +132,7 @@ func (h *GenericHandler[M]) ListVersions(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	Success(c, gin.H{"versions": versions})
+	Success(c, gin.H{"items": versions, "total": len(versions)})
 }
 
 // listVersionsPipeline 统一管线。
@@ -266,4 +266,39 @@ func (h *GenericHandler[M]) afterEditVersion(ctx context.Context, result *M) (*M
 		return h.hooks.AfterEditVersion(ctx, result)
 	}
 	return h._afterEditVersion(ctx, result)
+}
+
+// ListArchivedVersions 获取已归档版本列表
+// GET /{prefix}/versions-archived?code=xxx
+func (h *GenericHandler[M]) ListArchivedVersions(c *gin.Context) {
+	if !h.checkPerm(c, "versions") {
+		return
+	}
+	ctx := c.Request.Context()
+	rcode := c.Query("code")
+	if rcode == "" {
+		h.handleError(c, errs.ErrInvalidParam)
+		return
+	}
+
+	records, err := h.svc.ListVersions(ctx, nil, rcode)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	// 仅保留 abolished 状态的版本
+	var archived []map[string]any
+	for _, r := range records {
+		data, _ := json.Marshal(r)
+		var m map[string]any
+		json.Unmarshal(data, &m)
+		if status, _ := m["version_status"].(string); status == "abolished" {
+			archived = append(archived, m)
+		}
+	}
+	if archived == nil {
+		archived = []map[string]any{}
+	}
+	Success(c, gin.H{"items": archived, "total": len(archived)})
 }

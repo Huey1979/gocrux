@@ -53,38 +53,32 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	currentStatus := getStrField(_entity, vf.StatusField)
 
 	codeCol := resolveColumn[M](vf.CodeField)
-	currentCol := resolveColumn[M](vf.CurrentField)
-	statusCol := resolveColumn[M](vf.StatusField)
 	now := time.Now()
 	userULID := GetUserULID(ctx)
 
-	cr := s.CRUDRepo()
-	return cr.Transaction(ctx, func(tx *gorm.DB) error {
-		// 同 code 所有行退位
-		if err := tx.Model(new(M)).Where(codeCol+" = ?", code).
-			Update(currentCol, int8(0)).Error; err != nil {
-			return err
-		}
+	// 1. 同 code 所有行退位（is_current=0）
+	if err := s.repo.BatchDeprecateVersionsByFK(ctx, codeCol, []any{code}); err != nil {
+		return err
+	}
 
-		updates := map[string]any{
-			currentCol:   int8(1),
-			"updated_at": now,
-		}
+	// 2. 目标行即位（is_current=1）
+	updates := map[string]any{
+		resolveColumn[M](vf.CurrentField): true,
+		"updated_at":                      now,
+	}
 
-		// 草稿 / 已废弃 → 正式发布
-		if currentStatus == string(VersionStatusDraft) || currentStatus == string(VersionStatusDeprecated) {
-			updates[statusCol] = string(VersionStatusPublished)
-			if vf.PublishedAtField != "" {
-				updates[resolveColumn[M](vf.PublishedAtField)] = now
-			}
-			if vf.PublishedByField != "" && userULID != "" {
-				updates[resolveColumn[M](vf.PublishedByField)] = userULID
-			}
+	// 3. 草稿 / 已废弃 → 正式发布
+	if currentStatus == string(VersionStatusDraft) || currentStatus == string(VersionStatusDeprecated) {
+		updates[resolveColumn[M](vf.StatusField)] = string(VersionStatusPublished)
+		if vf.PublishedAtField != "" {
+			updates[resolveColumn[M](vf.PublishedAtField)] = now
 		}
+		if vf.PublishedByField != "" && userULID != "" {
+			updates[resolveColumn[M](vf.PublishedByField)] = userULID
+		}
+	}
 
-		return tx.Model(new(M)).Where(s.repo.PKField()+" = ?", entityULID).
-			Updates(updates).Error
-	})
+	return s.repo.UpdateByID(ctx, entityULID, updates)
 }
 
 func (s *GenericService[M]) _afterActivate(ctx context.Context, id any) error {
@@ -172,12 +166,22 @@ func (s *GenericService[M]) _beforeEditVersion(ctx context.Context, id any, patc
 		return nil, nil, errs.ErrQueryRecordFailed(err)
 	}
 
-	// 校验状态迁移
-	if newStatus, ok := patches[vf.StatusField]; ok {
-		curStatus := getStrField(_entity, vf.StatusField)
-		newStatusStr := fmt.Sprintf("%v", newStatus)
-		if !s.isValidStatusTransition(curStatus, newStatusStr) {
-			return nil, nil, errs.ErrInvalidVersionStatusTransition
+	// 校验状态迁移（patches key 可能为 Go 字段名或 DB 列名，两处都查）
+	if vf.StatusField != "" {
+		var newStatus any
+		if v, ok := patches[vf.StatusField]; ok {
+			newStatus = v
+		} else if col := resolveColumn[M](vf.StatusField); col != "" {
+			if v, ok := patches[col]; ok {
+				newStatus = v
+			}
+		}
+		if newStatus != nil {
+			curStatus := getStrField(_entity, vf.StatusField)
+			newStatusStr := fmt.Sprintf("%v", newStatus)
+			if !s.isValidStatusTransition(curStatus, newStatusStr) {
+				return nil, nil, errs.ErrInvalidVersionStatusTransition
+			}
 		}
 	}
 

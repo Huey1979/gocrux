@@ -14,6 +14,13 @@
 
 | 编号 | 描述 | commit |
 |------|------|--------|
+| BUG-005 | Activate _doActivate 用 CRUDRepo().Transaction() 对 MongoDB nil panic，改为 Repo 接口 | 本次修复 |
+| BUG-006 | Draft 可见性 OpRaw 过滤器 MongoDB 返回空 bson，改为解析 AND 条件 | 本次修复 |
+| BUG-007 | Update 响应 data.data 双层嵌套，改为 item 对齐 Create 的 items | 本次修复 |
+| BUG-008 | version_remark 被默认值覆盖，改为检查合并后的值非空则保留 | 本次修复 |
+| BUG-009 | versions 响应缺 total/items，已补齐 | 本次修复 |
+| BUG-010 | edit-version patches key 与 Go 字段名不匹配，改为双向查找 | 本次修复 |
+| BUG-011 | /versions-archived 路由未实现，已添加 ListArchivedVersions handler | 本次修复 |
 | BUG-001 | 版本化 Delete 标记全部同 code 版本 | 本次修复 |
 | BUG-002 | MongoDB isCurrent bool vs int8 类型不匹配 | 本次修复 |
 | BUG-003 | ReferenceRelation 不支持点分路径 Field | 本次修复 |

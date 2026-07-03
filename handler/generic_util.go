@@ -89,6 +89,7 @@ func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
 		r.POST(p+"/activate", h.Activate)
 		r.GET(p+"/versions", h.ListVersions)
 		r.POST(p+"/edit-version", h.EditVersion)
+		r.GET(p+"/versions-archived", h.ListArchivedVersions)
 	}
 }
 

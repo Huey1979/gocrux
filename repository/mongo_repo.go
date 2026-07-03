@@ -408,7 +408,26 @@ func filterToBson(f Filter) bson.M {
 	case OpRange:
 		return bson.M{f.Field: bson.M{"$gte": f.Value, "$lte": f.Value}}
 	case OpRaw:
-		// MongoDB 不支持原生 SQL，返回空条件（需在调用方避免依赖 OpRaw 做关键过滤）
+		// 尝试将 "col1 = ? AND col2 = ?" 格式转为 bson （如草稿可见性过滤）
+		switch v := f.Value.(type) {
+		case []any:
+			if len(v) >= 2 {
+				if cond, ok := v[0].(string); ok {
+					parts := strings.Split(cond, " AND ")
+					if len(parts) > 1 && len(parts) == len(v)-1 {
+						ands := make([]bson.M, len(parts))
+						for i, part := range parts {
+							part = strings.TrimSpace(part)
+							if idx := strings.Index(part, " = ?"); idx > 0 {
+								ands[i] = bson.M{part[:idx]: v[i+1]}
+							}
+						}
+						return bson.M{"$and": ands}
+					}
+				}
+			}
+		}
+		// 无法解析，返回空条件（向后兼容）
 		return bson.M{}
 	default:
 		return bson.M{f.Field: f.Value}
