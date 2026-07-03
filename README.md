@@ -23,6 +23,8 @@ go get github.com/Huey1979/gocrux
 - [钩子系统](#钩子系统)
 - [输入校验](#输入校验)
   - [BatchErrorMode](#batcherrormode--批量错误收集)
+- [GlobalStore — 内存缓存](#globalstore--内存缓存)
+- [DateTimeFormat — 日期时间格式化](#datetimeformat--日期时间格式化)
 - [级联机制](#级联机制)
   - [级联创建跨实体引用](#级联创建跨实体引用)
 - [版本管理](#版本管理)
@@ -428,6 +430,10 @@ type HandlerConfig[M service.Record] struct {
     KeywordFields    []string             // 关键字搜索字段列表（?keyword=xxx OR LIKE）
     Validate         *ValidateConfig      // 输入校验规则（nil=自动推导）
     NormalizeFields  []string             // 需表达式规范化的 JSON 字段名
+    BatchErrorMode   string               // 批量错误处理："all_or_nothing"（默认）/"collect"
+    SkipAutoValidate bool                 // 跳过自动字段校验（用于动态 schema 实体）
+    GlobalStore      repository.GlobalStore // 内存缓存（nil=不启用）
+    DateTimeFormat   string               // 日期时间格式，如 "2006-01-02 15:04:05"（空=保留 RFC3339）
 }
 ```
 
@@ -756,8 +762,49 @@ HandlerConfig[entity.SysFormField]{
 - `expression` 类型：统一为 `{"type":"expression","expression":{...}}` 结构
 - 旧格式 `{"op":"Add","left":...}` 自动升级为新格式
 
----
+### GlobalStore — 内存缓存
 
+注入 `GlobalStore` 后，Get/Create/Update/Delete 管线自动维护内存缓存：
+
+- **Get**：优先查缓存，命中跳过 DB；未命中走 DB 后写回缓存
+- **Create / Update**：写入缓存
+- **Delete**：清理缓存
+
+```go
+import "github.com/Huey1979/gocrux/repository"
+
+HandlerConfig[entity.SysForm]{
+    GlobalStore: repository.NewMapStore(), // 基于 sync.Map 的内置实现，一行搞定
+}
+```
+
+**自定义后端**（Redis 等）：
+
+```go
+type RedisStore struct { client *redis.Client }
+
+func (s *RedisStore) Get(ctx context.Context, key string) (any, bool) { /* ... */ }
+func (s *RedisStore) Set(ctx context.Context, key string, entity any)  { /* ... */ }
+func (s *RedisStore) Del(ctx context.Context, key string)              { /* ... */ }
+
+HandlerConfig[entity.SysForm]{
+    GlobalStore: &RedisStore{client: rdb},
+}
+```
+
+> 注意：缓存 key 由框架内部生成（如 `ulid:01Jxxx`、`code:S001`），使用者透明。`nil` 时不启用缓存（默认）。
+
+### DateTimeFormat — 日期时间格式化
+
+配置 `DateTimeFormat` 后，Get/List 返回数据中所有 `time.Time` 字段统一按指定格式输出：
+
+```go
+HandlerConfig[entity.SysForm]{
+    DateTimeFormat: "2006-01-02 15:04:05",
+}
+```
+
+响应中的 `created_at`、`updated_at`、`published_at` 及级联子数据中的时间字段均自动格式化。为空时使用 Go 默认 RFC3339 格式（向后兼容）。
 
 ---
 
