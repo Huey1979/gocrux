@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/repository"
 
@@ -53,32 +54,55 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	currentStatus := getStrField(_entity, vf.StatusField)
 
 	codeCol := resolveColumn[M](vf.CodeField)
+
 	now := time.Now()
 	userULID := GetUserULID(ctx)
 
-	// 1. 同 code 所有行退位（is_current=0）
-	if err := s.repo.BatchDeprecateVersionsByFK(ctx, codeCol, []any{code}); err != nil {
+	// 1. 查出同 code 所有版本，区分目标与非目标
+	allVersions, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpEQ, Value: code}},
+		Page:     1,
+		PageSize: 0,
+	})
+	if err != nil {
 		return err
 	}
 
-	// 2. 目标行即位（is_current=1）
-	updates := map[string]any{
-		resolveColumn[M](vf.CurrentField): true,
-		"updated_at":                      now,
+	var otherULIDs []any
+	for i := range allVersions {
+		vid := getStrField(&allVersions[i], vf.ULIDField)
+		if vid != "" && vid != entityULID {
+			otherULIDs = append(otherULIDs, vid)
+		}
 	}
 
-	// 3. 草稿 / 已废弃 → 正式发布
+	// 2. 非目标版本退位（仅废弃其他版本，不影响目标）
+	if len(otherULIDs) > 0 {
+		if err := s.repo.BatchDeprecateVersions(ctx, otherULIDs); err != nil {
+			return err
+		}
+	}
+
+	// 3. 目标行：设置 is_current + 状态更新（在 entity 上直接改，然后用 Save 持久化）
+	common.SetFieldValue(_entity, vf.CurrentField, true)
+	common.SetFieldValue(_entity, "UpdatedAt", now)
+	if userULID != "" {
+		common.SetFieldValue(_entity, "UpdatedBy", userULID)
+	}
+
+	// 草稿 / 已废弃 → 正式发布
 	if currentStatus == string(VersionStatusDraft) || currentStatus == string(VersionStatusDeprecated) {
-		updates[resolveColumn[M](vf.StatusField)] = string(VersionStatusPublished)
+		common.SetFieldValue(_entity, vf.StatusField, string(VersionStatusPublished))
 		if vf.PublishedAtField != "" {
-			updates[resolveColumn[M](vf.PublishedAtField)] = now
+			common.SetFieldValue(_entity, vf.PublishedAtField, now)
 		}
 		if vf.PublishedByField != "" && userULID != "" {
-			updates[resolveColumn[M](vf.PublishedByField)] = userULID
+			common.SetFieldValue(_entity, vf.PublishedByField, userULID)
 		}
 	}
 
-	return s.repo.UpdateByID(ctx, entityULID, updates)
+	// 4. 用 Save 持久化（兼容 MySQL GORM 与 MongoDB）
+	return s.repo.Save(ctx, _entity)
 }
 
 func (s *GenericService[M]) _afterActivate(ctx context.Context, id any) error {
@@ -166,21 +190,17 @@ func (s *GenericService[M]) _beforeEditVersion(ctx context.Context, id any, patc
 		return nil, nil, errs.ErrQueryRecordFailed(err)
 	}
 
-	// 校验状态迁移（patches key 可能为 Go 字段名或 DB 列名，两处都查）
+	// 校验状态迁移：遍历 patches 所有 key，通过 resolveColumn 匹配 StatusField
 	if vf.StatusField != "" {
-		var newStatus any
-		if v, ok := patches[vf.StatusField]; ok {
-			newStatus = v
-		} else if col := resolveColumn[M](vf.StatusField); col != "" {
-			if v, ok := patches[col]; ok {
-				newStatus = v
-			}
-		}
-		if newStatus != nil {
-			curStatus := getStrField(_entity, vf.StatusField)
-			newStatusStr := fmt.Sprintf("%v", newStatus)
-			if !s.isValidStatusTransition(curStatus, newStatusStr) {
-				return nil, nil, errs.ErrInvalidVersionStatusTransition
+		statusCol := resolveColumn[M](vf.StatusField)
+		for k, v := range patches {
+			if k == vf.StatusField || resolveColumn[M](k) == statusCol {
+				curStatus := getStrField(_entity, vf.StatusField)
+				newStatusStr := fmt.Sprintf("%v", v)
+				if !s.isValidStatusTransition(curStatus, newStatusStr) {
+					return nil, nil, errs.ErrInvalidVersionStatusTransition
+				}
+				break
 			}
 		}
 	}

@@ -10,17 +10,28 @@
 
 ---
 
+## 二次修复
+
+| 编号 | 描述 | 根因 | commit |
+|------|------|------|--------|
+| BUG-005-R | Activate status 不更新 | BatchDeprecateVersionsByFK 覆盖目标行 + UpdateByID 静默失败 | 本次（改为分目标/非目标两步处理，用 Save 持久化） |
+| BUG-006-R | Draft 不出现在 List | filterToBson 缺 or_group 处理，整个 OR 组静默丢弃 | 本次（新增 or_group→$or 转换） |
+| BUG-010-R | edit-version 仍 4001 | patches key 可能是 GORM/bson/JSON 三种列名，双向查找不够 | 本次（遍历所有 patches key，通过 resolveColumn 匹配） |
+| BUG-012 | Update 返回 item→items | BUG-007 从 data 改 item，但与 Create 的 items 数组不一致 | 本次（改为 items 数组包装） |
+
+---
+
 ## 已修
 
 | 编号 | 描述 | commit |
 |------|------|--------|
-| BUG-005 | Activate _doActivate 用 CRUDRepo().Transaction() 对 MongoDB nil panic，改为 Repo 接口 | 本次修复 |
-| BUG-006 | Draft 可见性 OpRaw 过滤器 MongoDB 返回空 bson，改为解析 AND 条件 | 本次修复 |
-| BUG-007 | Update 响应 data.data 双层嵌套，改为 item 对齐 Create 的 items | 本次修复 |
-| BUG-008 | version_remark 被默认值覆盖，改为检查合并后的值非空则保留 | 本次修复 |
-| BUG-009 | versions 响应缺 total/items，已补齐 | 本次修复 |
-| BUG-010 | edit-version patches key 与 Go 字段名不匹配，改为双向查找 | 本次修复 |
-| BUG-011 | /versions-archived 路由未实现，已添加 ListArchivedVersions handler | 本次修复 |
+| BUG-005 | Activate nil panic + status 不更新 → 二次修复：分目标/非目标两步 + Save 持久化 | 本次 |
+| BUG-006 | Draft 可见性 → 二次修复：filterToBson 新增 or_group→$or 转换 | 本次 |
+| BUG-007 | Update data.data 双层嵌套 → 最终改为 items 数组 | 本次 |
+| BUG-008 | version_remark 默认值覆盖 → 检查非空 | ✅ 回归验证通过 |
+| BUG-009 | versions 缺 total/items → 已补齐 | ✅ 回归验证通过 |
+| BUG-010 | edit-version patches key 不匹配 → 二次修复：遍历所有 key 通过 resolveColumn 匹配 | 本次 |
+| BUG-011 | /versions-archived 404 → 新增路由 | ✅ 回归验证通过 |
 | BUG-001 | 版本化 Delete 标记全部同 code 版本 | 本次修复 |
 | BUG-002 | MongoDB isCurrent bool vs int8 类型不匹配 | 本次修复 |
 | BUG-003 | ReferenceRelation 不支持点分路径 Field | 本次修复 |

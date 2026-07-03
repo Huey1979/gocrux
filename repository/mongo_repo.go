@@ -407,6 +407,17 @@ func filterToBson(f Filter) bson.M {
 		return bson.M{f.Field: bson.M{"$in": f.Value}}
 	case OpRange:
 		return bson.M{f.Field: bson.M{"$gte": f.Value, "$lte": f.Value}}
+	case "or_group":
+		// OR 组：子 filter 之间用 $or 连接
+		subs, _ := f.Value.([]Filter)
+		if len(subs) > 0 {
+			ors := make([]bson.M, len(subs))
+			for i, sub := range subs {
+				ors[i] = filterToBson(sub)
+			}
+			return bson.M{"$or": ors}
+		}
+		return bson.M{}
 	case OpRaw:
 		// 尝试将 "col1 = ? AND col2 = ?" 格式转为 bson （如草稿可见性过滤）
 		switch v := f.Value.(type) {
