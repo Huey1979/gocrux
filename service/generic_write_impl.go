@@ -27,13 +27,14 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 	for _, req := range input {
 		m := newRecord[M]()
 		m.SetDefaults()
-		if err := req.MergeTo(&m); err != nil {
-			return nil, err
-		}
 		m.SetID()
 		m.SetCreatedBy(userID)
 		m.SetCreatedAt(now)
 		m.SetUpdatedAt(now)
+		// MergeTo 放最后：钩子/BizRecord 传入的字段覆盖框架默认值，不会被改写
+		if err := req.MergeTo(&m); err != nil {
+			return nil, err
+		}
 
 		// 版本化实体：Create 时自动设置初始版本号 v1.0
 		// （Update 时由 _beforeUpdateVersioned 调用 nextVersionCode 递增）

@@ -6,7 +6,9 @@
 
 ## 待修
 
-（空——所有已知 Bug 已修复）
+| 编号 | 描述 | 来源 |
+|------|------|------|
+| BUG-014 | README 未说明 `GetUserULID(ctx)` 需要 `context.WithValue(ctx, service.CtxKeyUserULID, ulid)` 注入。Authenticator 示例只写 gin.Context，缺少 gin→context.Context 桥接说明 | heims 集成发现 |
 
 ---
 
