@@ -84,7 +84,7 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	}
 
 	// 3. 目标行：设置 is_current + 状态更新（在 entity 上直接改，然后用 Save 持久化）
-	common.SetFieldValue(_entity, vf.CurrentField, true)
+	common.SetFieldValue(_entity, vf.CurrentField, int8(1))
 	common.SetFieldValue(_entity, "UpdatedAt", now)
 	if userULID != "" {
 		common.SetFieldValue(_entity, "UpdatedBy", userULID)
@@ -94,7 +94,7 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	if currentStatus == string(VersionStatusDraft) || currentStatus == string(VersionStatusDeprecated) {
 		common.SetFieldValue(_entity, vf.StatusField, string(VersionStatusPublished))
 		if vf.PublishedAtField != "" {
-			common.SetFieldValue(_entity, vf.PublishedAtField, now)
+			common.SetFieldValue(_entity, vf.PublishedAtField, &now)
 		}
 		if vf.PublishedByField != "" && userULID != "" {
 			common.SetFieldValue(_entity, vf.PublishedByField, userULID)

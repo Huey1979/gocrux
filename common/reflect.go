@@ -36,5 +36,41 @@ func SetFieldValue(entity any, fieldName string, value any) {
 	// 处理命名类型（如 type SiteVersionStatus string）
 	if val.Type().ConvertibleTo(field.Type()) {
 		field.Set(val.Convert(field.Type()))
+		return
+	}
+
+	// 数值兼容：bool ↔ int(X)
+	if field.Type().Kind() >= reflect.Int && field.Type().Kind() <= reflect.Int64 {
+		if b, ok := value.(bool); ok {
+			if b {
+				field.SetInt(1)
+			} else {
+				field.SetInt(0)
+			}
+			return
+		}
+	}
+	if field.Type().Kind() == reflect.Bool {
+		switch v := value.(type) {
+		case int, int8, int16, int32, int64:
+			field.SetBool(reflect.ValueOf(v).Int() != 0)
+			return
+		}
+	}
+
+	// 值 → 指针：field 是指针类型，val 是值类型
+	if field.Kind() == reflect.Ptr && val.Type().AssignableTo(field.Type().Elem()) {
+		ptr := reflect.New(field.Type().Elem())
+		ptr.Elem().Set(val)
+		field.Set(ptr)
+		return
+	}
+
+	// 指针 → 值：field 是值类型，val 是指针类型
+	if field.Kind() != reflect.Ptr && val.Kind() == reflect.Ptr {
+		if val.Elem().Type().AssignableTo(field.Type()) {
+			field.Set(val.Elem())
+			return
+		}
 	}
 }

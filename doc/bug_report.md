@@ -6,9 +6,7 @@
 
 ## 待修
 
-| 编号 | 描述 | 来源 |
-|------|------|------|
-| BUG-014 | README 未说明 `GetUserULID(ctx)` 需要 `context.WithValue(ctx, service.CtxKeyUserULID, ulid)` 注入。Authenticator 示例只写 gin.Context，缺少 gin→context.Context 桥接说明 | heims 集成发现 |
+（空——所有已知 Bug 已修复）
 
 ---
 
@@ -27,6 +25,8 @@
 
 | 编号 | 描述 | commit |
 |------|------|--------|
+| BUG-014 | README 补 gin.Context→context.Context 桥接说明 + _doActivate 类型修正 + SetFieldValue 扩展 | 本次 |
+| BUG-015 | SetFieldValue bool→int(X)/T→*T/*T→T 静默失败 → 新增 4 种转换 + _doActivate 类型修正 | 本次 |
 | BUG-005 | Activate nil panic + status 不更新 → 二次修复：分目标/非目标两步 + Save 持久化 | 本次 |
 | BUG-006 | Draft 可见性 → 二次修复：filterToBson 新增 or_group→$or 转换 | 本次 |
 | BUG-007 | Update data.data 双层嵌套 → 最终改为 items 数组 | 本次 |
@@ -45,3 +45,5 @@
 | - | resolveColumn 只认 gorm 不认 bson | `364d386` |
 | - | validateInput 拒绝动态 schema 实体字段 | `eaf9715` |
 | - | MongoCRUDRepository.List page<=0 → skip 负值 | `eaf9715` |
+
+---

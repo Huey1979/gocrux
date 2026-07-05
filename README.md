@@ -1386,6 +1386,29 @@ HandlerConfig[entity.Site]{
 }
 ```
 
+#### gin.Context → context.Context 桥接（重要）
+
+`Authenticator.Middleware()` 将用户信息存入 `gin.Context`，但框架的 Service 层通过 `service.GetUserULID(ctx)` 从 `context.Context` 读取。需要在中间件中将用户 ULID 注入 `context.Context`：
+
+```go
+func (a *JWTAuth) Middleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        token := c.GetHeader("Authorization")
+        claims := parseJWT(token)
+        info := handler.UserInfo{ULID: claims.Sub, Name: claims.Name}
+        c.Set("user", info)
+
+        // ★ 关键：将 ULID 注入 context.Context，供 Service 层使用
+        ctx := context.WithValue(c.Request.Context(), service.CtxKeyUserULID, claims.Sub)
+        c.Request = c.Request.WithContext(ctx)
+
+        c.Next()
+    }
+}
+```
+
+> 缺少此桥接时 `GetUserULID(ctx)` 返回空字符串，导致 `created_by`、`updated_by`、草稿可见性过滤等依赖用户 ULID 的功能静默失效。
+
 ### Authorizer（授权）
 
 ```go
