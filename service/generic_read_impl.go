@@ -89,9 +89,14 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		f.Page, f.PageSize = popIntParam(v, "page"), popIntParam(v, "page_size")
 		f.OrderBy, f.OrderDir = popStrParam(v, "order_by"), popStrParam(v, "order_dir")
 
+		cols := knownColumns[M]()
 		for k, val := range v {
 			field, op, value := parseFilterKey(k, val)
 			if field == "" {
+				continue
+			}
+			// 跳过不属于本实体的陌生参数（如 _t、callback 等前端附加参数）
+			if !cols[field] {
 				continue
 			}
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: op, Value: value})

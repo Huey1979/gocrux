@@ -416,3 +416,36 @@ func isSlice(v any) bool {
 	rv := reflect.ValueOf(v)
 	return rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
 }
+
+// knownColumns[M] 返回 entity 所有已知列名集合（gorm column / bson / json tag）。
+// 用于 List 过滤时跳过不属于本实体的陌生参数（如 _t、callback 等）。
+func knownColumns[M Record]() map[string]bool {
+	var m M
+	t := reflect.TypeOf(m)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	cols := make(map[string]bool)
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// gorm column
+		if col := extractGormColumn(f.Tag.Get("gorm")); col != "" {
+			cols[col] = true
+		}
+		// bson tag
+		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
+			cols[bsonTag] = true
+		}
+		// json tag (fallback)
+		if jsonTag := f.Tag.Get("json"); jsonTag != "" && jsonTag != "-" {
+			jsonName, _, _ := strings.Cut(jsonTag, ",")
+			if jsonName != "" {
+				cols[jsonName] = true
+			}
+		}
+	}
+	// 框架字段（可能无结构体标签映射）
+	cols["id"] = true
+	return cols
+}
