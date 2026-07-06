@@ -208,11 +208,14 @@ func (s *GenericService[M]) _beforeEditVersion(ctx context.Context, id any, patc
 	return id, &editVersionCtx[M]{Old: _entity, Patches: patches}, nil
 }
 
-// validVersionTransitions 版本状态迁移规则
+// validVersionTransitions 版本状态迁移规则（edit-version API）。
+//   deprecated ↔ published（双向）
+//   deprecated ↔ abolished（双向）
+// 注意：draft → published 必须通过 Activate API，edit-version 不支持此转换。
 var validVersionTransitions = map[string][]string{
-	"draft":      {"abolished"},
-	"deprecated": {"abolished"},
-	"abolished":  {"draft"},
+	"deprecated": {"published", "abolished"},
+	"published":  {"deprecated"},
+	"abolished":  {"deprecated"},
 }
 
 // isValidStatusTransition 校验状态迁移是否合法
