@@ -89,6 +89,18 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		f.Page, f.PageSize = popIntParam(v, "page"), popIntParam(v, "page_size")
 		f.OrderBy, f.OrderDir = popStrParam(v, "order_by"), popStrParam(v, "order_dir")
 
+		// 默认分页 + 默认排序
+		if f.Page < 1 {
+			f.Page = 1
+		}
+		if f.PageSize <= 0 {
+			f.PageSize = 20
+		}
+		if f.OrderBy == "" {
+			f.OrderBy = "created_at"
+			f.OrderDir = "desc"
+		}
+
 		cols := knownColumns[M]()
 		for k, val := range v {
 			field, op, value := parseFilterKey(k, val)
