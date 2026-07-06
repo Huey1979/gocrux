@@ -14,6 +14,9 @@ var (
 	ErrDuplicateCode          = errors.New("编码已存在，请更换 form_code 或使用 Update 更新现有表单")
 )
 
+// errFieldValidationSentinel 字段校验哨兵（不导出，通过 IsFieldValidation 检查）。
+var errFieldValidationSentinel = errors.New("field validation failed")
+
 // ============================================================
 // 通用服务 (generic) — 框架内部使用
 // ============================================================
@@ -72,7 +75,12 @@ func ErrUpdateReqValidation(idx int, cause error) error {
 	return fmt.Errorf("更新请求[%d]校验失败: %w", idx, cause)
 }
 func ErrFieldValidation(field, reason string) error {
-	return fmt.Errorf("字段[%s] %s", field, reason)
+	return fmt.Errorf("字段[%s] %s: %w", field, reason, errFieldValidationSentinel)
+}
+
+// IsFieldValidation 检查是否为字段校验错误（供 mapServiceError 等使用 errors.Is 匹配）。
+func IsFieldValidation(err error) bool {
+	return errors.Is(err, errFieldValidationSentinel)
 }
 func ErrParsePublishedVersion(cause error) error {
 	return fmt.Errorf("解析正式发布版本失败: %w", cause)

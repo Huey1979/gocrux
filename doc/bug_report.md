@@ -48,3 +48,52 @@
 | - | MongoCRUDRepository.List page<=0 → skip 负值 | `eaf9715` |
 
 ---
+
+## BUG-017 详细分析：字段校验错误被吞为 500
+
+### 问题
+
+`handler/errors.go:mapServiceError` 未覆盖 `errs.ErrFieldValidation`。当 List 参数校验失败时（如 `page_size=1000` 超过 `defaultListRules` 中 Max=100），`validateInput` 返回 `ErrFieldValidation("page_size", "不能大于 100")`，但 `mapServiceError` 中没有 `errors.Is(err, errs.ErrFieldValidation)` 分支，走到最后的 `return constants.CodeInternalError`。
+
+随后 `handleError` 因 code==CodeInternalError 调用 `InternalError(c, err)`，返回 HTTP 500 "系统发生错误，请联系管理员"，客户端无法获知具体错误。
+
+### 根因
+
+`ErrFieldValidation` 是纯 `fmt.Errorf`，不是哨兵错误，`errors.Is` 无法匹配：
+
+```go
+// errors/errors.go
+func ErrFieldValidation(field, reason string) error {
+    return fmt.Errorf("字段[%s] %s", field, reason)
+}
+```
+
+### 修复建议
+
+**方案 A（推荐）**：定义哨兵 + Wrap
+
+```go
+var errFieldValidation = errors.New("field validation")
+
+func ErrFieldValidation(field, reason string) error {
+    return fmt.Errorf("字段[%s] %s: %w", field, reason, errFieldValidation)
+}
+```
+
+然后在 `mapServiceError` 中增加：
+
+```go
+if errors.Is(err, errs.ErrFieldValidation) {
+    return constants.CodeParamError
+}
+```
+
+**方案 B**：用自定义错误类型（struct），`errors.As` 匹配。
+
+**不可选方案**：字符串匹配 `strings.Contains`（脆弱，不推荐）。
+
+### 影响范围
+
+所有 List/Create/Update 的字段校验失败都返回 500 而非具体错误信息。
+
+---

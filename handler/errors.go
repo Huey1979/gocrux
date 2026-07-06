@@ -16,7 +16,7 @@ func mapServiceError(err error) constants.BusinessCode {
 	if errors.Is(err, errs.ErrUniqueValidationFailed) {
 		return constants.CodeConflict
 	}
-	if errors.Is(err, errs.ErrInvalidParam) {
+	if errors.Is(err, errs.ErrInvalidParam) || errs.IsFieldValidation(err) {
 		return constants.CodeParamError
 	}
 	if errors.Is(err, errs.ErrDuplicateCode) {
