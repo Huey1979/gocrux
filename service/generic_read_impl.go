@@ -174,15 +174,15 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	} else {
 		m := newRecord[M]()
 		if m.SetDelete() {
-		field := s.config.DeletedField
-		if field == "" {
-			field = "is_deleted"
-		}
-		val := s.config.DeletedValue
-		if val == nil {
-			val = int8(0)
-		}
-		f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
+			field := s.config.DeletedField
+			if field == "" {
+				field = "is_deleted"
+			}
+			val := s.config.DeletedValue
+			if val == nil {
+				val = int8(0)
+			}
+			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	}
 

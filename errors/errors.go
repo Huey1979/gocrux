@@ -91,39 +91,57 @@ func ErrParsePublishedVersion(cause error) error {
 // ============================================================
 
 func ErrCascadeCreate(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联创建%s失败: %w", handlerName, cause)
 }
 func ErrCascadeUpdate(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联更新%s失败: %w", handlerName, cause)
 }
 func ErrCascadeUpdateBackfill(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联更新%s失败（回填旧子数据）: %w", handlerName, cause)
 }
 func ErrCascadeUpdateCleanup(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联更新%s失败（清理旧子记录）: %w", handlerName, cause)
 }
 func ErrCascadeDelete(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联删除%s失败: %w", handlerName, cause)
 }
 func ErrCascadeActivateQuery(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联激活查询%s失败: %w", handlerName, cause)
 }
 func ErrCascadeActivate(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联激活%s失败: %w", handlerName, cause)
 }
 func ErrCascadeEditVerQuery(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联编辑版本查询%s失败: %w", handlerName, cause)
 }
 func ErrCascadeEditVer(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("级联编辑版本%s失败: %w", handlerName, cause)
 }
 
@@ -132,27 +150,39 @@ func ErrCascadeEditVer(handlerName string, cause error) error {
 // ============================================================
 
 func ErrRefResolve(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向上级联解析 %s 失败: %w", handlerName, cause)
 }
 func ErrRefBatchResolve(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向上级联批量解析 %s 失败: %w", handlerName, cause)
 }
 func ErrChildRefResolve(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向下引用批量解析 %s 失败: %w", handlerName, cause)
 }
 func ErrChildRefBatchResolve(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向下引用批量解析 %s 失败: %w", handlerName, cause)
 }
 func ErrCascadeQuery(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向下级联查询 %s 失败: %w", handlerName, cause)
 }
 func ErrCascadeBatchQuery(handlerName string, cause error) error {
-	if cause == nil { return nil }
+	if cause == nil {
+		return nil
+	}
 	return fmt.Errorf("向下级联批量查询 %s 失败: %w", handlerName, cause)
 }
 

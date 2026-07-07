@@ -314,4 +314,3 @@ func (h *GenericHandler[M]) SetHandlerReg(reg *HandlerRegistry) {
 func (h *GenericHandler[M]) SetTxCoord(tc *TxCoordinator) {
 	h.txCoord = tc
 }
-

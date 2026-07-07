@@ -72,45 +72,45 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 			}
 
 			// 跨实体引用映射：级联创建过程中，后续子实体可通过 __ref:handler:temp__ 占位符
-				// 引用前面已创建子实体的 ULID。每次 DoCreate 后更新此映射。
-				refMap := make(cascadeRefMap)
+			// 引用前面已创建子实体的 ULID。每次 DoCreate 后更新此映射。
+			refMap := make(cascadeRefMap)
 
-				for _, rel := range h.config.Cascades {
-					if !rel.OnCreate {
-						continue
-					}
-					// 先收集所有父实体的子数据并注入 FK
-					var allChildData []map[string]any
-					for i, parent := range created {
-						parentPK := extractPKFromResult(parent)
-						childData := extractChildData(rawMaps[i], rel.ChildrenField, rel.ChildrenWrapKey)
-						for j := range childData {
-							setByPath(childData[j], rel.FKField, parentPK)
-						}
-						allChildData = append(allChildData, childData...)
-					}
-					if len(allChildData) == 0 {
-						continue
-					}
-
-					childHandler := h.handlerReg.Get(rel.HandlerName)
-					if childHandler == nil {
-						continue
-					}
-
-					// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
-					resolveCrossRefs(allChildData, refMap)
-					// 收集本批的 _temp_ref 标记
-					tempRefs := collectTempRefsOrdered(allChildData, rel.HandlerName)
-
-					// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
-					pks, txErr := childHandler.DoCreate(cascadeCtx, allChildData)
-					if txErr != nil {
-						return errs.ErrCascadeCreate(rel.HandlerName, txErr)
-					}
-					// 将本批创建的实体 ULID 加入引用映射，供后续级联批次使用
-					updateRefMap(refMap, tempRefs, pks)
+			for _, rel := range h.config.Cascades {
+				if !rel.OnCreate {
+					continue
 				}
+				// 先收集所有父实体的子数据并注入 FK
+				var allChildData []map[string]any
+				for i, parent := range created {
+					parentPK := extractPKFromResult(parent)
+					childData := extractChildData(rawMaps[i], rel.ChildrenField, rel.ChildrenWrapKey)
+					for j := range childData {
+						setByPath(childData[j], rel.FKField, parentPK)
+					}
+					allChildData = append(allChildData, childData...)
+				}
+				if len(allChildData) == 0 {
+					continue
+				}
+
+				childHandler := h.handlerReg.Get(rel.HandlerName)
+				if childHandler == nil {
+					continue
+				}
+
+				// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
+				resolveCrossRefs(allChildData, refMap)
+				// 收集本批的 _temp_ref 标记
+				tempRefs := collectTempRefsOrdered(allChildData, rel.HandlerName)
+
+				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
+				pks, txErr := childHandler.DoCreate(cascadeCtx, allChildData)
+				if txErr != nil {
+					return errs.ErrCascadeCreate(rel.HandlerName, txErr)
+				}
+				// 将本批创建的实体 ULID 加入引用映射，供后续级联批次使用
+				updateRefMap(refMap, tempRefs, pks)
+			}
 			return nil
 		})
 		if err != nil {

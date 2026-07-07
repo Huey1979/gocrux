@@ -216,7 +216,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			for _, m := range result {
 				if fkVal, fkOk := getByPath(m, ref.Field); fkOk && fkVal != nil {
 					if parent, ok := parentMap[fmt.Sprint(fkVal)]; ok {
-					m[resultKey] = parent
+						m[resultKey] = parent
 					}
 				}
 			}

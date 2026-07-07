@@ -94,12 +94,11 @@ func (r *MapRequest[M]) Validate() error {
 	return nil
 }
 
-	// Data 返回原始 map 数据（供外部钩子修改）。
-	func (r *MapRequest[M]) Data() map[string]any { return r.data }
+// Data 返回原始 map 数据（供外部钩子修改）。
+func (r *MapRequest[M]) Data() map[string]any { return r.data }
 
-	// SetData 替换原始 map 数据（供外部钩子修改后回写）。
-	func (r *MapRequest[M]) SetData(d map[string]any) { r.data = d }
-
+// SetData 替换原始 map 数据（供外部钩子修改后回写）。
+func (r *MapRequest[M]) SetData(d map[string]any) { r.data = d }
 
 // ============================================================
 // mergeByJSON — 通过 JSON 中介实现 map → struct 合并

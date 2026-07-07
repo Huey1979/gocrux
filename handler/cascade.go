@@ -17,9 +17,9 @@ import (
 // 实际递归层数不可超过此值。防止无上限递归。
 const hardMaxExpandDepth = 10
 
-	// defaultExpandDepth 默认展开深度，当 Handler 未显式配置 MaxExpandDepth 时使用。
-	// 设为 hardMaxExpandDepth 以支持深层嵌套（form→layout→section→field→ref→entity 约7层）
-	const defaultExpandDepth = hardMaxExpandDepth
+// defaultExpandDepth 默认展开深度，当 Handler 未显式配置 MaxExpandDepth 时使用。
+// 设为 hardMaxExpandDepth 以支持深层嵌套（form→layout→section→field→ref→entity 约7层）
+const defaultExpandDepth = hardMaxExpandDepth
 
 type depthCtxKey struct{}
 
@@ -107,7 +107,6 @@ func shouldIgnoreCascade(ctx context.Context) bool {
 }
 
 // ============================================================
-
 
 type fieldsCtxKey struct{}
 

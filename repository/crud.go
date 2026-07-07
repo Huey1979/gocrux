@@ -203,7 +203,7 @@ const (
 	OpLTE   FilterOp = "lte"
 	OpIn    FilterOp = "in"
 	OpRange FilterOp = "between"
-	OpRaw   FilterOp = "raw"   // 原生 SQL 条件（Value 为 (string, []any) 或仅 string）
+	OpRaw   FilterOp = "raw" // 原生 SQL 条件（Value 为 (string, []any) 或仅 string）
 )
 
 // Filter 单个过滤条件

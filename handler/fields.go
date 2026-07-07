@@ -4,9 +4,11 @@ import "strings"
 
 // pruneFields 按 fields 规则裁剪 map 数据。
 // 规则语法：
-//   key           → 保留下级全部
-//   key:sub       → 保留下级的部分（单个 key）
-//   key:[a,b]     → 保留下级的部分（多个 key）
+//
+//	key           → 保留下级全部
+//	key:sub       → 保留下级的部分（单个 key）
+//	key:[a,b]     → 保留下级的部分（多个 key）
+//
 // 子规则用 ; 分隔。如: "form_code;form_name;write_section:section_name"
 func pruneFields(data map[string]any, fields string) map[string]any {
 	if fields == "" {
