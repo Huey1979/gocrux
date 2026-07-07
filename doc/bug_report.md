@@ -26,6 +26,7 @@
 | 编号 | 描述 | commit |
 |------|------|--------|
 | BUG-016 | _doList 无默认分页和排序 → 加 Page=1/PageSize=20/OrderBy=created_at DESC 兜底 | 本次 |
+| BUG-018 | 非版本化级联更新全量替换：DoDeleteByFK 后 passToChild=true 强制子数据走 CREATE | 本次 |
 | BUG-014 | README 补 gin.Context→context.Context 桥接说明 + _doActivate 类型修正 + SetFieldValue 扩展 | 本次 |
 | BUG-015 | SetFieldValue bool→int(X)/T→*T/*T→T 静默失败 → 新增 4 种转换 + _doActivate 类型修正 | 本次 |
 | BUG-005 | Activate nil panic + status 不更新 → 二次修复：分目标/非目标两步 + Save 持久化 | 本次 |
