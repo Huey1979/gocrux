@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -105,7 +106,7 @@ var frameworkManagedCols = map[string]bool{
 }
 
 // deriveFieldRules 从 entity struct M 反射推导默认 FieldRule。
-// - 从 gorm 标签提取 db column 名 + size/not null 等约束
+// - 从 gorm 标签提取 db column 名 + type/size/not null 等约束
 // - 从 Go 类型推导期望类型
 // - ULID 类型自动 max_length=26 + format=ulid，且排除 Required
 // - 框架管理字段（_ulid/is_deleted/version_*/审计字段）不设 Required
@@ -133,6 +134,12 @@ func deriveFieldRules[M any]() EndpointRules {
 		// 类型推导
 		rule.Type = goKindToRuleType(sf.Type)
 
+		// JSON 原生类型检测：json.RawMessage 字段自动标记 format=json
+		if sf.Type == reflect.TypeOf(json.RawMessage{}) {
+			rule.Type = "string"
+			rule.Format = "json"
+		}
+
 		// 主键/ULID 字段：自动 max_length=26 + format=ulid，不设为 Required
 		// （SetID() 自动生成主键，用户无需传入）
 		isPK := strings.Contains(sf.Tag.Get("gorm"), "primaryKey")
@@ -145,11 +152,48 @@ func deriveFieldRules[M any]() EndpointRules {
 			// gorm 标签约束（仅对非 ULID 字段生效）
 			gormTag := sf.Tag.Get("gorm")
 			if gormTag != "" {
+				// size:N → MaxLength（仅 string 类型）
 				if size := parseGormSize(gormTag); size > 0 && rule.Type == "string" {
 					rule.MaxLength = IntPtr(size)
 				}
+
+				// not null → Required
 				if strings.Contains(gormTag, "not null") {
 					rule.Required = true
+				}
+
+				// default:NULL / default:null → 抵消 not null
+				if hasGormDefaultNull(gormTag) {
+					rule.Required = false
+				}
+
+				// type: 解析
+				gt := parseGormType(gormTag)
+
+				// JSON 列自动检测：type:json 或 type:jsonb
+				if strings.Contains(gt, "json") {
+					rule.Type = "string"
+					rule.Format = "json"
+				}
+
+				// type:enum('a','b','c') → 枚举约束
+				if enumVals := parseGormEnum(gt); len(enumVals) > 0 {
+					rule.Enum = enumVals
+				}
+
+				// type:tinyint(1) → bool（MySQL 惯用布尔表示）
+				if strings.ReplaceAll(gt, " ", "") == "tinyint(1)" {
+					rule.Type = "bool"
+				}
+
+				// type:decimal(M,D) → float
+				if strings.HasPrefix(gt, "decimal") {
+					rule.Type = "float"
+				}
+
+				// type:text / longtext / mediumtext → 清除 MaxLength
+				if isTextGormType(gt) {
+					rule.MaxLength = nil
 				}
 			}
 		}
@@ -188,6 +232,52 @@ func gormColumn(sf reflect.StructField) string {
 		return col
 	}
 	return common.ToSnakeCase(sf.Name)
+}
+
+// rxGormEnum 匹配 gorm 标签中的 type:enum('a','b','c') 部分。
+var rxGormEnum = regexp.MustCompile(`(?i)enum\s*\(\s*'([^']*)'(?:\s*,\s*'([^']*)')*\s*\)`)
+
+// parseGormEnum 从 gorm type 字符串（如 "enum('a','b','c')"）提取枚举值列表。
+func parseGormEnum(gormType string) []string {
+	m := rxGormEnum.FindStringSubmatch(gormType)
+	if len(m) < 2 {
+		return nil
+	}
+	var result []string
+	for _, v := range m[1:] {
+		if v != "" {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// parseGormType 提取 gorm 标签中的 type: 值（如 "varchar(255)", "enum('a','b')"）。
+func parseGormType(tag string) string {
+	for _, part := range strings.Split(tag, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "type:") {
+			return strings.TrimPrefix(part, "type:")
+		}
+	}
+	return ""
+}
+
+// isTextGormType 判断 gorm type 是否为 text/longtext/mediumtext 等无长度限制的文本类型。
+func isTextGormType(gormType string) bool {
+	s := strings.ToLower(strings.TrimSpace(gormType))
+	return s == "text" || s == "longtext" || s == "mediumtext" || s == "tinytext"
+}
+
+// hasGormDefaultNull 判断 gorm 标签是否包含 default:NULL 或 default:null。
+func hasGormDefaultNull(tag string) bool {
+	for _, part := range strings.Split(tag, ";") {
+		part = strings.TrimSpace(part)
+		if strings.EqualFold(part, "default:NULL") || strings.EqualFold(part, "default:null") {
+			return true
+		}
+	}
+	return false
 }
 
 // parseGormSize 解析 gorm 标签中的 size 值。
@@ -384,6 +474,10 @@ var timeFormats = []string{
 func checkFormat(field, format string, val any) error {
 	s := fmt.Sprint(val)
 	switch format {
+	case "json":
+		if !json.Valid([]byte(s)) {
+			return errs.ErrFieldValidation(field, "不是有效的JSON格式")
+		}
 	case "datetime":
 		// 尝试多种 datetime 格式
 		for _, layout := range []string{
@@ -502,7 +596,29 @@ func validateField(rule *FieldRule, field string, data map[string]any) error {
 // validateInput 按规则集校验一条记录，同时对值进行类型转换（宽松模式）。
 // data 中的值会在校验成功后被原地替换为转换后的类型。
 // 返回 nil 表示通过；返回 error 包含具体字段和原因。
-func validateInput(rules EndpointRules, data map[string]any, endpoint string) error {
+//
+// rejectUnknown 为 true 时，对 data 中那些不在 rules、非框架控制参数、非 extraAllowedFields 的 key 报错。
+// extraAllowedFields 用于声明级联子表数据占位 key（如 Cascades.ChildrenField）。
+func validateInput(rules EndpointRules, data map[string]any, endpoint string, rejectUnknown bool, extraAllowedFields ...string) error {
+	if rejectUnknown {
+		allowed := make(map[string]bool, len(extraAllowedFields))
+		for _, f := range extraAllowedFields {
+			allowed[f] = true
+		}
+		for key := range data {
+			if isFrameworkMetaParam(key) {
+				continue
+			}
+			if _, ok := rules[key]; ok {
+				continue
+			}
+			if allowed[key] {
+				continue
+			}
+			return errs.ErrFieldValidation(key, "无效字段")
+		}
+	}
+
 	for field, rule := range rules {
 		if err := validateField(rule, field, data); err != nil {
 			return err
@@ -513,7 +629,28 @@ func validateInput(rules EndpointRules, data map[string]any, endpoint string) er
 
 // validateInputCollect 与 validateInput 相同，但不返回第一个错误，而是收集所有字段的校验错误。
 // 返回 nil 表示全部通过；返回 *BatchErrors 包含每条数据的错误详情。
-func validateInputCollect(rules EndpointRules, data map[string]any, endpoint string, index int) *BatchErrors {
+func validateInputCollect(rules EndpointRules, data map[string]any, endpoint string, index int, rejectUnknown bool, extraAllowedFields ...string) *BatchErrors {
+	if rejectUnknown {
+		allowed := make(map[string]bool, len(extraAllowedFields))
+		for _, f := range extraAllowedFields {
+			allowed[f] = true
+		}
+		for key := range data {
+			if isFrameworkMetaParam(key) {
+				continue
+			}
+			if _, ok := rules[key]; ok {
+				continue
+			}
+			if allowed[key] {
+				continue
+			}
+			return &BatchErrors{Errors: []BatchError{
+				{Index: index, Field: key, Message: "无效字段"},
+			}}
+		}
+	}
+
 	var batchErrs *BatchErrors
 	for field, rule := range rules {
 		if err := validateField(rule, field, data); err != nil {

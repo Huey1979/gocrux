@@ -399,7 +399,7 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	}
 
 	// 框架层校验：分页参数 + 过滤字段类型（自动推导 + 用户配置）
-	if err := validateInput(h.validateRules.List, filters, "list"); err != nil {
+	if err := validateInput(h.validateRules.List, filters, "list", h.config.RejectUnknownFields); err != nil {
 		h.handleError(c, err)
 		return
 	}

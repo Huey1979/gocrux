@@ -448,6 +448,22 @@ func (h *GenericHandler[M]) hasCascadeFlag(check func(CascadeRelation) bool) boo
 	return false
 }
 
+// cascadeKnownFields 收集所有级联子表占位 key（CascadeRelation.ChildrenField）。
+// 这些 key 用于在请求 body 中传递子表数据（如 "domains"），不对应数据库列，
+// 需在 RejectUnknownFields 模式下豁免。
+func (h *GenericHandler[M]) cascadeKnownFields() []string {
+	if len(h.config.Cascades) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(h.config.Cascades))
+	for _, rel := range h.config.Cascades {
+		if rel.ChildrenField != "" {
+			fields = append(fields, rel.ChildrenField)
+		}
+	}
+	return fields
+}
+
 // applyResponseMapper 将原始 Entity 通过 ResponseMapper 转换为 DTO map，并合并级联展开数据。
 // entity: 原始实体指针（*M）。
 // expanded: 展开后的完整 map（含 References/Cascades/ChildRefs 注入的额外 key）。
@@ -565,14 +581,10 @@ func (h *GenericHandler[M]) DoCreate(ctx context.Context, requests []map[string]
 
 // handleError 将 Service 层 error 映射为 HTTP 响应。
 // 使用 errors.Is 与 errs 包中的哨兵错误精确匹配。
-// 未匹配到的错误归为 InternalError（日志记录 + 友好提示）。
+// 错误消息统一透传返回前端，不再对未匹配错误吞掉详情。
 func (h *GenericHandler[M]) handleError(c *gin.Context, err error) {
 	code := mapServiceError(err)
-	if code == constants.CodeInternalError {
-		InternalError(c, err)
-		return
-	}
-	ErrorWithMsg(c, code, err.Error())
+	InternalErrorWithDetail(c, code, err)
 }
 
 // ============================================================

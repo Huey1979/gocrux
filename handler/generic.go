@@ -160,6 +160,11 @@ type HandlerConfig[M service.Record] struct {
 	// 为 true 时不从 entity struct tag 反射校验规则，完全交由钩子处理。
 	SkipAutoValidate bool
 
+	// RejectUnknownFields 拒绝未知字段（默认 false 静默跳过）。
+	// 为 true 时，Create/Update 请求中不在 schema 定义内的字段将返回校验错误。
+	// List 接口同样生效：?key=val 中 key 不在已知字段或框架控制参数中时报错。
+	RejectUnknownFields bool
+
 	// GlobalStore 内存缓存（可选）。nil 时不启用。
 	// 内置默认实现：repository.NewMapStore()。
 	GlobalStore repository.GlobalStore

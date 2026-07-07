@@ -107,3 +107,30 @@ func InternalError(c *gin.Context, err error) {
 		RequestID: requestID,
 	})
 }
+
+// InternalErrorWithDetail 错误响应（带错误详情透传）。
+// 将原始 err 记录到日志，同时将 err.Error() 透传返回给前端，
+// 避免在 mapServiceError 未覆盖时吞掉具体错误原因。
+//
+// 与 InternalError 的区别：Message 使用 err.Error() 而非通用提示。
+func InternalErrorWithDetail(c *gin.Context, code constants.BusinessCode, err error) {
+	requestID := getRequestID(c)
+
+	_, file, line, _ := runtime.Caller(1)
+	logrus.WithFields(logrus.Fields{
+		"log_id": requestID,
+		"error":  err.Error(),
+		"caller": fmt.Sprintf("%s:%d", file, line),
+	}).Error("内部错误")
+
+	logger.LogBusiness(c, "internal_error", logrus.Fields{
+		"error":  err.Error(),
+		"caller": fmt.Sprintf("%s:%d", file, line),
+	})
+
+	c.JSON(200, Response{
+		Code:      int(code),
+		Msg:       err.Error(),
+		RequestID: requestID,
+	})
+}

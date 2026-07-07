@@ -56,10 +56,11 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 	defer func() { traceEnd(ctx, h.svcName+".create", start, err) }()
 
 	// 框架层校验：类型/长度/必填等（自动推导 + 用户配置）
+	extraAllowed := h.cascadeKnownFields()
 	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
 		var collected *BatchErrors
 		for i, raw := range rawReqs {
-			if berrs := validateInputCollect(h.validateRules.Create, raw, "create", i); berrs != nil {
+			if berrs := validateInputCollect(h.validateRules.Create, raw, "create", i, h.config.RejectUnknownFields, extraAllowed...); berrs != nil {
 				if collected == nil {
 					collected = &BatchErrors{}
 				}
@@ -71,7 +72,7 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 		}
 	} else {
 		for i, raw := range rawReqs {
-			if err := validateInput(h.validateRules.Create, raw, "create"); err != nil {
+			if err := validateInput(h.validateRules.Create, raw, "create", h.config.RejectUnknownFields, extraAllowed...); err != nil {
 				return nil, errs.ErrReqValidation(i, err)
 			}
 		}
@@ -201,8 +202,9 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 	start := traceStart(ctx, h.svcName+".update", logrus.Fields{"count": len(rawReqs)})
 	defer func() { traceEnd(ctx, h.svcName+".update", start, err) }()
 	// 框架层校验：类型/长度等（自动推导 + 用户配置）
+	extraAllowed := h.cascadeKnownFields()
 	for i, raw := range rawReqs {
-		if err := validateInput(h.validateRules.Update, raw, "update"); err != nil {
+		if err := validateInput(h.validateRules.Update, raw, "update", h.config.RejectUnknownFields, extraAllowed...); err != nil {
 			return nil, errs.ErrUpdateReqValidation(i, err)
 		}
 	}
