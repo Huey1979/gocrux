@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"github.com/Huey1979/gocrux/common"
 	"strings"
 )
 
@@ -297,16 +298,9 @@ func parseStopRules(s string) ([]StopRule, error) {
 	return rules, nil
 }
 
-// splitCSV 按逗号分割，过滤空串。
+// splitCSV 按逗号分割，过滤空串。内部委托到 common.SplitAndTrim。
 func splitCSV(s string) []string {
-	var parts []string
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			parts = append(parts, p)
-		}
-	}
-	return parts
+	return common.SplitAndTrim(s, ",")
 }
 
 // splitN 按 sep 分割 n 段（最后一段包含剩余全部内容）。

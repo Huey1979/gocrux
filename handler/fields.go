@@ -1,6 +1,8 @@
 package handler
 
-import "strings"
+import (
+	"github.com/Huey1979/gocrux/common"
+)
 
 // pruneFields 按 fields 规则裁剪 map 数据。
 // 规则语法：
@@ -59,39 +61,13 @@ func pruneFields(data map[string]any, fields string) map[string]any {
 
 // splitRules 按 ; 分割规则，过滤空串。
 func splitRules(fields string) []string {
-	parts := strings.Split(fields, ";")
-	rules := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			rules = append(rules, p)
-		}
-	}
-	return rules
+	return common.SplitAndTrim(fields, ";")
 }
 
 // parseRule 解析单条规则 "key:subs" 或 "key:[a,b]" 或 "key"。
 // 返回 key 和下级的子 key 列表（nil=全部保留）。
 func parseRule(rule string) (string, []string) {
-	idx := strings.IndexByte(rule, ':')
-	if idx < 0 {
-		return rule, nil
-	}
-	key := strings.TrimSpace(rule[:idx])
-	subStr := strings.TrimSpace(rule[idx+1:])
-
-	// key:[a,b] 格式
-	if len(subStr) > 2 && subStr[0] == '[' && subStr[len(subStr)-1] == ']' {
-		inner := subStr[1 : len(subStr)-1]
-		subs := strings.Split(inner, ",")
-		for i := range subs {
-			subs[i] = strings.TrimSpace(subs[i])
-		}
-		return key, subs
-	}
-
-	// key:sub 单个 key
-	return key, []string{subStr}
+	return splitRule(rule)
 }
 
 // keepKeys 从 map 中仅保留指定 key。

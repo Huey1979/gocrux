@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 )
 
@@ -136,16 +137,16 @@ func deriveFieldRules[M any]() EndpointRules {
 		// （SetID() 自动生成主键，用户无需传入）
 		isPK := strings.Contains(sf.Tag.Get("gorm"), "primaryKey")
 		if isPK && strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
-			rule.MaxLength = intPtr(26)
+			rule.MaxLength = IntPtr(26)
 			rule.Format = "ulid"
 		} else if strings.HasSuffix(colName, "_ulid") && rule.Type == "string" {
-			rule.MaxLength = intPtr(26)
+			rule.MaxLength = IntPtr(26)
 		} else {
 			// gorm 标签约束（仅对非 ULID 字段生效）
 			gormTag := sf.Tag.Get("gorm")
 			if gormTag != "" {
 				if size := parseGormSize(gormTag); size > 0 && rule.Type == "string" {
-					rule.MaxLength = intPtr(size)
+					rule.MaxLength = IntPtr(size)
 				}
 				if strings.Contains(gormTag, "not null") {
 					rule.Required = true
@@ -180,28 +181,13 @@ func gormColumn(sf reflect.StructField) string {
 			}
 			return jsonTag
 		}
-		return toSnake(sf.Name)
+		return common.ToSnakeCase(sf.Name)
 	}
 	// 解析 gorm:"column:xxx;..."
-	for _, part := range strings.Split(tag, ";") {
-		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
-		if len(kv) == 2 && kv[0] == "column" {
-			return kv[1]
-		}
+	if col := common.ExtractGormColumn(tag); col != "" {
+		return col
 	}
-	return toSnake(sf.Name)
-}
-
-// toSnake 驼峰 → 下划线。
-func toSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			b.WriteByte('_')
-		}
-		b.WriteRune(r)
-	}
-	return strings.ToLower(b.String())
+	return common.ToSnakeCase(sf.Name)
 }
 
 // parseGormSize 解析 gorm 标签中的 size 值。
@@ -448,69 +434,78 @@ func checkFormat(field, format string, val any) error {
 // 5. 校验执行
 // ============================================================
 
+// validateField 对单个字段按规则执行全部校验：必填 → 类型转换 → 格式 → 数值范围 → 长度 → 枚举 → 正则。
+// data 中的值会在类型转换成功后原地替换。返回 nil 表示通过。
+func validateField(rule *FieldRule, field string, data map[string]any) error {
+	val, exists := data[field]
+
+	// 必填检查（在转换之前，原始值判空）
+	if rule.Required && (!exists || isEmpty(val)) {
+		return errs.ErrFieldValidation(field, "不能为空")
+	}
+	if !exists || val == nil {
+		return nil
+	}
+	// 忽略空字符串（非必填时）
+	if !rule.Required && isEmpty(val) {
+		return nil
+	}
+
+	// 类型转换（能转就转，不能转才报错）
+	if rule.Type != "" {
+		newVal, err := coerceValue(field, rule.Type, val)
+		if err != nil {
+			return err
+		}
+		data[field] = newVal // 原地替换
+		val = newVal
+	}
+
+	// 格式校验（datetime/email/phone/ulid/url/…）
+	if rule.Format != "" {
+		if err := checkFormat(field, rule.Format, val); err != nil {
+			return err
+		}
+	}
+
+	// 数值范围（int/float 字段）
+	if rule.Type == "int" || rule.Type == "float" {
+		if err := checkNumericRange(field, rule, val); err != nil {
+			return err
+		}
+	}
+
+	// 字符串长度（所有类型，基于 fmt.Sprint 后长度）
+	if rule.MinLength != nil || rule.MaxLength != nil {
+		if err := checkStringLength(field, rule, val); err != nil {
+			return err
+		}
+	}
+
+	// 枚举
+	if len(rule.Enum) > 0 {
+		if err := checkEnum(field, rule.Enum, val); err != nil {
+			return err
+		}
+	}
+
+	// 正则
+	if rule.Pattern != "" {
+		if err := checkPattern(field, rule.Pattern, val); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // validateInput 按规则集校验一条记录，同时对值进行类型转换（宽松模式）。
 // data 中的值会在校验成功后被原地替换为转换后的类型。
 // 返回 nil 表示通过；返回 error 包含具体字段和原因。
 func validateInput(rules EndpointRules, data map[string]any, endpoint string) error {
 	for field, rule := range rules {
-		val, exists := data[field]
-
-		// 必填检查（在转换之前，原始值判空）
-		if rule.Required && (!exists || isEmpty(val)) {
-			return errs.ErrFieldValidation(field, "不能为空")
-		}
-		if !exists || val == nil {
-			continue
-		}
-
-		// 忽略空字符串（非必填时）
-		if !rule.Required && isEmpty(val) {
-			continue
-		}
-
-		// 类型转换（能转就转，不能转才报错）
-		if rule.Type != "" {
-			newVal, err := coerceValue(field, rule.Type, val)
-			if err != nil {
-				return err
-			}
-			data[field] = newVal // 原地替换
-			val = newVal
-		}
-
-		// 格式校验（datetime/email/phone/ulid/url/…）
-		if rule.Format != "" {
-			if err := checkFormat(field, rule.Format, val); err != nil {
-				return err
-			}
-		}
-
-		// 数值范围（int/float 字段）
-		if rule.Type == "int" || rule.Type == "float" {
-			if err := checkNumericRange(field, rule, val); err != nil {
-				return err
-			}
-		}
-
-		// 字符串长度（所有类型，基于 fmt.Sprint 后长度）
-		if rule.MinLength != nil || rule.MaxLength != nil {
-			if err := checkStringLength(field, rule, val); err != nil {
-				return err
-			}
-		}
-
-		// 枚举
-		if len(rule.Enum) > 0 {
-			if err := checkEnum(field, rule.Enum, val); err != nil {
-				return err
-			}
-		}
-
-		// 正则
-		if rule.Pattern != "" {
-			if err := checkPattern(field, rule.Pattern, val); err != nil {
-				return err
-			}
+		if err := validateField(rule, field, data); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -521,104 +516,13 @@ func validateInput(rules EndpointRules, data map[string]any, endpoint string) er
 func validateInputCollect(rules EndpointRules, data map[string]any, endpoint string, index int) *BatchErrors {
 	var batchErrs *BatchErrors
 	for field, rule := range rules {
-		val, exists := data[field]
-
-		// 必填检查
-		if rule.Required && (!exists || isEmpty(val)) {
+		if err := validateField(rule, field, data); err != nil {
 			if batchErrs == nil {
 				batchErrs = &BatchErrors{}
 			}
 			batchErrs.Errors = append(batchErrs.Errors, BatchError{
-				Index: index, Field: field, Message: "不能为空",
+				Index: index, Field: field, Message: err.Error(),
 			})
-			continue
-		}
-		if !exists || val == nil {
-			continue
-		}
-		if !rule.Required && isEmpty(val) {
-			continue
-		}
-
-		// 类型转换
-		if rule.Type != "" {
-			newVal, err := coerceValue(field, rule.Type, val)
-			if err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
-			data[field] = newVal
-			val = newVal
-		}
-
-		// 格式校验
-		if rule.Format != "" {
-			if err := checkFormat(field, rule.Format, val); err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
-		}
-
-		// 数值范围
-		if rule.Type == "int" || rule.Type == "float" {
-			if err := checkNumericRange(field, rule, val); err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
-		}
-
-		// 字符串长度
-		if rule.MinLength != nil || rule.MaxLength != nil {
-			if err := checkStringLength(field, rule, val); err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
-		}
-
-		// 枚举
-		if len(rule.Enum) > 0 {
-			if err := checkEnum(field, rule.Enum, val); err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
-		}
-
-		// 正则
-		if rule.Pattern != "" {
-			if err := checkPattern(field, rule.Pattern, val); err != nil {
-				if batchErrs == nil {
-					batchErrs = &BatchErrors{}
-				}
-				batchErrs.Errors = append(batchErrs.Errors, BatchError{
-					Index: index, Field: field, Message: err.Error(),
-				})
-				continue
-			}
 		}
 	}
 	return batchErrs
@@ -786,10 +690,10 @@ func pick(b, a any) any {
 // defaultListRules 返回 List 接口的框架参数默认规则。
 func defaultListRules() EndpointRules {
 	return EndpointRules{
-		"page":      {Type: "int", Min: float64Ptr(1)},
-		"page_size": {Type: "int", Min: float64Ptr(1), Max: float64Ptr(100)},
+		"page":      {Type: "int", Min: Float64Ptr(1)},
+		"page_size": {Type: "int", Min: Float64Ptr(1), Max: Float64Ptr(100)},
 		"order_dir": {Type: "string", Enum: []string{"asc", "desc"}},
-		"depth":     {Type: "int", Min: float64Ptr(1)},
+		"depth":     {Type: "int", Min: Float64Ptr(1)},
 	}
 }
 
@@ -800,8 +704,6 @@ func Float64Ptr(v float64) *float64 { return &v }
 func IntPtr(v int) *int { return &v }
 
 func float64Ptr(v float64) *float64 { return &v }
-func intPtr(v int) *int             { return &v }
-
 // cloneEndpointRules 深拷贝规则集。
 func cloneEndpointRules(src EndpointRules) EndpointRules {
 	dst := make(EndpointRules, len(src))
@@ -823,16 +725,16 @@ func cloneFieldRule(r *FieldRule) *FieldRule {
 		Pattern:  r.Pattern,
 	}
 	if r.Min != nil {
-		nr.Min = float64Ptr(*r.Min)
+		nr.Min = Float64Ptr(*r.Min)
 	}
 	if r.Max != nil {
-		nr.Max = float64Ptr(*r.Max)
+		nr.Max = Float64Ptr(*r.Max)
 	}
 	if r.MinLength != nil {
-		nr.MinLength = intPtr(*r.MinLength)
+		nr.MinLength = IntPtr(*r.MinLength)
 	}
 	if r.MaxLength != nil {
-		nr.MaxLength = intPtr(*r.MaxLength)
+		nr.MaxLength = IntPtr(*r.MaxLength)
 	}
 	if len(r.Enum) > 0 {
 		nr.Enum = make([]string, len(r.Enum))

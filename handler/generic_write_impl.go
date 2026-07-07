@@ -17,6 +17,31 @@ import (
 // _afterXxx： 纯数据管线中的后置处理（结果转换等，不依赖 gin）
 //
 // gin 相关的 I/O 已全部上提至 HTTP 薄壳方法。
+// ============================================================
+
+// shouldShortCircuitCascade 检查 visited + depth 是否阻止继续级联展开。
+// 与 cascade.go 中 canExpandTo 语义一致：已访问或深度耗尽时返回 true。
+func (h *GenericHandler[M]) shouldShortCircuitCascade(ctx context.Context) bool {
+	if isVisited(ctx, h.svcName, "batch") {
+		return true
+	}
+	if d, ok := getDepth(ctx); ok && d <= 0 {
+		return true
+	}
+	return false
+}
+
+// buildCascadeCtx 构造级联子调用的 context：加入 visited set，深度递减。
+// 首层默认为 hardMaxExpandDepth（10）层。
+func (h *GenericHandler[M]) buildCascadeCtx(ctx context.Context) context.Context {
+	cascadeCtx := addVisited(ctx, h.svcName, "batch")
+	if d, ok := getDepth(ctx); ok {
+		cascadeCtx = withDepth(cascadeCtx, d-1)
+	} else {
+		cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
+	}
+	return cascadeCtx
+}
 // 与 Service 层的 generic_impl.go 完全对等。
 // ============================================================
 
@@ -35,10 +60,7 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 	// - 若当前 Handler 已在级联链中出现过（A→B→A）→ 退化为简单创建
 	// - 若级联深度已耗尽 → 退化为简单创建
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnCreate }) && h.txCoord != nil && h.handlerReg != nil {
-		if isVisited(ctx, h.svcName, "batch") {
-			return h.svc.Create(ctx, input)
-		}
-		if d, ok := getDepth(ctx); ok && d <= 0 {
+		if h.shouldShortCircuitCascade(ctx) {
 			return h.svc.Create(ctx, input)
 		}
 
@@ -58,18 +80,7 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 				return nil
 			}
 
-			// 将当前 Handler 加入 visited set，传给所有子 Handler。
-			// 复用 cascade.go 的不可变 visitedSet（addVisited 创建新 map 副本），
-			// 同层多个子 Handler 各自独立，互不干扰。
-			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
-
-			// 深度控制：首层默认 hardMaxExpandDepth（10）层，每级联一层 -1。
-			// 到 0 时子 Handler 的 getDepth 检查会阻止继续展开。
-			if d, ok := getDepth(txCtx); ok {
-				cascadeCtx = withDepth(cascadeCtx, d-1)
-			} else {
-				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
-			}
+			cascadeCtx := h.buildCascadeCtx(txCtx)
 
 			// 跨实体引用映射：级联创建过程中，后续子实体可通过 __ref:handler:temp__ 占位符
 			// 引用前面已创建子实体的 ULID。每次 DoCreate 后更新此映射。
@@ -144,11 +155,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 	// 若配置了级联更新且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内：逐条更新/创建父实体 → 委托子 Handler 的 DoUpdate 处理子记录。
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnUpdate }) && h.txCoord != nil && h.handlerReg != nil {
-		// visited + depth 防环/防无限深度：退化为逐条更新/创建（不展开子表级联）
-		if isVisited(ctx, h.svcName, "batch") {
-			return h.updateOrCreate(ctx, reqs, forceCreate)
-		}
-		if d, ok := getDepth(ctx); ok && d <= 0 {
+		if h.shouldShortCircuitCascade(ctx) {
 			return h.updateOrCreate(ctx, reqs, forceCreate)
 		}
 
@@ -157,13 +164,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 
 		var results []*M
 		err := h.txCoord.Run(ctx, func(txCtx context.Context) error {
-			// 在事务 context 上叠加 visited + depth 标记，传给子 Handler
-			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
-			if d, ok := getDepth(txCtx); ok {
-				cascadeCtx = withDepth(cascadeCtx, d-1)
-			} else {
-				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
-			}
+			cascadeCtx := h.buildCascadeCtx(txCtx)
 
 			for i, req := range reqs {
 				var result *M
@@ -312,11 +313,7 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 	// 若配置了级联删除且已注入 TxCoordinator + HandlerRegistry，
 	// 在事务内先删子记录再删父实体。
 	if h.hasCascadeFlag(func(r CascadeRelation) bool { return r.OnDelete }) && h.txCoord != nil && h.handlerReg != nil {
-		// visited + depth 防环/防无限深度：退化为简单删除（不级联子表）
-		if isVisited(ctx, h.svcName, "batch") {
-			return h.svc.Delete(ctx, ids, codes)
-		}
-		if d, ok := getDepth(ctx); ok && d <= 0 {
+		if h.shouldShortCircuitCascade(ctx) {
 			return h.svc.Delete(ctx, ids, codes)
 		}
 
@@ -326,13 +323,7 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 		}
 
 		return h.txCoord.Run(ctx, func(txCtx context.Context) error {
-			// 加入 visited set，传递给子 Handler（防跨级联回路）
-			cascadeCtx := addVisited(txCtx, h.svcName, "batch")
-			if d, ok := getDepth(txCtx); ok {
-				cascadeCtx = withDepth(cascadeCtx, d-1)
-			} else {
-				cascadeCtx = withDepth(cascadeCtx, hardMaxExpandDepth-1)
-			}
+			cascadeCtx := h.buildCascadeCtx(txCtx)
 
 			// 1. 按 FK 级联删除子记录（先子后父，避免 FK 约束冲突）
 			if err := h.forEachCascade(

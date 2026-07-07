@@ -1,6 +1,6 @@
 package handler
 
-import "sync"
+import "github.com/Huey1979/gocrux/common"
 
 // ============================================================
 // HandlerRegistry — Handler 注册表
@@ -20,29 +20,10 @@ import "sync"
 //	child.DoCreate(ctx, requests)
 // ============================================================
 
-type HandlerRegistry struct {
-	mu       sync.RWMutex
-	handlers map[string]CascadeHandler
-}
+// HandlerRegistry 基于泛型 Registry[CascadeHandler] 的具体类型。
+type HandlerRegistry = common.Registry[CascadeHandler]
 
 // NewHandlerRegistry 创建 Handler 注册表。
 func NewHandlerRegistry() *HandlerRegistry {
-	return &HandlerRegistry{
-		handlers: make(map[string]CascadeHandler),
-	}
-}
-
-// Register 注册一个 Handler 实例。
-// 同一 name 覆盖写（幂等），允许启动时多次注册。
-func (r *HandlerRegistry) Register(name string, h CascadeHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.handlers[name] = h
-}
-
-// Get 按 name 获取 Handler 实例，未注册返回 nil。
-func (r *HandlerRegistry) Get(name string) CascadeHandler {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.handlers[name]
+	return common.NewRegistry[CascadeHandler]()
 }

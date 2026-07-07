@@ -19,6 +19,17 @@ import (
 // 内置 _before / _do / _after 默认实现
 // ============================================================
 
+// checkUnique 若启用唯一性校验则执行，不通过返回哨兵错误。
+// excludeID 为自排除主键（更新时用于跳过自己），nil=不排除。
+func (s *GenericService[M]) checkUnique(ctx context.Context, entities []*M, excludeID any) error {
+	if s.config.EnableUniqueValidation {
+		if !s.validateUnique(ctx, entities, excludeID) {
+			return errs.ErrUniqueValidationFailed
+		}
+	}
+	return nil
+}
+
 func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudRequest[M]) ([]*M, error) {
 	// 1. MergeTo → 将请求数据灌入实体
 	entities := make([]*M, 0, len(input))
@@ -49,10 +60,8 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 	}
 
 	// 2. 配置驱动校验（唯一性等）
-	if s.config.EnableUniqueValidation {
-		if !s.validateUnique(ctx, entities, nil) {
-			return nil, errs.ErrUniqueValidationFailed
-		}
+	if err := s.checkUnique(ctx, entities, nil); err != nil {
+		return nil, err
 	}
 
 	return entities, nil
@@ -278,10 +287,8 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	ent.SetUpdatedBy(GetUserULID(ctx))
 
 	// 5. 唯一性校验（排除自身）
-	if s.config.EnableUniqueValidation {
-		if !s.validateUnique(ctx, []*M{&ent}, id) {
-			return nil, nil, errs.ErrUniqueValidationFailed
-		}
+	if err := s.checkUnique(ctx, []*M{&ent}, id); err != nil {
+		return nil, nil, err
 	}
 
 	// 6. 用 updatePair 同时携带旧值和新值
@@ -353,10 +360,8 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	}
 
 	// 5. 唯一性校验（版本化：同 code 族豁免；新行尚无 DB 记录，无需自排除）
-	if s.config.EnableUniqueValidation {
-		if !s.validateUnique(ctx, []*M{&newEntity}, nil) {
-			return nil, nil, errs.ErrUniqueValidationFailed
-		}
+	if err := s.checkUnique(ctx, []*M{&newEntity}, nil); err != nil {
+		return nil, nil, err
 	}
 
 	return id, &updatePair[M]{Old: old, New: &newEntity}, nil

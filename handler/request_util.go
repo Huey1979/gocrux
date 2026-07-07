@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/Huey1979/gocrux/common"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 )
@@ -29,29 +30,18 @@ func GetPageParams(c *gin.Context) (page, pageSize int) {
 	pageSize = 20
 
 	if p := c.Query("page"); p != "" {
-		if n, _ := parseInt(p); n > 0 {
+		if n, _ := common.ParseInt(p); n > 0 {
 			page = n
 		}
 	}
 
 	if ps := c.Query("page_size"); ps != "" {
-		if n, _ := parseInt(ps); n > 0 {
+		if n, _ := common.ParseInt(ps); n > 0 {
 			pageSize = n
 		}
 	}
 
 	return
-}
-
-func parseInt(s string) (int, error) {
-	var n int
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, nil
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, nil
 }
 
 // GetCurrentUserULID 获取当前用户 ULID（从上下文）

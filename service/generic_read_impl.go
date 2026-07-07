@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/repository"
 
@@ -279,7 +280,7 @@ func parseFilterKey(key string, rawValue any) (field string, op repository.Filte
 
 	// 2. 无后缀：自动推断 Op
 	field = key
-	if isSlice(rawValue) {
+	if common.IsSlice(rawValue) {
 		return field, repository.OpIn, rawValue
 	}
 	return field, repository.OpEQ, rawValue

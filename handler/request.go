@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/service"
 )
 
@@ -158,7 +159,7 @@ func mergeMapToStructFlat(target any, m map[string]any) {
 	for key, val := range m {
 		field := findField(v, t, key)
 		if field.IsValid() && field.CanSet() {
-			setFieldValue(field, val)
+			common.SetReflectField(field, val)
 		}
 	}
 }
@@ -200,54 +201,4 @@ func toPascal(s string) string {
 		}
 	}
 	return strings.Join(parts, "")
-}
-
-// setFieldValue 将任意值设置到 reflect.Value。
-// 处理 string / float64 → int / bool 等常见 JSON 反序列化类型转换。
-func setFieldValue(field reflect.Value, val any) {
-	if val == nil {
-		return
-	}
-
-	rv := reflect.ValueOf(val)
-	ft := field.Type()
-
-	// 类型一致 → 直接赋值
-	if rv.Type().AssignableTo(ft) {
-		field.Set(rv)
-		return
-	}
-
-	// string → string
-	if ft.Kind() == reflect.String && rv.Kind() == reflect.String {
-		field.SetString(rv.String())
-		return
-	}
-
-	// float64 → int / int64 / uint / int8 ...
-	if rv.Kind() == reflect.Float64 {
-		switch ft.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			field.SetInt(int64(rv.Float()))
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			field.SetUint(uint64(rv.Float()))
-		case reflect.Float32, reflect.Float64:
-			field.SetFloat(rv.Float())
-		}
-		return
-	}
-
-	// bool
-	if ft.Kind() == reflect.Bool && rv.Kind() == reflect.Bool {
-		field.SetBool(rv.Bool())
-		return
-	}
-
-	// 最终兜底：尝试通过 JSON 序列化转换
-	if data, err := json.Marshal(val); err == nil {
-		tmp := reflect.New(ft)
-		if json.Unmarshal(data, tmp.Interface()) == nil {
-			field.Set(tmp.Elem())
-		}
-	}
 }

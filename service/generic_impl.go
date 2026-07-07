@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"reflect"
 	"strings"
@@ -257,30 +258,18 @@ func nextVersionCode(currentCode string) string {
 		return "v1.0"
 	}
 	if len(parts) == 1 {
-		n, err := parseInt(parts[0])
+		n, err := common.ParseInt(parts[0])
 		if err != nil {
 			return "v1.0"
 		}
 		return "v" + itoa(n+1)
 	}
 	major := parts[0]
-	minor, err := parseInt(parts[len(parts)-1])
+	minor, err := common.ParseInt(parts[len(parts)-1])
 	if err != nil {
 		minor = 0
 	}
 	return "v" + major + "." + itoa(minor+1)
-}
-
-// parseInt 字符串转 int，失败返回 0
-func parseInt(s string) (int, error) {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return n, nil
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, nil
 }
 
 // itoa int → string
@@ -338,47 +327,17 @@ func resolveColumn[M Record](fieldName string) string {
 	}
 	f, ok := t.FieldByName(fieldName)
 	if !ok {
-		return toCamelSnake(fieldName)
+		return common.ToSnakeCase(fieldName)
 	}
 	gormTag := f.Tag.Get("gorm")
-	if col := extractGormColumn(gormTag); col != "" {
+	if col := common.ExtractGormColumn(gormTag); col != "" {
 		return col
 	}
 	// MongoDB: 回退到 bson tag（如 BizRecord）
 	if bsonTag := f.Tag.Get("bson"); bsonTag != "" {
 		return bsonTag
 	}
-	return toCamelSnake(fieldName)
-}
-
-// extractGormColumn 从 gorm tag 中提取 column 值
-func extractGormColumn(tag string) string {
-	for _, part := range strings.Split(tag, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "column:") {
-			return strings.TrimPrefix(part, "column:")
-		}
-	}
-	return ""
-}
-
-// toCamelSnake 驼峰转下划线 fallback（如 "SiteCode" → "site_code"）
-func toCamelSnake(s string) string {
-	if s == "" {
-		return ""
-	}
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + 32)
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return common.ToSnakeCase(fieldName)
 }
 
 // popIntParam 从 map 中取出并删除指定的键，将值转为 int。
@@ -396,7 +355,7 @@ func popIntParam(m map[string]any, key string) int {
 			return 0
 		}
 	}
-	n, _ := parseInt(s)
+	n, _ := common.ParseInt(s)
 	return n
 }
 
@@ -409,12 +368,6 @@ func popStrParam(m map[string]any, key string) string {
 	}
 	delete(m, key)
 	return fmt.Sprintf("%v", v)
-}
-
-// isSlice 判断值是否为切片/数组，用于自动从 OpEQ 切换为 OpIn。
-func isSlice(v any) bool {
-	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
 }
 
 // knownColumns[M] 返回 entity 所有已知列名集合（gorm column / bson / json tag）。
@@ -430,7 +383,7 @@ func knownColumns[M Record]() map[string]bool {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		// gorm column
-		if col := extractGormColumn(f.Tag.Get("gorm")); col != "" {
+		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
 			cols[col] = true
 		}
 		// bson tag

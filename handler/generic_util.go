@@ -701,7 +701,7 @@ func splitRule(rule string) (string, []string) {
 	if idx < 0 {
 		return rule, nil
 	}
-	key := rule[:idx]
+	key := strings.TrimSpace(rule[:idx])
 	sub := strings.TrimSpace(rule[idx+1:])
 	if strings.HasPrefix(sub, "[") && strings.HasSuffix(sub, "]") {
 		inner := sub[1 : len(sub)-1]
@@ -716,17 +716,6 @@ func splitRule(rule string) (string, []string) {
 		return key, cleaned
 	}
 	return key, []string{sub}
-}
-
-// pickKeys 从 map 中提取指定 key。
-func pickKeys(m map[string]any, keys []string) map[string]any {
-	out := make(map[string]any, len(keys))
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			out[k] = v
-		}
-	}
-	return out
 }
 
 // ============================================================

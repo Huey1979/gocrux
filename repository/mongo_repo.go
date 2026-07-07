@@ -513,7 +513,7 @@ func (r *MongoCRUDRepository[M]) detectPK() {
 	for i := 0; i < t.NumField(); i++ {
 		tag := t.Field(i).Tag.Get("gorm")
 		if strings.Contains(tag, "primaryKey") {
-			col := extractGormColumn(t.Field(i).Tag.Get("gorm"))
+			col := common.ExtractGormColumn(t.Field(i).Tag.Get("gorm"))
 			if col != "" {
 				r.pkField = col
 				return
@@ -521,16 +521,6 @@ func (r *MongoCRUDRepository[M]) detectPK() {
 		}
 	}
 	r.pkField = "_id"
-}
-
-// extractGormColumn 从 gorm tag 提取 column:xxx 的值
-func extractGormColumn(gormTag string) string {
-	for _, part := range strings.Split(gormTag, ";") {
-		if strings.HasPrefix(part, "column:") {
-			return part[7:]
-		}
-	}
-	return ""
 }
 
 // toStructSlice 泛型类型反射 helper（预留）

@@ -633,7 +633,7 @@ func (r *CRUDRepository[M]) detectPK() {
 		// 检查是否包含 primaryKey
 		if matchPKTag(gormTag) {
 			// 提取 column 名称，如果没有 column 子标签则用字段名
-			col := extractColumn(gormTag, toSnakeCase(field.Name))
+			col := extractColumn(gormTag, common.ToSnakeCase(field.Name))
 			if col != "" {
 				r.pkField = col
 			}
@@ -684,37 +684,6 @@ func extractColumn(tag string, defaultVal string) string {
 		}
 	}
 	return defaultVal
-}
-
-// toSnakeCase 驼峰转下划线（仅用于 fallback）
-// "EntityID" → "entity_id", "DeptULID" → "dept_ulid"
-func toSnakeCase(s string) string {
-	if s == "" {
-		return ""
-	}
-	result := make([]byte, 0, len(s)+4)
-	for i, c := range s {
-		if c >= 'A' && c <= 'Z' {
-			lc := byte(c + 32)
-			// 前一个是小写字母 → 加下划线
-			// 后一个是小写字母且前一个是大写 → 加下划线（如 "EntityID" 中 D 的后一个不存在，不加）
-			if i > 0 {
-				prev := s[i-1]
-				if prev >= 'a' && prev <= 'z' {
-					result = append(result, '_')
-				} else if prev >= 'A' && prev <= 'Z' {
-					// 连续大写：检查下一个是否是小写
-					if i+1 < len(s) && s[i+1] >= 'a' && s[i+1] <= 'z' {
-						result = append(result, '_')
-					}
-				}
-			}
-			result = append(result, lc)
-		} else {
-			result = append(result, byte(c))
-		}
-	}
-	return string(result)
 }
 
 // ============================================================
