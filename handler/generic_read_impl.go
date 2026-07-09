@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	errs "github.com/Huey1979/gocrux/errors"
-	"github.com/Huey1979/gocrux/service"
 )
 
 // ============================================================
@@ -100,21 +99,6 @@ func (h *GenericHandler[M]) _beforeList(_ context.Context, query any) (any, erro
 }
 
 func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublished bool) ([]map[string]any, int64, error) {
-	// 内置 keyword 处理：提取 ?keyword=xxx → context 注入 OR 查询条件
-	if q, ok := query.(map[string]any); ok && len(h.config.KeywordFields) > 0 {
-		if kw, hasKW := q["keyword"]; hasKW {
-			kwStr := fmt.Sprintf("%v", kw)
-			delete(q, "keyword")
-			if kwStr != "" {
-				kfs := make([]service.KwField, len(h.config.KeywordFields))
-				for i, kf := range h.config.KeywordFields {
-					kfs[i] = service.KwField{Field: kf.Field, Exact: kf.Match == KeywordExact}
-				}
-				ctx = service.WithKeywordSearch(ctx, service.KeywordSearch{Keyword: kwStr, Fields: kfs})
-			}
-		}
-	}
-
 	list, total, err := h.svc.List(ctx, query)
 	if err != nil {
 		return nil, 0, err

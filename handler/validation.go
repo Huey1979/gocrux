@@ -73,16 +73,35 @@ func (e *BatchErrors) Error() string {
 	return sb.String()
 }
 
+// allControlParams 框架层面所有非字段过滤的 URL Query 参数。
+// Handler List() 用它来一次性剔除；validateInput 用它来判断是否跳过。
+// BUG-019 修复：统一控制参数清单，替代之前三处各自维护的列表。
+var allControlParams = map[string]bool{
+	// 分页 & 排序
+	"page":      true,
+	"page_size": true,
+	"order_by":  true,
+	"order_dir": true,
+	// 展开 & 深度
+	"depth":        true,
+	"fdepth":       true,
+	"fstop":        true,
+	"expand":       true,
+	"expandAll":    true,
+	// 忽略
+	"ignore":        true,
+	"ignoreRef":     true,
+	"ignoreCascade": true,
+	"ignoreAll":     true,
+	// 其他
+	"follow_published": true,
+	"keyword":          true,
+	"fields":           true,
+}
+
 // isFrameworkMetaParam 判断是否为框架控制参数（不计入业务校验）。
 func isFrameworkMetaParam(key string) bool {
-	switch key {
-	case "page", "page_size", "order_by", "order_dir",
-		"depth", "fdepth", "fstop",
-		"ignore", "ignoreRef", "ignoreCascade", "ignoreAll",
-		"follow_published":
-		return true
-	}
-	return false
+	return allControlParams[key]
 }
 
 // ============================================================
@@ -841,6 +860,7 @@ func Float64Ptr(v float64) *float64 { return &v }
 func IntPtr(v int) *int { return &v }
 
 func float64Ptr(v float64) *float64 { return &v }
+
 // cloneEndpointRules 深拷贝规则集。
 func cloneEndpointRules(src EndpointRules) EndpointRules {
 	dst := make(EndpointRules, len(src))

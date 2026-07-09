@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	"github.com/Huey1979/gocrux/service"
 	"github.com/sirupsen/logrus"
 
 	"github.com/gin-gonic/gin"
@@ -374,19 +375,22 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	ctx = h.injectStop(ctx, c)
 	// 字段裁剪：query ?fields=a;b:c;d:[e,f]
 	ctx = withFields(ctx, c.Query("fields"))
-	// 从 filters 中移除控制参数（避免误传到 Service 层）
-	delete(filters, "ignore")
-	delete(filters, "ignoreRef")
-	delete(filters, "ignoreCascade")
-	delete(filters, "ignoreAll")
-	delete(filters, "depth")
-	delete(filters, "fdepth")
-	delete(filters, "fstop")
-	delete(filters, "expand")
-	delete(filters, "expandAll")
-	// keyword 交由 BeforeList hook 处理
-	// 字段裁剪：query ?fields=...
-	ctx = withFields(ctx, c.Query("fields"))
+	// 关键字搜索：提取 ?keyword=xxx 注入 context，供 Service 层做多字段 OR 匹配（BUG-019 修复）
+	if len(h.config.KeywordFields) > 0 {
+		if kw := c.Query("keyword"); kw != "" {
+			kfs := make([]service.KwField, len(h.config.KeywordFields))
+			for i, kf := range h.config.KeywordFields {
+				kfs[i] = service.KwField{Field: kf.Field, Exact: kf.Match == KeywordExact}
+			}
+			ctx = service.WithKeywordSearch(ctx, service.KeywordSearch{Keyword: kw, Fields: kfs})
+		}
+	}
+	// 一次性剔除所有框架控制参数，避免误传到 Service 层（BUG-019 修复）
+	for key := range filters {
+		if allControlParams[key] {
+			delete(filters, key)
+		}
+	}
 
 	// expand 级联展开覆盖：ListSkipCascades 可通过 GET 参数覆写
 	expandAll := c.Query("expandAll") == "true"
