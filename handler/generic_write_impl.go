@@ -42,6 +42,7 @@ func (h *GenericHandler[M]) buildCascadeCtx(ctx context.Context) context.Context
 	}
 	return cascadeCtx
 }
+
 // 与 Service 层的 generic_impl.go 完全对等。
 // ============================================================
 
@@ -234,20 +235,20 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							}
 						}
 
-					// 计算传递给子 Handler 的版本化标志
-					passToChild := passParentVersioned
-					// 非版本化全量替换：旧子记录已删，子数据应走 CREATE 而非 UPDATE（BUG-018 修复）
-					if !passParentVersioned && hasChildren && oldPK != nil {
-						passToChild = true
-					}
-					// 当 passToChild=true 时（版本化 or 非版本化全量替换），
-					// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）
-					if passToChild && hasChildren {
-						for j := range childData {
-							delete(childData[j], childHandler.PKField())
-							delete(childData[j], "id")
+						// 计算传递给子 Handler 的版本化标志
+						passToChild := passParentVersioned
+						// 非版本化全量替换：旧子记录已删，子数据应走 CREATE 而非 UPDATE（BUG-018 修复）
+						if !passParentVersioned && hasChildren && oldPK != nil {
+							passToChild = true
 						}
-					}
+						// 当 passToChild=true 时（版本化 or 非版本化全量替换），
+						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）
+						if passToChild && hasChildren {
+							for j := range childData {
+								delete(childData[j], childHandler.PKField())
+								delete(childData[j], "id")
+							}
+						}
 						// 补充子数据时，现有子记录只需更新 FK，不强制创建
 						if !hasChildren && oldPK != nil {
 							passToChild = false

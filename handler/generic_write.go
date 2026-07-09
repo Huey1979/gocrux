@@ -196,6 +196,41 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 	Success(c, gin.H{"items": results})
 }
 
+// BatchUpdate 批量编辑记录
+// POST /{prefix}/batch-update
+// Body: [{id:1, name:"a"}, {id:2, name:"b"}, ...] 或单对象自动包裹
+// 支持 BatchErrorMode: "collect" 校验模式，错误时返回所有数据校验失败详情。
+func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
+	if !h.checkPerm(c, "update") {
+		return
+	}
+	ctx := c.Request.Context()
+
+	var rawReqs []map[string]any
+	bodyBytes, _ := c.GetRawData()
+	if err := json.Unmarshal(bodyBytes, &rawReqs); err != nil {
+		// 兼容单对象：用户传 {k:v} 而非 [{k:v}] 时自动包裹成数组
+		var single map[string]any
+		if uerr := json.Unmarshal(bodyBytes, &single); uerr == nil {
+			rawReqs = []map[string]any{single}
+		} else {
+			h.handleError(c, err)
+			return
+		}
+	}
+	if len(rawReqs) == 0 {
+		h.handleError(c, errs.ErrInvalidParam)
+		return
+	}
+
+	results, err := h.updatePipeline(ctx, rawReqs, false)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	Success(c, gin.H{"items": results})
+}
+
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。
 // rawReqs 为待处理的原始请求 map 列表；parentVersioned 表示父链是否已出现版本化节点。
 func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[string]any, parentVersioned bool) (_ []*M, err error) {
@@ -203,9 +238,24 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 	defer func() { traceEnd(ctx, h.svcName+".update", start, err) }()
 	// 框架层校验：类型/长度等（自动推导 + 用户配置）
 	extraAllowed := h.cascadeKnownFields()
-	for i, raw := range rawReqs {
-		if err := validateInput(h.validateRules.Update, raw, "update", h.config.RejectUnknownFields, extraAllowed...); err != nil {
-			return nil, errs.ErrUpdateReqValidation(i, err)
+	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
+		var collected *BatchErrors
+		for i, raw := range rawReqs {
+			if berrs := validateInputCollect(h.validateRules.Update, raw, "update", i, h.config.RejectUnknownFields, extraAllowed...); berrs != nil {
+				if collected == nil {
+					collected = &BatchErrors{}
+				}
+				collected.Errors = append(collected.Errors, berrs.Errors...)
+			}
+		}
+		if collected != nil {
+			return nil, collected
+		}
+	} else {
+		for i, raw := range rawReqs {
+			if err := validateInput(h.validateRules.Update, raw, "update", h.config.RejectUnknownFields, extraAllowed...); err != nil {
+				return nil, errs.ErrUpdateReqValidation(i, err)
+			}
 		}
 	}
 
@@ -214,9 +264,27 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 		reqs[i] = h.newCrudRequestForUpdate(raw)
 	}
 
-	for i, r := range reqs {
-		if err := r.Validate(); err != nil {
-			return nil, errs.ErrUpdateReqValidation(i, err)
+	// 业务字段校验（具体 Request 的 Validate()，MapRequest 为 no-op）
+	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
+		var collected *BatchErrors
+		for i, r := range reqs {
+			if err := r.Validate(); err != nil {
+				if collected == nil {
+					collected = &BatchErrors{}
+				}
+				collected.Errors = append(collected.Errors, BatchError{
+					Index: i, Message: err.Error(),
+				})
+			}
+		}
+		if collected != nil {
+			return nil, collected
+		}
+	} else {
+		for i, r := range reqs {
+			if err := r.Validate(); err != nil {
+				return nil, errs.ErrUpdateReqValidation(i, err)
+			}
 		}
 	}
 

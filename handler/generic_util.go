@@ -85,6 +85,7 @@ func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
 	r.GET(p+"/list", h.List)
 	r.GET(p+"/get", h.Get)
 	r.POST(p+"/update", h.Update)
+	r.POST(p+"/batch-update", h.BatchUpdate)
 	r.POST(p+"/delete", h.Delete)
 	if h.svc.SupportsVersion() {
 		r.POST(p+"/activate", h.Activate)
