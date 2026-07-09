@@ -42,11 +42,11 @@ func getDepth(ctx context.Context) (int, bool) {
 // 通过 context 传递忽略配置，支持以下 query param：
 //
 //	?ignore=fieldA,fieldB         → 跳过指定 ResultField/ChildrenField 的展开
-//	?ignoreRef=true               → 跳过所有 References + ChildRefs 展开
-//	?ignoreCascade=true           → 跳过所有 Cascades 展开
-//	?ignoreAll=true               → 跳过所有展开和级联（仅返回裸数据）
+//	?ignore_ref=true              → 跳过所有 References + ChildRefs 展开
+//	?ignore_cascade=true          → 跳过所有 Cascades 展开
+//	?ignore_all=true              → 跳过所有展开和级联（仅返回裸数据）
 //
-// 优先级：ignoreAll > ignoreRef/ignoreCascade > ignore
+// 优先级：ignore_all > ignore_ref/ignore_cascade > ignore
 // ============================================================
 
 type ignoreCtxKey struct{}

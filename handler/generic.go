@@ -129,7 +129,7 @@ type HandlerConfig[M service.Record] struct {
 	// []string{} = 全部跳过（推荐）。
 	// []string{"list_layout"} = 仅跳过 list_layout。
 	// GET 参数 ?expand=name1,name2 可临时开启指定级联。
-	// GET 参数 ?expandAll=true 强制全部展开。
+	// GET 参数 ?expand_all=true 强制全部展开。
 	ListSkipCascades []string
 
 	// KeywordFields 关键字搜索字段列表。

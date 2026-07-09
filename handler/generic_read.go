@@ -74,7 +74,7 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 
 	// 展开深度：query ?depth=N 覆盖配置值
 	ctx = h.injectDepth(ctx, c)
-	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
+	// 忽略控制：query ?ignore / ?ignore_ref / ?ignore_cascade / ?ignore_all
 	ctx = h.injectIgnore(ctx, c)
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
@@ -175,7 +175,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			if resultKey == "" {
 				resultKey = deriveRefResultKey(ref.Field)
 			}
-			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			// 忽略控制：ignore_all / ignore_ref / ignore=resultKey
 			refHandler, ok := h.shouldExpandField(ctx, baseChildCtx, resultKey, ref.HandlerName, true)
 			if !ok {
 				continue
@@ -208,7 +208,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			if resultKey == "" {
 				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
-			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			// 忽略控制：ignore_all / ignore_ref / ignore=resultKey
 			refHandler, ok := h.shouldExpandField(ctx, baseChildCtx, resultKey, cr.HandlerName, true)
 			if !ok {
 				continue
@@ -262,7 +262,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 	// 3. 向下级联：查询子记录
 	if h.handlerReg != nil && true {
 		for _, rel := range h.config.Cascades {
-			// 忽略控制：ignoreAll / ignoreCascade / ignore=ChildrenField
+			// 忽略控制：ignore_all / ignore_cascade / ignore=ChildrenField
 			childHandler, ok := h.shouldExpandField(ctx, baseChildCtx, rel.ChildrenField, rel.HandlerName, false)
 			if !ok {
 				continue
@@ -369,7 +369,7 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 
 	// 展开深度：query ?depth=N 覆盖配置值
 	ctx = h.injectDepth(ctx, c)
-	// 忽略控制：query ?ignore / ?ignoreRef / ?ignoreCascade / ?ignoreAll
+	// 忽略控制：query ?ignore / ?ignore_ref / ?ignore_cascade / ?ignore_all
 	ctx = h.injectIgnore(ctx, c)
 	// 字段级控制：query ?fdepth / ?fstop
 	ctx = h.injectStop(ctx, c)
@@ -393,7 +393,7 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 	}
 
 	// expand 级联展开覆盖：ListSkipCascades 可通过 GET 参数覆写
-	expandAll := c.Query("expandAll") == "true"
+	expandAll := c.Query("expand_all") == "true"
 	expandList := c.Query("expand")
 	if expandAll || expandList != "" {
 		ctx = context.WithValue(ctx, listExpandKey{}, listExpand{

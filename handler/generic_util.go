@@ -167,16 +167,16 @@ func (h *GenericHandler[M]) injectDepth(ctx context.Context, c *gin.Context) con
 // 支持参数：
 //
 //	?ignore=fieldA,fieldB          → 跳过指定字段的展开
-//	?ignoreRef=true                → 跳过所有 References + ChildRefs
-//	?ignoreCascade=true            → 跳过所有 Cascades
-//	?ignoreAll=true                → 跳过全部展开/级联
+//	?ignore_ref=true               → 跳过所有 References + ChildRefs
+//	?ignore_cascade=true           → 跳过所有 Cascades
+//	?ignore_all=true               → 跳过全部展开/级联
 //
 // 未传入任何参数时 ctx 不变（无额外开销）。
 func (h *GenericHandler[M]) injectIgnore(ctx context.Context, c *gin.Context) context.Context {
 	ignoreStr := c.Query("ignore")
-	ignoreRef := c.Query("ignoreRef") == "true"
-	ignoreCascade := c.Query("ignoreCascade") == "true"
-	ignoreAll := c.Query("ignoreAll") == "true"
+	ignoreRef := c.Query("ignore_ref") == "true"
+	ignoreCascade := c.Query("ignore_cascade") == "true"
+	ignoreAll := c.Query("ignore_all") == "true"
 
 	if ignoreStr == "" && !ignoreRef && !ignoreCascade && !ignoreAll {
 		return ctx
@@ -521,14 +521,14 @@ func (h *GenericHandler[M]) applyResponseMapper(entity *M, expanded map[string]a
 type listExpandKey struct{}
 
 type listExpand struct {
-	all    bool   // expandAll=true → 全部展开
+	all    bool   // expand_all=true → 全部展开
 	fields string // expand=name1,name2 → 仅展开指定级联
 }
 
 // shouldExpandCascade 判断 List 时是否应展开指定级联。
-// 优先级：?expandAll=true > ?expand=list > ListSkipCascades 配置 > 默认不展开。
+// 优先级：?expand_all=true > ?expand=list > ListSkipCascades 配置 > 默认不展开。
 func (h *GenericHandler[M]) shouldExpandCascade(ctx context.Context, childrenField string) bool {
-	// 1. GET 参数 expandAll=true → 全部展开
+	// 1. GET 参数 expand_all=true → 全部展开
 	if v, ok := ctx.Value(listExpandKey{}).(listExpand); ok && v.all {
 		return true
 	}

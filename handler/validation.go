@@ -75,7 +75,7 @@ func (e *BatchErrors) Error() string {
 
 // allControlParams 框架层面所有非字段过滤的 URL Query 参数。
 // Handler List() 用它来一次性剔除；validateInput 用它来判断是否跳过。
-// BUG-019 修复：统一控制参数清单，替代之前三处各自维护的列表。
+// 命名统一为 snake_case（BUG-020 修复）。
 var allControlParams = map[string]bool{
 	// 分页 & 排序
 	"page":      true,
@@ -83,24 +83,25 @@ var allControlParams = map[string]bool{
 	"order_by":  true,
 	"order_dir": true,
 	// 展开 & 深度
-	"depth":        true,
-	"fdepth":       true,
-	"fstop":        true,
-	"expand":       true,
-	"expandAll":    true,
+	"depth":     true,
+	"fdepth":    true,
+	"fstop":     true,
+	"expand":    true,
+	"expand_all": true,
 	// 忽略
-	"ignore":        true,
-	"ignoreRef":     true,
-	"ignoreCascade": true,
-	"ignoreAll":     true,
+	"ignore":         true,
+	"ignore_ref":     true,
+	"ignore_cascade": true,
+	"ignore_all":     true,
 	// 其他
 	"follow_published": true,
 	"keyword":          true,
 	"fields":           true,
 }
 
-// isFrameworkMetaParam 判断是否为框架控制参数（不计入业务校验）。
-func isFrameworkMetaParam(key string) bool {
+// IsFrameworkControlParam 判断 key 是否为框架控制参数。
+// 外部（如 heims）可用此函数校验 field_code 不与之冲突（BUG-021 修复）。
+func IsFrameworkControlParam(key string) bool {
 	return allControlParams[key]
 }
 
@@ -625,7 +626,7 @@ func validateInput(rules EndpointRules, data map[string]any, endpoint string, re
 			allowed[f] = true
 		}
 		for key := range data {
-			if isFrameworkMetaParam(key) {
+			if IsFrameworkControlParam(key) {
 				continue
 			}
 			if _, ok := rules[key]; ok {
@@ -655,7 +656,7 @@ func validateInputCollect(rules EndpointRules, data map[string]any, endpoint str
 			allowed[f] = true
 		}
 		for key := range data {
-			if isFrameworkMetaParam(key) {
+			if IsFrameworkControlParam(key) {
 				continue
 			}
 			if _, ok := rules[key]; ok {

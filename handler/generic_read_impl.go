@@ -149,7 +149,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			if resultKey == "" {
 				resultKey = deriveRefResultKey(ref.Field)
 			}
-			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			// 忽略控制：ignore_all / ignore_ref / ignore=resultKey
 			refHandler, ok := h.shouldExpandField(ctx, childCtx, resultKey, ref.HandlerName, true)
 			if !ok {
 				continue
@@ -214,7 +214,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			if resultKey == "" {
 				resultKey = deriveChildRefResultKey(cr.FKListField)
 			}
-			// 忽略控制：ignoreAll / ignoreRef / ignore=resultKey
+			// 忽略控制：ignore_all / ignore_ref / ignore=resultKey
 			refHandler, ok := h.shouldExpandField(ctx, childCtx, resultKey, cr.HandlerName, true)
 			if !ok {
 				continue
