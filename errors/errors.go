@@ -27,8 +27,9 @@ var (
 	ErrVersionNotEnabled              = errors.New("未启用版本管理")
 	ErrUpdatePairTypeMismatch         = errors.New("_doUpdate: 版本模式下 data 必须为 updatePair")
 	ErrDeleteDataInvalid              = errors.New("_doDelete: data 类型错误")
-	ErrRecordNotFound                 = errors.New("记录不存在")
-	ErrInvalidVersionStatusTransition = errors.New("不允许的版本状态迁移")
+	ErrRecordNotFound                       = errors.New("记录不存在")
+	ErrInvalidVersionStatusTransition       = errors.New("不允许的版本状态迁移")
+	ErrBatchUpdateSimpleNotSupportVersion   = errors.New("简单批量更新不支持版本化管理表")
 )
 
 // ============================================================

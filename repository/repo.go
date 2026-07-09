@@ -14,6 +14,7 @@ type Repo[M any] interface {
 	GetByField(ctx context.Context, field string, value any) (*M, error)
 	Save(ctx context.Context, entity *M) error
 	UpdateByID(ctx context.Context, id any, updates map[string]any) error
+	UpdateByIDs(ctx context.Context, ids []any, updates map[string]any) error
 	Delete(ctx context.Context, id any) error
 	DeleteByFK(ctx context.Context, fkField string, fkValues []any) error
 

@@ -179,6 +179,15 @@ func (r *CRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates map[
 	return r.DB(ctx).Model(new(M)).Where(r.pkField+" = ?", id).Updates(updates).Error
 }
 
+// UpdateByIDs 按主键列表批量更新相同字段。
+// SQL: UPDATE table SET ... WHERE pk IN (id1, id2, ...)
+func (r *CRUDRepository[M]) UpdateByIDs(ctx context.Context, ids []any, updates map[string]any) error {
+	if len(ids) == 0 || len(updates) == 0 {
+		return nil
+	}
+	return r.DB(ctx).Model(new(M)).Where(r.pkField+" IN ?", ids).Updates(updates).Error
+}
+
 // Delete 按主键删除记录（硬删除）
 // 注意：业务中通常使用软删除（status='deleted' 等），请使用 UpdateByID 或 service 层封装。
 // 使用 pkField+" = ?" 以避免 GORM 将非整型主键值错误解析为 SQL 片段。

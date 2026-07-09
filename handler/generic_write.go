@@ -231,6 +231,72 @@ func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 	Success(c, gin.H{"items": results})
 }
 
+// BatchUpdateSimple 简单批量更新：将相同字段值应用到多条记录。
+// POST /{prefix}/batch-update-simple
+// Body: {"ids": [1,2,3], "name": "new_name", "status": "active", ...}
+// SQL: UPDATE table SET name='new_name', status='active' WHERE pk IN (1,2,3)
+// 限制：不做级联更新，仅非版本化 handler 支持。
+func (h *GenericHandler[M]) BatchUpdateSimple(c *gin.Context) {
+	if !h.checkPerm(c, "update") {
+		return
+	}
+	ctx := c.Request.Context()
+
+	var raw map[string]any
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	// 提取 ids
+	idsRaw, ok := raw["ids"]
+	if !ok {
+		h.handleError(c, errs.ErrInvalidParam)
+		return
+	}
+	var ids []any
+	switch v := idsRaw.(type) {
+	case []interface{}:
+		ids = v
+	default:
+		// 反射处理非常规切片类型
+		ids = toAnySlice(v)
+	}
+	if len(ids) == 0 {
+		h.handleError(c, errs.ErrInvalidParam)
+		return
+	}
+
+	// 剥离控制字段 + 级联字段，剩余为 DB 列更新
+	updates := make(map[string]any, len(raw))
+	cascadeFields := h.cascadeKnownFields()
+	for key, val := range raw {
+		if key == "ids" || key == "id" {
+			continue
+		}
+		if IsFrameworkControlParam(key) {
+			continue
+		}
+		isCascade := false
+		for _, cf := range cascadeFields {
+			if key == cf {
+				isCascade = true
+				break
+			}
+		}
+		if isCascade {
+			continue
+		}
+		updates[key] = val
+	}
+
+	if err := h.svc.BatchUpdateByIDs(ctx, ids, updates); err != nil {
+		h.handleError(c, err)
+		return
+	}
+	SuccessWithMessage(c, "批量更新成功", gin.H{"affected": len(ids)})
+}
+
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。
 // rawReqs 为待处理的原始请求 map 列表；parentVersioned 表示父链是否已出现版本化节点。
 func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[string]any, parentVersioned bool) (_ []*M, err error) {

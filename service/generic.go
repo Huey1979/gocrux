@@ -351,6 +351,27 @@ func (s *GenericService[M]) Update(ctx context.Context, id, data any) (*M, error
 	return s.afterUpdate(ctx, pid, result, pdata)
 }
 
+// BatchUpdateByIDs 简单批量更新：按 ID 列表统一设置相同字段值。
+// SQL: UPDATE table SET ... WHERE pk IN (id1, id2, ...)
+// 不做级联更新、不做版本管理；版本化模式直接返回错误。
+// updates 为待更新的字段 map（仅 DB 列名，已由 Handler 层剥离控制参数）。
+func (s *GenericService[M]) BatchUpdateByIDs(ctx context.Context, ids []any, updates map[string]any) error {
+	if s.config.VersionMode {
+		return errs.ErrBatchUpdateSimpleNotSupportVersion
+	}
+	if len(ids) == 0 || len(updates) == 0 {
+		return errs.ErrInvalidParam
+	}
+
+	// 补充审计字段
+	updates["updated_at"] = time.Now()
+	if uid := GetUserULID(ctx); uid != "" {
+		updates["updated_by"] = uid
+	}
+
+	return s.repo.UpdateByIDs(ctx, ids, updates)
+}
+
 // Delete 批量逻辑删除记录。
 //   - ids:  []any 类型，记录 ULID 列表（必传；单个时由 Handler 包装为 [id]）
 //   - codes: []any 类型，业务编码列表（可选；版本化时直接用于定位 code 族，跳过解析）

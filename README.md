@@ -161,7 +161,9 @@ func main() {
 | `POST` | `/{prefix}/create` | 批量创建 |
 | `GET` | `/{prefix}/list` | 列表查询（分页+过滤） |
 | `GET` | `/{prefix}/get` | 详情查询（按 ID/Code） |
-| `POST` | `/{prefix}/update` | 更新记录 |
+| `POST` | `/{prefix}/update` | 更新单条记录 |
+| `POST` | `/{prefix}/batch-update` | 批量编辑（逐条更新，支持级联） |
+| `POST` | `/{prefix}/batch-update-simple` | 简单批量更新（SQL IN 统一赋值，无级联） |
 | `POST` | `/{prefix}/delete` | 批量删除 |
 
 当 Service 启用 `VersionMode` 时，额外注册：
@@ -172,8 +174,54 @@ func main() {
 | `GET` | `/{prefix}/versions` | 版本历史列表 |
 | `POST` | `/{prefix}/edit-version` | 修改版本元数据 |
 
+### 批量更新（batch-update / batch-update-simple）
 
-## MongoDB 支持
+框架提供两种批量更新模式：
+
+#### batch-update（逐条更新）
+
+对每条记录独立执行完整更新管线（校验→before→do→after），支持级联更新。Body 为对象数组：
+
+```http
+POST /api/v1/sites/batch-update
+Content-Type: application/json
+
+[
+  {"id": "01Jxxx1", "site_name": "站点A", "domains": [...]},
+  {"id": "01Jxxx2", "site_name": "站点B"}
+]
+```
+
+- 兼容单对象自动包裹为数组
+- 每条记录独立走 `updatePipeline`，支持级联更新、版本管理
+- 支持 `BatchErrorMode: "collect"` 收集全部校验错误
+
+#### batch-update-simple（SQL IN 统一赋值）
+
+将相同字段值统一应用到多条记录，**不做级联更新**，**不支持版本化** handler。Body 为单对象（含 `ids` 数组）：
+
+```http
+POST /api/v1/sites/batch-update-simple
+Content-Type: application/json
+
+{
+  "ids": ["01Jxxx1", "01Jxxx2", "01Jxxx3"],
+  "status": "active",
+  "remark": "批量审核通过"
+}
+```
+
+等价 SQL：`UPDATE sites SET status='active', remark='批量审核通过' WHERE site_ulid IN ('01Jxxx1','01Jxxx2','01Jxxx3')`
+
+**限制**：
+- **仅非版本化** handler 可用（版本化 handler 返回错误）
+- 不做级联更新，仅更新主表
+- Body 中的 `ids`、`id`、框架控制参数、级联字段会被自动剥离，其余全部作为 DB 列更新
+- 自动补充 `updated_at` / `updated_by` 审计字段
+
+**适用场景**：批量审核、批量状态变更、批量打标等无需级联和逐条独立校验的场景。
+
+
 
 gocrux 通过 `MongoCRUDRepository` 和 `Repo[M]` 接口提供完整的 MongoDB 支持，与 MySQL/GORM 对等。
 
@@ -1091,7 +1139,7 @@ HTTP Body
 
 ### BatchErrorMode — 批量错误收集
 
-`HandlerConfig.BatchErrorMode` 控制批量 Create 时的错误处理行为：
+`HandlerConfig.BatchErrorMode` 控制批量操作（Create / batch-update）时的错误处理行为：
 
 ```go
 HandlerConfig[entity.SysSite]{

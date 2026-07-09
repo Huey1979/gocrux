@@ -192,6 +192,19 @@ func (r *MongoCRUDRepository[M]) UpdateByID(ctx context.Context, id any, updates
 	return nil
 }
 
+// UpdateByIDs 按主键列表批量更新相同字段。
+func (r *MongoCRUDRepository[M]) UpdateByIDs(ctx context.Context, ids []any, updates map[string]any) error {
+	if len(ids) == 0 || len(updates) == 0 {
+		return nil
+	}
+	filter := bson.M{r.pkField: bson.M{"$in": ids}}
+	update := bson.M{"$set": updates}
+	if _, err := r.coll.UpdateMany(ctx, filter, update); err != nil {
+		return fmt.Errorf("MongoDB批量更新失败: %w", err)
+	}
+	return nil
+}
+
 // Delete 按主键删除。
 func (r *MongoCRUDRepository[M]) Delete(ctx context.Context, id any) error {
 	filter := bson.M{r.pkField: id}
