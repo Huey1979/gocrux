@@ -682,9 +682,32 @@ HandlerConfig[entity.SysForm]{
 }
 ```
 
+**嵌套子表字段裁剪（`key:sub` 语法）**
+
+`ListSkipFields` 和 `ListKeepFields` 均支持 `key:sub` 语法，可穿透到级联/Reference 展开的嵌套子实体进行字段裁剪：
+
+```go
+// 跳过 content 字段，同时跳过 notify_content 展开实体中的 body 和 raw_data 字段
+ListSkipFields: []string{"content", "notify_content:body", "notify_content:raw_data"}
+
+// 保留 id、title 主字段，同时仅保留 notify_content 展开实体中的 title、sender_name 字段
+ListKeepFields: []string{"id", "title", "notify_content:title", "notify_content:sender_name"}
+```
+
+**`?fields=` HTTP 参数** 也同样支持嵌套裁剪（用于 Get/List 接口）：
+
+```http
+GET /api/v1/notify-delivery/list?fields=id;title;notify_content:title;notify_content:senderName
+GET /api/v1/sites/get?id=xxx&fields=site_name;domains:name;domains:status
+```
+
+- 规则分隔符：`;`
+- 嵌套分隔符：`:`
+- 字段缺失时不报错，静默跳过
+
 **优先级**：`ListSkipFields` > `ListKeepFields`。两者同时配置时 hanya 生效 Skip，Keep 被忽略。均未配置时全字段返回（向后兼容）。
 
-**执行时机**：所有级联展开（References/ChildRefs/Cascades）完成之后执行，级联数据不受裁剪影响。
+**执行时机**：所有级联展开（References/ChildRefs/Cascades）完成之后执行，嵌套裁剪可对展开后的子实体数据进行控量。
 
 ### List 级联展开控制（`ListSkipCascades` + `?expand`）
 

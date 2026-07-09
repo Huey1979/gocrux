@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strings"
+
 	"github.com/Huey1979/gocrux/common"
 )
 
@@ -79,4 +81,46 @@ func keepKeys(m map[string]any, keys []string) map[string]any {
 		}
 	}
 	return out
+}
+
+// pruneSkipFields 从 map 中删除指定字段（含嵌套子表）。
+// fields 支持 key:sub 语法：key → 删除顶层字段；key:sub → 仅删除嵌套子表中的 sub 字段。
+// 例：["content", "notify_content:body", "notify_content:raw_data"]
+//   → 删除主表 content 字段，删除 notify_content 展开子实体中的 body 和 raw_data 字段。
+func pruneSkipFields(data map[string]any, fields []string) {
+	for _, f := range fields {
+		key, subs := parseRule(f)
+		if key == "" {
+			continue
+		}
+		if len(subs) == 0 {
+			// key → 删除顶层字段
+			delete(data, key)
+		} else if val, ok := data[key]; ok {
+			// key:subs → 仅删除嵌套子表中的指定字段
+			switch v := val.(type) {
+			case map[string]any:
+				for _, sub := range subs {
+					delete(v, sub)
+				}
+			case []any:
+				for _, item := range v {
+					if m, ok := item.(map[string]any); ok {
+						for _, sub := range subs {
+							delete(m, sub)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// pruneKeepFields 从 map 中仅保留指定字段（含嵌套子表）。
+// 内部复用 pruneFields 的 ; 分隔规则语法。
+func pruneKeepFields(data map[string]any, fields []string) map[string]any {
+	if len(fields) == 0 {
+		return data
+	}
+	return pruneFields(data, strings.Join(fields, ";"))
 }

@@ -279,27 +279,16 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 	// List 字段裁剪：skip 优先于 keep，均未配置时全字段返回。
 	// 仅作用于 _doList（Get 接口不受影响），在所有展开逻辑之后执行。
+	// 支持 key:sub 语法穿透到级联/Reference 展开的嵌套子表。例如：
+	//   ListSkipFields: ["content", "notify_content:body"]
+	//   ListKeepFields: ["id", "title", "notify_content:title", "notify_content:sender_name"]
 	if len(h.config.ListSkipFields) > 0 {
-		skipSet := make(map[string]bool, len(h.config.ListSkipFields))
-		for _, f := range h.config.ListSkipFields {
-			skipSet[f] = true
-		}
 		for _, row := range result {
-			for f := range skipSet {
-				delete(row, f)
-			}
+			pruneSkipFields(row, h.config.ListSkipFields)
 		}
 	} else if len(h.config.ListKeepFields) > 0 {
-		keepSet := make(map[string]bool, len(h.config.ListKeepFields))
-		for _, f := range h.config.ListKeepFields {
-			keepSet[f] = true
-		}
-		for _, row := range result {
-			for k := range row {
-				if !keepSet[k] {
-					delete(row, k)
-				}
-			}
+		for i, row := range result {
+			result[i] = pruneKeepFields(row, h.config.ListKeepFields)
 		}
 	}
 
