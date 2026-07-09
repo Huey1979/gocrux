@@ -306,6 +306,27 @@ func (h *GenericHandler[M]) _afterUpdate(ctx context.Context, results []*M, _ bo
 	return results, nil
 }
 
+// -------- BatchUpdate（SQL IN 统一赋值） --------
+
+func (h *GenericHandler[M]) _beforeBatchUpdate(_ context.Context, ids []any, updates map[string]any) ([]any, map[string]any, error) {
+	return ids, updates, nil
+}
+
+func (h *GenericHandler[M]) _doBatchUpdate(ctx context.Context, ids []any, updates map[string]any) error {
+	return h.svc.BatchUpdateByIDs(ctx, ids, updates)
+}
+
+func (h *GenericHandler[M]) _afterBatchUpdate(ctx context.Context, _ []any, _ map[string]any) error {
+	// 清理缓存
+	ids, _ := ctx.Value(deleteCacheIDsKey{}).([]any)
+	if ids != nil {
+		for _, id := range ids {
+			h.cacheDelByID(ctx, id)
+		}
+	}
+	return nil
+}
+
 // -------- Delete --------
 
 func (h *GenericHandler[M]) _beforeDelete(_ context.Context, ids, codes any) (any, any, error) {

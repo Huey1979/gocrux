@@ -31,6 +31,11 @@ type HandlerHooks[M service.Record] struct {
 	DoUpdate     func(ctx context.Context, reqs []service.CrudRequest[M], parentVersioned bool) ([]*M, error)
 	AfterUpdate  func(ctx context.Context, results []*M, parentVersioned bool) ([]*M, error)
 
+	// -------- BatchUpdate（SQL IN 统一赋值：{ids:[...], key:val, ...}） --------
+	BeforeBatchUpdate func(ctx context.Context, ids []any, updates map[string]any) ([]any, map[string]any, error)
+	DoBatchUpdate     func(ctx context.Context, ids []any, updates map[string]any) error
+	AfterBatchUpdate  func(ctx context.Context, ids []any, updates map[string]any) error
+
 	// -------- Delete --------
 	BeforeDelete func(ctx context.Context, ids, codes any) (any, any, error)
 	DoDelete     func(ctx context.Context, ids, codes any) error

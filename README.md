@@ -161,9 +161,8 @@ func main() {
 | `POST` | `/{prefix}/create` | 批量创建 |
 | `GET` | `/{prefix}/list` | 列表查询（分页+过滤） |
 | `GET` | `/{prefix}/get` | 详情查询（按 ID/Code） |
-| `POST` | `/{prefix}/update` | 更新单条记录 |
-| `POST` | `/{prefix}/batch-update` | 批量编辑（逐条更新，支持级联） |
-| `POST` | `/{prefix}/batch-update-simple` | 简单批量更新（SQL IN 统一赋值，无级联） |
+| `POST` | `/{prefix}/update` | 编辑记录（自动识别单条/批量，支持级联） |
+| `POST` | `/{prefix}/batch-update` | 简单批量更新（SQL IN 统一赋值） |
 | `POST` | `/{prefix}/delete` | 批量删除 |
 
 当 Service 启用 `VersionMode` 时，额外注册：
@@ -174,16 +173,23 @@ func main() {
 | `GET` | `/{prefix}/versions` | 版本历史列表 |
 | `POST` | `/{prefix}/edit-version` | 修改版本元数据 |
 
-### 批量更新（batch-update / batch-update-simple）
+### 更新（update / batch-update）
 
-框架提供两种批量更新模式：
+框架提供两种更新模式：
 
-#### batch-update（逐条更新）
+#### update（支持单条/批量自动识别）
 
-对每条记录独立执行完整更新管线（校验→before→do→after），支持级联更新。Body 为对象数组：
+`POST /{prefix}/update` 自动识别 Body 是单对象还是数组，统一走 `updatePipeline`（校验→before→do→after），支持级联更新和版本管理：
 
 ```http
-POST /api/v1/sites/batch-update
+# 单条更新
+POST /api/v1/sites/update
+Content-Type: application/json
+
+{"id": "01Jxxx1", "site_name": "站点A", "domains": [...]}
+
+# 批量更新（含级联，逐条执行）
+POST /api/v1/sites/update
 Content-Type: application/json
 
 [
@@ -192,16 +198,15 @@ Content-Type: application/json
 ]
 ```
 
-- 兼容单对象自动包裹为数组
-- 每条记录独立走 `updatePipeline`，支持级联更新、版本管理
+- 自动兼容单对象，批量时每条独立走管线
 - 支持 `BatchErrorMode: "collect"` 收集全部校验错误
 
-#### batch-update-simple（SQL IN 统一赋值）
+#### batch-update（SQL IN 统一赋值）
 
-将相同字段值统一应用到多条记录，**不做级联更新**，**不支持版本化** handler。Body 为单对象（含 `ids` 数组）：
+`POST /{prefix}/batch-update` 将相同字段值统一应用到多条记录，**不做级联更新**，**不支持版本化** handler。Body 为单对象（含 `ids` 数组）：
 
 ```http
-POST /api/v1/sites/batch-update-simple
+POST /api/v1/sites/batch-update
 Content-Type: application/json
 
 {
@@ -218,6 +223,8 @@ Content-Type: application/json
 - 不做级联更新，仅更新主表
 - Body 中的 `ids`、`id`、框架控制参数、级联字段会被自动剥离，其余全部作为 DB 列更新
 - 自动补充 `updated_at` / `updated_by` 审计字段
+
+**支持钩子**：`BeforeBatchUpdate(ids, updates) → DoBatchUpdate → AfterBatchUpdate(ids, updates)`，可在 before 中修改 ids/updates，在 after 中做缓存清理、事件通知等后续处理。
 
 **适用场景**：批量审核、批量状态变更、批量打标等无需级联和逐条独立校验的场景。
 
@@ -1162,7 +1169,7 @@ HTTP Body
 
 ### BatchErrorMode — 批量错误收集
 
-`HandlerConfig.BatchErrorMode` 控制批量操作（Create / batch-update）时的错误处理行为：
+`HandlerConfig.BatchErrorMode` 控制批量操作（Create / update 数组模式）时的错误处理行为：
 
 ```go
 HandlerConfig[entity.SysSite]{

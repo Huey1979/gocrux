@@ -167,47 +167,21 @@ func (h *GenericHandler[M]) DoUpdate(ctx context.Context, fkField string, fkValu
 	return err
 }
 
-// Update 编辑记录
+// Update 编辑记录（自动识别单条/批量）
 // POST /{prefix}/update
+// 单条: {"id": 1, "name": "a"}
+// 批量: [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+// 支持 BatchErrorMode: "collect" 校验模式，批量时收集全部校验错误。
 func (h *GenericHandler[M]) Update(c *gin.Context) {
 	if !h.checkPerm(c, "update") {
 		return
 	}
 	ctx := c.Request.Context()
 
-	var raw map[string]any
-	if err := c.ShouldBindJSON(&raw); err != nil {
-		h.handleError(c, err)
-		return
-	}
-
-	rid, ok := raw["id"]
-	if !ok || rid == nil {
-		h.handleError(c, errs.ErrInvalidParam)
-		return
-	}
-	_ = rid
-
-	results, err := h.updatePipeline(ctx, []map[string]any{raw}, false)
-	if err != nil {
-		h.handleError(c, err)
-		return
-	}
-	Success(c, gin.H{"items": results})
-}
-
-// BatchUpdate 批量编辑记录
-// POST /{prefix}/batch-update
-// Body: [{id:1, name:"a"}, {id:2, name:"b"}, ...] 或单对象自动包裹
-// 支持 BatchErrorMode: "collect" 校验模式，错误时返回所有数据校验失败详情。
-func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
-	if !h.checkPerm(c, "update") {
-		return
-	}
-	ctx := c.Request.Context()
-
-	var rawReqs []map[string]any
 	bodyBytes, _ := c.GetRawData()
+
+	// 自动识别单对象 / 数组
+	var rawReqs []map[string]any
 	if err := json.Unmarshal(bodyBytes, &rawReqs); err != nil {
 		// 兼容单对象：用户传 {k:v} 而非 [{k:v}] 时自动包裹成数组
 		var single map[string]any
@@ -223,6 +197,16 @@ func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 		return
 	}
 
+	// 校验每条数据都有 id
+	for _, raw := range rawReqs {
+		rid, ok := raw["id"]
+		if !ok || rid == nil {
+			h.handleError(c, errs.ErrInvalidParam)
+			return
+		}
+		_ = rid
+	}
+
 	results, err := h.updatePipeline(ctx, rawReqs, false)
 	if err != nil {
 		h.handleError(c, err)
@@ -231,12 +215,17 @@ func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 	Success(c, gin.H{"items": results})
 }
 
-// BatchUpdateSimple 简单批量更新：将相同字段值应用到多条记录。
-// POST /{prefix}/batch-update-simple
+// ============================================================
+// 8b. BatchUpdate — SQL IN 统一赋值（简单批量更新）
+// ============================================================
+
+// BatchUpdate 简单批量更新：将相同字段值应用到多条记录。
+// POST /{prefix}/batch-update
 // Body: {"ids": [1,2,3], "name": "new_name", "status": "active", ...}
 // SQL: UPDATE table SET name='new_name', status='active' WHERE pk IN (1,2,3)
 // 限制：不做级联更新，仅非版本化 handler 支持。
-func (h *GenericHandler[M]) BatchUpdateSimple(c *gin.Context) {
+// 支持 before/do/after 钩子（与逐条更新管线独立）。
+func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 	if !h.checkPerm(c, "update") {
 		return
 	}
@@ -290,11 +279,47 @@ func (h *GenericHandler[M]) BatchUpdateSimple(c *gin.Context) {
 		updates[key] = val
 	}
 
-	if err := h.svc.BatchUpdateByIDs(ctx, ids, updates); err != nil {
+	// 钩子管线
+	processedIDs, processedUpdates, err := h.beforeBatchUpdate(ctx, ids, updates)
+	if err != nil {
 		h.handleError(c, err)
 		return
 	}
+
+	if err := h.doBatchUpdate(ctx, processedIDs, processedUpdates); err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	// 将 ids 注入 ctx，供 _afterBatchUpdate 缓存清理使用
+	ctx = context.WithValue(ctx, deleteCacheIDsKey{}, processedIDs)
+	if err := h.afterBatchUpdate(ctx, processedIDs, processedUpdates); err != nil {
+		h.handleError(c, err)
+		return
+	}
+
 	SuccessWithMessage(c, "批量更新成功", gin.H{"affected": len(ids)})
+}
+
+func (h *GenericHandler[M]) beforeBatchUpdate(ctx context.Context, ids []any, updates map[string]any) ([]any, map[string]any, error) {
+	if h.hooks.BeforeBatchUpdate != nil {
+		return h.hooks.BeforeBatchUpdate(ctx, ids, updates)
+	}
+	return h._beforeBatchUpdate(ctx, ids, updates)
+}
+
+func (h *GenericHandler[M]) doBatchUpdate(ctx context.Context, ids []any, updates map[string]any) error {
+	if h.hooks.DoBatchUpdate != nil {
+		return h.hooks.DoBatchUpdate(ctx, ids, updates)
+	}
+	return h._doBatchUpdate(ctx, ids, updates)
+}
+
+func (h *GenericHandler[M]) afterBatchUpdate(ctx context.Context, ids []any, updates map[string]any) error {
+	if h.hooks.AfterBatchUpdate != nil {
+		return h.hooks.AfterBatchUpdate(ctx, ids, updates)
+	}
+	return h._afterBatchUpdate(ctx, ids, updates)
 }
 
 // updatePipeline 统一管线（HTTP 入口 + 级联入口共享）。
