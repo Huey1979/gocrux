@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	"github.com/Huey1979/gocrux/repository"
 	"github.com/Huey1979/gocrux/service"
 	"github.com/sirupsen/logrus"
 
@@ -328,8 +330,18 @@ func deriveChildRefResultKey(fkListField string) string {
 
 // DoList CascadeHandler 接口实现。
 // 按外键查询子记录，返回 map 列表。
+// 级联子表查询不分页（PageSize=0），确保子数据完整返回。
 func (h *GenericHandler[M]) DoList(ctx context.Context, fkField string, fkValue any, followPublished bool) ([]map[string]any, error) {
-	query := map[string]any{fkField: fkValue}
+	op := repository.OpEQ
+	if reflect.TypeOf(fkValue) != nil && reflect.TypeOf(fkValue).Kind() == reflect.Slice {
+		op = repository.OpIn
+	}
+	query := repository.ListFilters{
+		Filters: []repository.Filter{
+			{Field: fkField, Op: op, Value: fkValue},
+		},
+		PageSize: 0, // 级联子表查询不分页（0 触发 Repository 全量返回）
+	}
 	records, _, err := h.listPipeline(ctx, query, followPublished)
 	return records, err
 }
