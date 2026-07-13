@@ -58,6 +58,10 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			if getStrField(&m, vf.VersionField) == "" {
 				common.SetFieldValue(&m, vf.VersionField, "v1.0")
 			}
+			// Code 保护：若未提交 code，自动生成不重复的 code（ULID）
+			if getStrField(&m, vf.CodeField) == "" {
+				common.SetFieldValue(&m, vf.CodeField, common.NewULID())
+			}
 		}
 
 		entities = append(entities, &m)
@@ -320,6 +324,12 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 				return nil, nil, err
 			}
 		}
+	}
+
+	// 2a. Code 不可篡改：恢复旧记录的 code（MergeTo 之后强制写回）
+	oldCode := getStrField(old, vf.CodeField)
+	if oldCode != "" {
+		common.SetFieldValue(&newEntity, vf.CodeField, oldCode)
 	}
 
 	// 2b. 审计字段（版本化模式下新行是一版全新记录，但仍记录编辑人）
