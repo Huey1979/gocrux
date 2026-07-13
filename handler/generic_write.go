@@ -453,7 +453,7 @@ func (h *GenericHandler[M]) Delete(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	if len(raw.IDs) == 0 {
+	if len(raw.IDs) == 0 && len(raw.Codes) == 0 {
 		h.handleError(c, errs.ErrInvalidParam)
 		return
 	}

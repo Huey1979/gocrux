@@ -460,7 +460,32 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 	}
 
 	if !s.config.VersionMode {
-		// 非版本化：直接透传 ULID 列表
+		// 非版本化：若传了 codes → 按 code 查找对应 ULID（与版本化逻辑一致，不扩展 code 族）
+		if codes != nil {
+			if cs, ok := codes.([]any); ok && len(cs) > 0 {
+				codeField := "code"
+				if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+					codeField = resolveColumn[M](s.config.VersionFields.CodeField)
+				}
+				codeList := make([]string, len(cs))
+				for i, c := range cs {
+					codeList[i] = fmt.Sprintf("%v", c)
+				}
+				// 按 code 批量查 ULID
+				allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+					Filters:  []repository.Filter{{Field: codeField, Op: repository.OpIn, Value: codeList}},
+					Page:     1,
+					PageSize: 0,
+				})
+				if err != nil {
+					return nil, nil, errs.ErrQueryRecordFailed(err)
+				}
+				// 提取主键（ULID）
+				for i := range allRecords {
+					idList = append(idList, extractEntityID(&allRecords[i]))
+				}
+			}
+		}
 		if len(idList) == 0 {
 			return nil, nil, errs.ErrRecordNotFound
 		}
