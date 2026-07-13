@@ -57,11 +57,19 @@ func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, 
 	currentCol := resolveColumn[M](vf.CurrentField)
 
 	// 查当前生效版本（is_current=1），不论是否 published
+	delField := s.config.DeletedField
+	if delField == "" {
+		delField = "is_deleted"
+	}
+	delVal := s.config.DeletedValue
+	if delVal == nil {
+		delVal = int8(0)
+	}
 	results, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
 		Filters: []repository.Filter{
 			{Field: codeCol, Op: repository.OpEQ, Value: code},
 			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
-			{Field: "is_deleted", Op: repository.OpEQ, Value: int8(0)},
+			{Field: delField, Op: repository.OpEQ, Value: delVal},
 		},
 		Page:     1,
 		PageSize: 1,
@@ -143,7 +151,7 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		})
 	}
 
-	// 默认过滤：版本化 → 仅当前版本 + 草稿可见性
+	// 默认过滤：版本化 → 仅当前版本 + 草稿可见性 + 软删除过滤
 	if s.config.VersionMode && s.config.VersionFields != nil {
 		vf := s.config.VersionFields
 		f.Filters = append(f.Filters, repository.Filter{
@@ -171,6 +179,19 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 					},
 				})
 			}
+		}
+		// 软删除过滤（与非版本化分支对齐）
+		m := newRecord[M]()
+		if m.SetDelete() {
+			field := s.config.DeletedField
+			if field == "" {
+				field = "is_deleted"
+			}
+			val := s.config.DeletedValue
+			if val == nil {
+				val = int8(0)
+			}
+			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	} else {
 		m := newRecord[M]()
