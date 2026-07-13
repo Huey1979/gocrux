@@ -51,16 +51,18 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			return nil, err
 		}
 
-		// 版本化实体：Create 时自动设置初始版本号 v1.0
+		// 版本化：Create 时自动设置初始版本号 v1.0
 		// （Update 时由 _beforeUpdateVersioned 调用 nextVersionCode 递增）
 		if s.config.VersionMode && s.config.VersionFields != nil {
 			vf := s.config.VersionFields
 			if getStrField(&m, vf.VersionField) == "" {
 				common.SetFieldValue(&m, vf.VersionField, "v1.0")
 			}
-			// Code 保护：若未提交 code，自动生成不重复的 code（ULID）
-			if getStrField(&m, vf.CodeField) == "" {
-				common.SetFieldValue(&m, vf.CodeField, common.NewULID())
+		}
+		// Code 保护：无论版本化/非版本化，只要配置了 CodeField 且未提交 code → 自动生成 ULID
+		if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+			if getStrField(&m, s.config.VersionFields.CodeField) == "" {
+				common.SetFieldValue(&m, s.config.VersionFields.CodeField, common.NewULID())
 			}
 		}
 
@@ -287,6 +289,10 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	oldCopy := *old
 	if err := req.MergeTo(old); err != nil {
 		return nil, nil, err
+	}
+	// Code 不可篡改：非版本化表若配置了 CodeField，恢复旧值
+	if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+		common.SetFieldValue(old, s.config.VersionFields.CodeField, getStrField(&oldCopy, s.config.VersionFields.CodeField))
 	}
 
 	// 4. 审计字段
