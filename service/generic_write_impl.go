@@ -463,50 +463,18 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 		}
 	}
 
-	// 获取 code 字段名（优先从配置读取，默认 "code"）
-	getCodeField := func() string {
-		if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
-			return resolveColumn[M](s.config.VersionFields.CodeField)
-		}
-		return "code"
-	}
-
-	// 提取 codes 为 []string
-	extractCodes := func() ([]string, bool) {
-		cs, ok := codes.([]any)
-		if !ok || len(cs) == 0 {
-			return nil, false
-		}
-		list := make([]string, len(cs))
-		for i, c := range cs {
-			list[i] = fmt.Sprintf("%v", c)
-		}
-		return list, true
-	}
-
-	// 同时有 ids 和 codes → 需要将 codes 解析为 ULID 合并到 idList 中
-	if len(idList) > 0 && codes != nil {
-		codeCol := getCodeField()
-		if codeList, ok := extractCodes(); ok {
-			allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-				Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpIn, Value: codeList}},
-				Page:     1,
-				PageSize: 0,
-			})
-			if err != nil {
-				return nil, nil, errs.ErrQueryRecordFailed(err)
-			}
-			for i := range allRecords {
-				idList = append(idList, extractEntityID(&allRecords[i]))
-			}
-		}
+	// 有 ids → 忽略 codes，直接按主键删除
+	if len(idList) > 0 {
 		return idList, nil, nil
 	}
 
-	// 仅 codes（无 ids）→ 直接按 code 字段删除，不再查询转 ULID
-	if len(idList) == 0 && codes != nil {
+	// 仅 codes → 直接按 code 字段删除，不查 DB 转 ULID
+	if codes != nil {
 		if cs, ok := codes.([]any); ok && len(cs) > 0 {
-			codeField := getCodeField()
+			codeField := "code"
+			if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+				codeField = resolveColumn[M](s.config.VersionFields.CodeField)
+			}
 			// 版本化需要 VersionFields
 			if s.config.VersionMode && s.config.VersionFields == nil {
 				return nil, nil, errs.ErrVersionFieldsNotSet
@@ -516,11 +484,7 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 		}
 	}
 
-	// 仅 ids
-	if len(idList) == 0 {
-		return nil, nil, errs.ErrRecordNotFound
-	}
-	return idList, nil, nil
+	return nil, nil, errs.ErrRecordNotFound
 }
 
 func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
