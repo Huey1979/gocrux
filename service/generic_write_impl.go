@@ -15,6 +15,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// deleteByFieldKey 是 _beforeDelete 返回 data 中的标记 key，
+// 表示本次删除按该字段值（而非主键）执行。
+const deleteByFieldKey = "_deleteByField"
+
 // ============================================================
 // 内置 _before / _do / _after 默认实现
 // ============================================================
@@ -459,55 +463,31 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 		}
 	}
 
-	if !s.config.VersionMode {
-		// 非版本化：若传了 codes → 按 code 查找对应 ULID（与版本化逻辑一致，不扩展 code 族）
-		if codes != nil {
-			if cs, ok := codes.([]any); ok && len(cs) > 0 {
-				codeField := "code"
-				if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
-					codeField = resolveColumn[M](s.config.VersionFields.CodeField)
-				}
-				codeList := make([]string, len(cs))
-				for i, c := range cs {
-					codeList[i] = fmt.Sprintf("%v", c)
-				}
-				// 按 code 批量查 ULID
-				allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-					Filters:  []repository.Filter{{Field: codeField, Op: repository.OpIn, Value: codeList}},
-					Page:     1,
-					PageSize: 0,
-				})
-				if err != nil {
-					return nil, nil, errs.ErrQueryRecordFailed(err)
-				}
-				// 提取主键（ULID）
-				for i := range allRecords {
-					idList = append(idList, extractEntityID(&allRecords[i]))
-				}
-			}
+	// 获取 code 字段名（优先从配置读取，默认 "code"）
+	getCodeField := func() string {
+		if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+			return resolveColumn[M](s.config.VersionFields.CodeField)
 		}
-		if len(idList) == 0 {
-			return nil, nil, errs.ErrRecordNotFound
-		}
-		return idList, nil, nil
+		return "code"
 	}
 
-	// 版本化：若调用方显式传了 codes → 按 code 族全量删除。
-	// 若仅有 ids → 仅标记指定 ULID，不扩展 code 族（BUG-001 修复）。
-	if codes != nil {
-		if cs, ok := codes.([]any); ok && len(cs) > 0 {
-			vf := s.config.VersionFields
-			if vf == nil {
-				return nil, nil, errs.ErrVersionFieldsNotSet
-			}
-			codeCol := resolveColumn[M](vf.CodeField)
-			codeList := make([]string, len(cs))
-			for i, c := range cs {
-				codeList[i] = fmt.Sprintf("%v", c)
-			}
+	// 提取 codes 为 []string
+	extractCodes := func() ([]string, bool) {
+		cs, ok := codes.([]any)
+		if !ok || len(cs) == 0 {
+			return nil, false
+		}
+		list := make([]string, len(cs))
+		for i, c := range cs {
+			list[i] = fmt.Sprintf("%v", c)
+		}
+		return list, true
+	}
 
-			// 按 code 批量查全族 ULID（去重）
-			ulidSet := make(map[string]struct{})
+	// 同时有 ids 和 codes → 需要将 codes 解析为 ULID 合并到 idList 中
+	if len(idList) > 0 && codes != nil {
+		codeCol := getCodeField()
+		if codeList, ok := extractCodes(); ok {
 			allRecords, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
 				Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpIn, Value: codeList}},
 				Page:     1,
@@ -517,20 +497,26 @@ func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (
 				return nil, nil, errs.ErrQueryRecordFailed(err)
 			}
 			for i := range allRecords {
-				ulidSet[getStrField(&allRecords[i], vf.ULIDField)] = struct{}{}
+				idList = append(idList, extractEntityID(&allRecords[i]))
 			}
-			ulidList := make([]any, 0, len(ulidSet))
-			for u := range ulidSet {
-				ulidList = append(ulidList, u)
+		}
+		return idList, nil, nil
+	}
+
+	// 仅 codes（无 ids）→ 直接按 code 字段删除，不再查询转 ULID
+	if len(idList) == 0 && codes != nil {
+		if cs, ok := codes.([]any); ok && len(cs) > 0 {
+			codeField := getCodeField()
+			// 版本化需要 VersionFields
+			if s.config.VersionMode && s.config.VersionFields == nil {
+				return nil, nil, errs.ErrVersionFieldsNotSet
 			}
-			if len(ulidList) == 0 {
-				return nil, nil, errs.ErrRecordNotFound
-			}
-			return ulidList, nil, nil
+			// 返回 codes + 标记位，告知 _doDelete 按字段删除
+			return cs, map[string]string{deleteByFieldKey: codeField}, nil
 		}
 	}
 
-	// 仅指定 ULID：直接透传，不扩展 code 族
+	// 仅 ids
 	if len(idList) == 0 {
 		return nil, nil, errs.ErrRecordNotFound
 	}
@@ -545,6 +531,13 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	}
 	if len(ids) == 0 {
 		return errs.ErrDeleteDataInvalid
+	}
+
+	// 检测是否按字段删除（codes-only 场景，data 中携带 deleteByFieldKey）
+	if dataMap, isMap := data.(map[string]string); isMap {
+		if field, ok := dataMap[deleteByFieldKey]; ok && field != "" {
+			return s._doDeleteByField(ctx, field, ids)
+		}
 	}
 
 	// 版本化：废弃当前版本
@@ -565,6 +558,30 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 		}
 	}
 	return s.repo.BatchHardDelete(ctx, ids)
+}
+
+// _doDeleteByField 按指定字段值批量删除（而非主键），
+// 用于 codes-only 场景避免先查 ULID 再删。
+func (s *GenericService[M]) _doDeleteByField(ctx context.Context, field string, values []any) error {
+	// 版本化：按字段批量废弃
+	if s.config.VersionMode && s.config.VersionFields != nil {
+		return s.repo.BatchDeprecateVersionsByFK(ctx, field, values)
+	}
+
+	m := newRecord[M]()
+	// 软删除
+	if m.SetDelete() {
+		return s.repo.BatchSoftDeleteByFK(ctx, field, values)
+	}
+
+	// 物理删除：先备份数据
+	if s.config.EnableOpLog && s.bakWriter != nil {
+		records, _ := s.repo.BatchFindByFK(ctx, field, values)
+		for i := range records {
+			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete", &records[i], GetRequestID(ctx))
+		}
+	}
+	return s.repo.BatchHardDeleteByFK(ctx, field, values)
 }
 
 // DeleteByFK 按外键字段批量软删除记录（供级联删除使用）。
