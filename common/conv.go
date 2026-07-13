@@ -92,6 +92,19 @@ func IsSlice(v any) bool {
 	return rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
 }
 
+// ToAnySlice 将任意切片类型（[]any、[]string、[]float64 等）统一转换为 []any。
+func ToAnySlice(v any) []any {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice {
+		return nil
+	}
+	result := make([]any, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		result[i] = rv.Index(i).Interface()
+	}
+	return result
+}
+
 // ExtractGormColumn 从 gorm struct tag 中提取 column 值。
 // 如 `gorm:"column:site_code;type:varchar"` → "site_code"。
 // 若未找到 column 标签返回空字符串。

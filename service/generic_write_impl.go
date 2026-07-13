@@ -500,7 +500,7 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	// 检测是否按字段删除（codes-only 场景，data 中携带 deleteByFieldKey）
 	if dataMap, isMap := data.(map[string]string); isMap {
 		if field, ok := dataMap[deleteByFieldKey]; ok && field != "" {
-			return s._doDeleteByField(ctx, field, ids)
+			return s._deleteByField(ctx, field, ids, true, "delete")
 		}
 	}
 
@@ -508,13 +508,15 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	if s.config.VersionMode && s.config.VersionFields != nil {
 		return s.repo.BatchDeprecateVersions(ctx, ids)
 	}
-	// 非版本化：软删除或物理删
+	return s._deleteByPK(ctx, ids)
+}
+
+// _deleteByPK 按主键批量删除（非版本化）：软删除或物理删+备份。
+func (s *GenericService[M]) _deleteByPK(ctx context.Context, ids []any) error {
 	m := newRecord[M]()
 	if m.SetDelete() {
-		return s.repo.BatchSoftDelete(ctx, ids) // 设置 isDeleted=1
+		return s.repo.BatchSoftDelete(ctx, ids)
 	}
-
-	// 物理删除：先备份数据，再硬删除
 	if s.config.EnableOpLog && s.bakWriter != nil {
 		records, _ := s.repo.BatchFindByPK(ctx, ids)
 		for i := range records {
@@ -524,51 +526,35 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 	return s.repo.BatchHardDelete(ctx, ids)
 }
 
-// _doDeleteByField 按指定字段值批量删除（而非主键），
-// 用于 codes-only 场景避免先查 ULID 再删。
-func (s *GenericService[M]) _doDeleteByField(ctx context.Context, field string, values []any) error {
-	// 版本化：按字段批量废弃
-	if s.config.VersionMode && s.config.VersionFields != nil {
+// _deleteByField 按字段值批量删除（非主键），复用于 codes-only 删除和级联删除。
+// supportsVersion: 是否先做版本废弃（codes-only=true；级联 DeleteByFK=false）。
+// opTag: 备份日志中的操作标记。
+func (s *GenericService[M]) _deleteByField(ctx context.Context, field string, values []any, supportsVersion bool, opTag string) error {
+	if supportsVersion && s.config.VersionMode && s.config.VersionFields != nil {
 		return s.repo.BatchDeprecateVersionsByFK(ctx, field, values)
 	}
 
 	m := newRecord[M]()
-	// 软删除
 	if m.SetDelete() {
 		return s.repo.BatchSoftDeleteByFK(ctx, field, values)
 	}
 
-	// 物理删除：先备份数据
 	if s.config.EnableOpLog && s.bakWriter != nil {
 		records, _ := s.repo.BatchFindByFK(ctx, field, values)
 		for i := range records {
-			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete", &records[i], GetRequestID(ctx))
+			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), opTag, &records[i], GetRequestID(ctx))
 		}
 	}
 	return s.repo.BatchHardDeleteByFK(ctx, field, values)
 }
 
-// DeleteByFK 按外键字段批量软删除记录（供级联删除使用）。
-// fkField 为数据库列名（与 JSON 字段名一致），如 "parent_id"。
-// 同样遵循 SetDelete() 的分支：软删 → Update is_deleted；物理删 → Unscoped Delete + 备份。
+// DeleteByFK 按外键字段批量删除记录（供级联删除使用）。
+// 不经过版本废弃流程（级联删除子记录不需要版本管理）。
 func (s *GenericService[M]) DeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
 	if len(fkValues) == 0 {
 		return nil
 	}
-
-	m := newRecord[M]()
-	if m.SetDelete() {
-		return s.repo.BatchSoftDeleteByFK(ctx, fkField, fkValues)
-	}
-
-	// 物理删除：先备份数据
-	if s.config.EnableOpLog && s.bakWriter != nil {
-		records, _ := s.repo.BatchFindByFK(ctx, fkField, fkValues)
-		for i := range records {
-			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete_by_fk", &records[i], GetRequestID(ctx))
-		}
-	}
-	return s.repo.BatchHardDeleteByFK(ctx, fkField, fkValues)
+	return s._deleteByField(ctx, fkField, fkValues, false, "delete_by_fk")
 }
 
 func (s *GenericService[M]) _afterDelete(ctx context.Context, id, data any) error {

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	errs "github.com/Huey1979/gocrux/errors"
@@ -126,13 +125,11 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 	// *M → []map[string]any
 	result := make([]map[string]any, len(list))
 	for i, r := range list {
-		data, err := json.Marshal(r)
+		m, err := marshalToMap(r)
 		if err != nil {
-			return nil, 0, errs.ErrMarshalEntity(err)
+			return nil, 0, err
 		}
-		if err := json.Unmarshal(data, &result[i]); err != nil {
-			return nil, 0, errs.ErrUnmarshalEntity(err)
-		}
+		result[i] = m
 	}
 
 	// 深度检查 + visited 防护：防止循环展开

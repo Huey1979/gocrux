@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -37,15 +36,7 @@ func (h *GenericHandler[M]) DoGetByID(ctx context.Context, id any) (map[string]a
 	}
 
 	// 无深度控制或 handlerReg 未注入 → 返回原始 map（旧行为）
-	data, err := json.Marshal(result)
-	if err != nil {
-		return nil, errs.ErrMarshalRecord(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, errs.ErrUnmarshalRecord(err)
-	}
-	return m, nil
+	return marshalToMap(result)
 }
 
 // Get 获取记录详情（三个子查询的统一入口）。
@@ -153,13 +144,9 @@ func (h *GenericHandler[M]) afterGet(ctx context.Context, result map[string]any)
 // 版本操作（activate / list-versions / edit-version）不应调用此方法。
 func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[string]any, error) {
 	// 1. *M → map[string]any
-	data, err := json.Marshal(result)
+	out, err := marshalToMap(result)
 	if err != nil {
-		return nil, errs.ErrMarshalEntity(err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, errs.ErrUnmarshalEntity(err)
+		return nil, err
 	}
 
 	// -------- visited + depth 统一防护 --------

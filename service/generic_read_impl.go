@@ -193,9 +193,10 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 // ============================================================
 // parseFilterKey — 解析 URL 查询参数键中的操作符后缀
 //
-// 使用 `:` 分隔（MySQL 列名不含冒号，绝对安全）：
+// 使用 `:` 分隔（MySQL 列名不含冒号，绝对安全），兼容旧的 `__` 后缀：
 //
 //	field           → (field, OpEQ / OpIn, value)     自动：切片=OpIn，否则=OpEQ
+//	field:eq        → (field, OpEQ, value)
 //	field:like      → (field, OpLike, value)           LIKE，自动包裹 %value%
 //	field:gt        → (field, OpGT, value)
 //	field:gte       → (field, OpGTE, value)
@@ -208,77 +209,50 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 // 注意：field:like 的值会自动在前后追加 %，除非已包含 %。
 // ============================================================
 func parseFilterKey(key string, rawValue any) (field string, op repository.FilterOp, value any) {
-	// 查找 : 分隔的运算符后缀（如 form_code:like=xxx）。
-	// 使用 : 而非 _ 作为分隔符，避免与字段名中的下划线冲突。
-	// 兼容旧的 __ 后缀（后续移除）
-	parseLegacy := func() bool {
-		if idx := strings.LastIndex(key, "__"); idx > 0 {
-			field = key[:idx]
-			switch key[idx+2:] {
-			case "like", "gt", "gte", "lt", "lte", "ne", "in", "between":
-				return true // fall through to switch below
-			}
-		}
-		return false
-	}
-	if parseLegacy() {
-		// 旧后缀已设置 field，下面 switch 会 set op + value
-		suffix := key[strings.LastIndex(key, "__")+2:]
-		switch suffix {
-		case "like":
-			s := fmt.Sprintf("%v", rawValue)
-			if !strings.Contains(s, "%") {
-				s = "%" + s + "%"
-			}
-			return field, repository.OpLike, s
-		case "gt":
-			return field, repository.OpGT, rawValue
-		case "gte":
-			return field, repository.OpGTE, rawValue
-		case "lt":
-			return field, repository.OpLT, rawValue
-		case "lte":
-			return field, repository.OpLTE, rawValue
-		case "ne":
-			return field, repository.OpNEQ, rawValue
-		case "in":
-			return field, repository.OpIn, parseCSVValue(rawValue)
-		case "between":
-			return field, repository.OpRange, parseCSVValue(rawValue)
-		}
-	}
-
-	if idx := strings.LastIndex(key, ":"); idx > 0 {
-		suffix := key[idx+1:]
+	// 统一分隔符：兼容旧的 __ 后缀 → 转为 :
+	suffix := ""
+	if idx := strings.LastIndex(key, "__"); idx > 0 {
 		field = key[:idx]
-		switch suffix {
-		case "eq":
-			return field, repository.OpEQ, rawValue
-		case "like":
-			s := fmt.Sprintf("%v", rawValue)
-			if !strings.Contains(s, "%") {
-				s = "%" + s + "%"
-			}
-			return field, repository.OpLike, s
-		case "gt":
-			return field, repository.OpGT, rawValue
-		case "gte":
-			return field, repository.OpGTE, rawValue
-		case "lt":
-			return field, repository.OpLT, rawValue
-		case "lte":
-			return field, repository.OpLTE, rawValue
-		case "ne":
-			return field, repository.OpNEQ, rawValue
-		case "in":
-			return field, repository.OpIn, parseCSVValue(rawValue)
-		case "between":
-			return field, repository.OpRange, parseCSVValue(rawValue)
+		suffix = key[idx+2:]
+	} else if idx := strings.LastIndex(key, ":"); idx > 0 {
+		field = key[:idx]
+		suffix = key[idx+1:]
+	} else {
+		// 无后缀：自动推断 Op
+		field = key
+		if common.IsSlice(rawValue) {
+			return field, repository.OpIn, rawValue
 		}
-		// 非已知运算符 → 整个 key 当作字段名
+		return field, repository.OpEQ, rawValue
 	}
 
-	// 2. 无后缀：自动推断 Op
+	// 统一 switch：旧后缀名与新后缀名完全一致
+	switch suffix {
+	case "eq":
+		return field, repository.OpEQ, rawValue
+	case "like":
+		s := fmt.Sprintf("%v", rawValue)
+		if !strings.Contains(s, "%") {
+			s = "%" + s + "%"
+		}
+		return field, repository.OpLike, s
+	case "gt":
+		return field, repository.OpGT, rawValue
+	case "gte":
+		return field, repository.OpGTE, rawValue
+	case "lt":
+		return field, repository.OpLT, rawValue
+	case "lte":
+		return field, repository.OpLTE, rawValue
+	case "ne":
+		return field, repository.OpNEQ, rawValue
+	case "in":
+		return field, repository.OpIn, parseCSVValue(rawValue)
+	case "between":
+		return field, repository.OpRange, parseCSVValue(rawValue)
+	}
+
+	// 非已知运算符 → 整个 key 当作字段名
 	field = key
 	if common.IsSlice(rawValue) {
 		return field, repository.OpIn, rawValue
@@ -291,11 +265,7 @@ func parseFilterKey(key string, rawValue any) (field string, op repository.Filte
 func parseCSVValue(rawValue any) []any {
 	// 已是切片 → 直接转 []any
 	if rv := reflect.ValueOf(rawValue); rv.Kind() == reflect.Slice {
-		result := make([]any, rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			result[i] = rv.Index(i).Interface()
-		}
-		return result
+		return common.ToAnySlice(rawValue)
 	}
 
 	s := strings.TrimSpace(fmt.Sprintf("%v", rawValue))

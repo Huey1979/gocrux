@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/expression"
 
+	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/constants"
 	"github.com/Huey1979/gocrux/service"
 
@@ -421,19 +423,22 @@ func extractChildData(raw map[string]any, field string, wrapKey string) []map[st
 	return result
 }
 
+// marshalToMap 将任意结构体通过 JSON 往返转换为 map[string]any。
+func marshalToMap(v any) (map[string]any, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, errs.ErrMarshalEntity(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, errs.ErrUnmarshalEntity(err)
+	}
+	return m, nil
+}
+
 // toAnySlice 将任意切片类型（[]any、[]string、[]float64 等）统一转换为 []any。
 // 用于 ChildRefs 中 FK 列表的类型兼容：JSON 反序列化后数字列表可能为 []float64 或 []any。
-func toAnySlice(v any) []any {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Slice {
-		return nil
-	}
-	result := make([]any, rv.Len())
-	for i := 0; i < rv.Len(); i++ {
-		result[i] = rv.Index(i).Interface()
-	}
-	return result
-}
+func toAnySlice(v any) []any { return common.ToAnySlice(v) }
 
 // ============================================================
 // 6. 级联检查 helper

@@ -50,17 +50,18 @@ func (h *GenericHandler[M]) Create(c *gin.Context) {
 	Success(c, gin.H{"items": result})
 }
 
-// createPipeline 统一管线：HTTP 和级联共享。
-func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[string]any) (_ []*M, err error) {
-	start := traceStart(ctx, h.svcName+".create", logrus.Fields{"count": len(rawReqs)})
-	defer func() { traceEnd(ctx, h.svcName+".create", start, err) }()
-
-	// 框架层校验：类型/长度/必填等（自动推导 + 用户配置）
-	extraAllowed := h.cascadeKnownFields()
-	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
+// validateInBatch 批量校验辅助函数。
+// batchMode="collect" 且 len(items)>1 → 收集所有错误；否则快速失败。
+// collectFn 接收 index+item 返回 *BatchErrors（收集模式）；
+// failFn 接收 index+item 返回 error（快速失败模式，已在内部封装 index）。
+func validateInBatch[T any](items []T, batchMode string,
+	collectFn func(i int, item T) *BatchErrors,
+	failFn func(i int, item T) error,
+) error {
+	if batchMode == "collect" && len(items) > 1 {
 		var collected *BatchErrors
-		for i, raw := range rawReqs {
-			if berrs := validateInputCollect(h.validateRules.Create, raw, "create", i, h.config.RejectUnknownFields, extraAllowed...); berrs != nil {
+		for i, item := range items {
+			if berrs := collectFn(i, item); berrs != nil {
 				if collected == nil {
 					collected = &BatchErrors{}
 				}
@@ -68,14 +69,37 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 			}
 		}
 		if collected != nil {
-			return nil, collected
+			return collected
 		}
-	} else {
-		for i, raw := range rawReqs {
-			if err := validateInput(h.validateRules.Create, raw, "create", h.config.RejectUnknownFields, extraAllowed...); err != nil {
-				return nil, errs.ErrReqValidation(i, err)
+		return nil
+	}
+	for i, item := range items {
+		if err := failFn(i, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createPipeline 统一管线：HTTP 和级联共享。
+func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[string]any) (_ []*M, err error) {
+	start := traceStart(ctx, h.svcName+".create", logrus.Fields{"count": len(rawReqs)})
+	defer func() { traceEnd(ctx, h.svcName+".create", start, err) }()
+
+	// 框架层校验：类型/长度/必填等（自动推导 + 用户配置）
+	extraAllowed := h.cascadeKnownFields()
+	if err := validateInBatch(rawReqs, h.config.BatchErrorMode,
+		func(i int, raw map[string]any) *BatchErrors {
+			return validateInputCollect(h.validateRules.Create, raw, "create", i, h.config.RejectUnknownFields, extraAllowed...)
+		},
+		func(i int, raw map[string]any) error {
+			if e := validateInput(h.validateRules.Create, raw, "create", h.config.RejectUnknownFields, extraAllowed...); e != nil {
+				return errs.ErrReqValidation(i, e)
 			}
-		}
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	reqs := make([]service.CrudRequest[M], len(rawReqs))
@@ -84,27 +108,21 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 	}
 
 	// 业务字段校验（具体 Request 的 Validate()，MapRequest 为 no-op）
-	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
-		var collected *BatchErrors
-		for i, r := range reqs {
-			if err := r.Validate(); err != nil {
-				if collected == nil {
-					collected = &BatchErrors{}
-				}
-				collected.Errors = append(collected.Errors, BatchError{
-					Index: i, Message: err.Error(),
-				})
+	if err := validateInBatch(reqs, h.config.BatchErrorMode,
+		func(i int, r service.CrudRequest[M]) *BatchErrors {
+			if e := r.Validate(); e != nil {
+				return &BatchErrors{Errors: []BatchError{{Index: i, Message: e.Error()}}}
 			}
-		}
-		if collected != nil {
-			return nil, collected
-		}
-	} else {
-		for i, r := range reqs {
-			if err := r.Validate(); err != nil {
-				return nil, errs.ErrReqValidation(i, err)
+			return nil
+		},
+		func(i int, r service.CrudRequest[M]) error {
+			if e := r.Validate(); e != nil {
+				return errs.ErrReqValidation(i, e)
 			}
-		}
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	// 将原始 map 注入 ctx，供 _doCreate 级联创建时提取子数据
@@ -329,25 +347,18 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 	defer func() { traceEnd(ctx, h.svcName+".update", start, err) }()
 	// 框架层校验：类型/长度等（自动推导 + 用户配置）
 	extraAllowed := h.cascadeKnownFields()
-	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
-		var collected *BatchErrors
-		for i, raw := range rawReqs {
-			if berrs := validateInputCollect(h.validateRules.Update, raw, "update", i, h.config.RejectUnknownFields, extraAllowed...); berrs != nil {
-				if collected == nil {
-					collected = &BatchErrors{}
-				}
-				collected.Errors = append(collected.Errors, berrs.Errors...)
+	if err := validateInBatch(rawReqs, h.config.BatchErrorMode,
+		func(i int, raw map[string]any) *BatchErrors {
+			return validateInputCollect(h.validateRules.Update, raw, "update", i, h.config.RejectUnknownFields, extraAllowed...)
+		},
+		func(i int, raw map[string]any) error {
+			if e := validateInput(h.validateRules.Update, raw, "update", h.config.RejectUnknownFields, extraAllowed...); e != nil {
+				return errs.ErrUpdateReqValidation(i, e)
 			}
-		}
-		if collected != nil {
-			return nil, collected
-		}
-	} else {
-		for i, raw := range rawReqs {
-			if err := validateInput(h.validateRules.Update, raw, "update", h.config.RejectUnknownFields, extraAllowed...); err != nil {
-				return nil, errs.ErrUpdateReqValidation(i, err)
-			}
-		}
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	reqs := make([]service.CrudRequest[M], len(rawReqs))
@@ -356,27 +367,21 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 	}
 
 	// 业务字段校验（具体 Request 的 Validate()，MapRequest 为 no-op）
-	if h.config.BatchErrorMode == "collect" && len(rawReqs) > 1 {
-		var collected *BatchErrors
-		for i, r := range reqs {
-			if err := r.Validate(); err != nil {
-				if collected == nil {
-					collected = &BatchErrors{}
-				}
-				collected.Errors = append(collected.Errors, BatchError{
-					Index: i, Message: err.Error(),
-				})
+	if err := validateInBatch(reqs, h.config.BatchErrorMode,
+		func(i int, r service.CrudRequest[M]) *BatchErrors {
+			if e := r.Validate(); e != nil {
+				return &BatchErrors{Errors: []BatchError{{Index: i, Message: e.Error()}}}
 			}
-		}
-		if collected != nil {
-			return nil, collected
-		}
-	} else {
-		for i, r := range reqs {
-			if err := r.Validate(); err != nil {
-				return nil, errs.ErrUpdateReqValidation(i, err)
+			return nil
+		},
+		func(i int, r service.CrudRequest[M]) error {
+			if e := r.Validate(); e != nil {
+				return errs.ErrUpdateReqValidation(i, e)
 			}
-		}
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	// 若配置了级联更新，将原始 maps 注入 ctx，供 _doUpdate 提取子数据
