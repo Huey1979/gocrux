@@ -163,7 +163,7 @@ func main() {
 | `GET` | `/{prefix}/get` | 详情查询（按 ID/Code） |
 | `POST` | `/{prefix}/update` | 编辑记录（自动识别单条/批量，支持级联） |
 | `POST` | `/{prefix}/batch-update` | 简单批量更新（SQL IN 统一赋值） |
-| `POST` | `/{prefix}/delete` | 批量删除 |
+| `POST` | `/{prefix}/delete` | 批量删除（支持 ids / codes 或同时传入） |
 
 当 Service 启用 `VersionMode` 时，额外注册：
 
