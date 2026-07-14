@@ -155,7 +155,7 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 	if s.config.VersionMode && s.config.VersionFields != nil {
 		vf := s.config.VersionFields
 		f.Filters = append(f.Filters, repository.Filter{
-			Field: resolveColumn[M](vf.CurrentField), Op: repository.OpEQ, Value: true,
+			Field: resolveColumn[M](vf.CurrentField), Op: repository.OpEQ, Value: int8(1),
 		})
 		// 草稿可见性：未登录仅看已发布，登录后看已发布+自己的草稿
 		if vf.StatusField != "" {

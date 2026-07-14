@@ -51,10 +51,14 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			return nil, err
 		}
 
-		// 版本化：Create 时自动设置初始版本号 v1.0
+		// 版本化：Create 时自动设置初始版本号 v1.0 + isCurrent + versionStatus
 		// （Update 时由 _beforeUpdateVersioned 调用 nextVersionCode 递增）
 		if s.config.VersionMode && s.config.VersionFields != nil {
 			vf := s.config.VersionFields
+			common.SetFieldValue(&m, vf.CurrentField, int8(1))
+			if vf.StatusField != "" {
+				common.SetFieldValue(&m, vf.StatusField, string(VersionStatusPublished))
+			}
 			if getStrField(&m, vf.VersionField) == "" {
 				common.SetFieldValue(&m, vf.VersionField, "v1.0")
 			}
