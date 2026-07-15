@@ -132,7 +132,7 @@ func (h *GenericHandler[M]) ListVersions(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	Success(c, gin.H{"items": versions, "total": len(versions)})
+	Success(c, gin.H{"versions": versions, "total": len(versions)})
 }
 
 // listVersionsPipeline 统一管线。
@@ -300,5 +300,5 @@ func (h *GenericHandler[M]) ListArchivedVersions(c *gin.Context) {
 	if archived == nil {
 		archived = []map[string]any{}
 	}
-	Success(c, gin.H{"items": archived, "total": len(archived)})
+	Success(c, gin.H{"versions": archived, "total": len(archived)})
 }
