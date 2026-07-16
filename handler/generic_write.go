@@ -38,7 +38,7 @@ func (h *GenericHandler[M]) Create(c *gin.Context) {
 		}
 	}
 	if len(rawReqs) == 0 {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("请求体"))
 		return
 	}
 
@@ -211,7 +211,7 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 		}
 	}
 	if len(rawReqs) == 0 {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("请求体"))
 		return
 	}
 
@@ -219,7 +219,7 @@ func (h *GenericHandler[M]) Update(c *gin.Context) {
 	for _, raw := range rawReqs {
 		rid, ok := raw["id"]
 		if !ok || rid == nil {
-			h.handleError(c, errs.ErrInvalidParam)
+			h.handleError(c, errs.ErrMissingParam("id"))
 			return
 		}
 		_ = rid
@@ -258,7 +258,7 @@ func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 	// 提取 ids
 	idsRaw, ok := raw["ids"]
 	if !ok {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("ids"))
 		return
 	}
 	var ids []any
@@ -270,7 +270,7 @@ func (h *GenericHandler[M]) BatchUpdate(c *gin.Context) {
 		ids = toAnySlice(v)
 	}
 	if len(ids) == 0 {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("ids"))
 		return
 	}
 
@@ -459,7 +459,7 @@ func (h *GenericHandler[M]) Delete(c *gin.Context) {
 		return
 	}
 	if len(raw.IDs) == 0 && len(raw.Codes) == 0 {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("ids 或 codes"))
 		return
 	}
 

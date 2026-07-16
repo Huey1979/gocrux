@@ -55,7 +55,7 @@ func (h *GenericHandler[M]) Get(c *gin.Context) {
 	code := c.Query("code")
 
 	if idStr == "" && code == "" {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("id 或 code"))
 		return
 	}
 

@@ -16,7 +16,7 @@ import (
 // -------- Get --------
 func (s *GenericService[M]) _beforeGet(ctx context.Context, id any) (any, error) {
 	if id == nil {
-		return nil, errs.ErrInvalidParam
+		return nil, errs.ErrMissingParam("id")
 	}
 	return id, nil
 }

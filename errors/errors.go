@@ -17,6 +17,9 @@ var (
 // errFieldValidationSentinel 字段校验哨兵（不导出，通过 IsFieldValidation 检查）。
 var errFieldValidationSentinel = errors.New("field validation failed")
 
+// errMissingParamSentinel 缺失参数哨兵（不导出，通过 IsMissingParam 检查）。
+var errMissingParamSentinel = errors.New("missing required parameter")
+
 // ============================================================
 // 通用服务 (generic) — 框架内部使用
 // ============================================================
@@ -77,6 +80,17 @@ func ErrUpdateReqValidation(idx int, cause error) error {
 }
 func ErrFieldValidation(field, reason string) error {
 	return fmt.Errorf("字段[%s] %s: %w", field, reason, errFieldValidationSentinel)
+}
+
+// ErrMissingParam 创建缺失参数错误。
+// 供 Handler/Service 层在必传参数未提供时返回，前端可精确得知缺少哪个参数。
+func ErrMissingParam(param string) error {
+	return fmt.Errorf("缺少必需参数: %s: %w", param, errMissingParamSentinel)
+}
+
+// IsMissingParam 检查是否为缺失参数错误（供 mapServiceError 等使用 errors.Is 匹配）。
+func IsMissingParam(err error) bool {
+	return errors.Is(err, errMissingParamSentinel)
 }
 
 // IsFieldValidation 检查是否为字段校验错误（供 mapServiceError 等使用 errors.Is 匹配）。

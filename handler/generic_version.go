@@ -38,7 +38,7 @@ func (h *GenericHandler[M]) Activate(c *gin.Context) {
 		return
 	}
 	if raw.ID == nil {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("id"))
 		return
 	}
 
@@ -123,7 +123,7 @@ func (h *GenericHandler[M]) ListVersions(c *gin.Context) {
 	rid := c.Query("id")
 	rcode := c.Query("code")
 	if rid == "" && rcode == "" {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("id 或 code"))
 		return
 	}
 
@@ -217,8 +217,12 @@ func (h *GenericHandler[M]) EditVersion(c *gin.Context) {
 		h.handleError(c, err)
 		return
 	}
-	if raw.ID == nil || len(raw.Patches) == 0 {
-		h.handleError(c, errs.ErrInvalidParam)
+	if raw.ID == nil {
+		h.handleError(c, errs.ErrMissingParam("id"))
+		return
+	}
+	if len(raw.Patches) == 0 {
+		h.handleError(c, errs.ErrMissingParam("patches"))
 		return
 	}
 
@@ -277,7 +281,7 @@ func (h *GenericHandler[M]) ListArchivedVersions(c *gin.Context) {
 	ctx := c.Request.Context()
 	rcode := c.Query("code")
 	if rcode == "" {
-		h.handleError(c, errs.ErrInvalidParam)
+		h.handleError(c, errs.ErrMissingParam("code"))
 		return
 	}
 

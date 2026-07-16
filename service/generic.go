@@ -359,8 +359,11 @@ func (s *GenericService[M]) BatchUpdateByIDs(ctx context.Context, ids []any, upd
 	if s.config.VersionMode {
 		return errs.ErrBatchUpdateSimpleNotSupportVersion
 	}
-	if len(ids) == 0 || len(updates) == 0 {
-		return errs.ErrInvalidParam
+	if len(ids) == 0 {
+		return errs.ErrMissingParam("ids")
+	}
+	if len(updates) == 0 {
+		return errs.ErrMissingParam("updates")
 	}
 
 	// 补充审计字段
@@ -406,7 +409,7 @@ func (s *GenericService[M]) Get(ctx context.Context, id any) (*M, error) {
 // code 不能为空。
 func (s *GenericService[M]) GetByCode(ctx context.Context, code string) (*M, error) {
 	if code == "" {
-		return nil, errs.ErrInvalidParam
+		return nil, errs.ErrMissingParam("code")
 	}
 	return s._doGetByCode(ctx, code)
 }

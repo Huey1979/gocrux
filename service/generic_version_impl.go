@@ -178,7 +178,7 @@ func (s *GenericService[M]) _beforeEditVersion(ctx context.Context, id any, patc
 		return nil, nil, errs.ErrVersionFieldsNotSet
 	}
 	if len(patches) == 0 {
-		return nil, nil, errs.ErrInvalidParam
+		return nil, nil, errs.ErrMissingParam("patches")
 	}
 
 	// 查当前实体（用于状态校验 & 备份旧值）
