@@ -17,6 +17,12 @@ func (h *GenericHandler[M]) PKField() string {
 	return zero.PKField()
 }
 
+// SelfFKField CascadeHandler 接口实现，返回实体 M 的自关联外键字段名。
+func (h *GenericHandler[M]) SelfFKField() string {
+	var zero M
+	return zero.SelfFKField()
+}
+
 // Create 创建记录
 // POST /{prefix}/create
 func (h *GenericHandler[M]) Create(c *gin.Context) {

@@ -391,6 +391,12 @@ type CascadeHandler interface {
 	// PKField 返回当前 Handler 对应实体的主键数据库列名（如 "site_ulid"、"dept_ulid"）。
 	// 用于批量展开时生成 WHERE 条件及构建结果 lookup map。
 	PKField() string
+
+	// SelfFKField 返回当前 Handler 对应实体的自关联外键字段名。
+	// 返回值非空字符串 → 该实体存在自关联（如 "parent_item_ulid"）。
+	// 返回值空字符串 → 无自关联。
+	// 用于级联写入时解析同批次内自引用外键的代码→ULID 映射（如 parent_menu_code → parent_item_ulid）。
+	SelfFKField() string
 }
 
 // ============================================================

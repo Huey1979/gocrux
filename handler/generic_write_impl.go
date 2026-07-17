@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
 )
@@ -105,12 +106,18 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 					continue
 				}
 
-				childHandler := h.handlerReg.Get(rel.HandlerName)
-				if childHandler == nil {
-					continue
-				}
+			childHandler := h.handlerReg.Get(rel.HandlerName)
+			if childHandler == nil {
+				continue
+			}
 
-				// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
+			// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
+			// 在级联创建前，将子数据中的代码字段解析为实际的 ULID 外键值。
+			if sfk := childHandler.SelfFKField(); sfk != "" {
+				resolveSelfFKCodeRefs(allChildData, childHandler.PKField(), sfk)
+			}
+
+			// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
 				resolveCrossRefs(allChildData, refMap)
 				// 收集本批的 _temp_ref 标记
 				tempRefs := collectTempRefsOrdered(allChildData, rel.HandlerName)
@@ -243,12 +250,18 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						}
 						// 当 passToChild=true 时（版本化 or 非版本化全量替换），
 						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）
-						if passToChild && hasChildren {
-							for j := range childData {
-								delete(childData[j], childHandler.PKField())
-								delete(childData[j], "id")
-							}
+					if passToChild && hasChildren {
+						for j := range childData {
+							delete(childData[j], childHandler.PKField())
+							delete(childData[j], "id")
 						}
+						// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
+						// PK 已清除，在此生成新 ULID 并解析代码字段，子 Handler 的
+						// _beforeCreate → MergeTo 会保留这些值。
+						if sfk := childHandler.SelfFKField(); sfk != "" {
+							resolveSelfFKCodeRefs(childData, childHandler.PKField(), sfk)
+						}
+					}
 						// 补充子数据时，现有子记录只需更新 FK，不强制创建
 						if !hasChildren && oldPK != nil {
 							passToChild = false
@@ -378,4 +391,73 @@ func (h *GenericHandler[M]) _afterDelete(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// resolveSelfFKCodeRefs 解析同一批次子数据中的自引用 FK 代码字段。
+//
+// 背景：某些实体（如 SysMenuItem）通过 parent_menu_code（代码）表达
+// 自引用层级关系，但 DB 实际存储 parent_item_ulid（ULID）。
+// 在级联创建/更新中，同一批次的所有子项 ULID 可能尚未生成（或被清除后重新生成），
+// 因此需要在此处完成三步操作：
+//  1. 为每个子项生成新的主键 ULID
+//  2. 构建业务代码（如 menu_code）→ 新 ULID 的映射
+//  3. 将代码字段（如 parent_menu_code）解析为 ULID 填入 FK 字段（如 parent_item_ulid）
+//
+// 检测约定：若子数据中存在形如 "parent_xxx_code" 的虚拟字段，
+// 且去除 "parent_" 前缀后的字段（如 "menu_code"）也在子数据中作为业务代码存在，
+// 则认为该批数据需要进行自引用 FK 解析。
+func resolveSelfFKCodeRefs(childData []map[string]any, pkField, selfFKField string) {
+	// 检测自引用 FK 代码模式：查找 parent_xxx_code 格式的虚拟字段
+	// 约定：selfFKCodeField = "parent_" + baseCodeField
+	//       其中 baseCodeField 是业务代码字段（如 "menu_code"）
+	var baseCodeField string
+	var selfFKCodeField string
+
+outer:
+	for _, item := range childData {
+		for key := range item {
+			if strings.HasPrefix(key, "parent_") && strings.HasSuffix(key, "_code") {
+				baseField := strings.TrimPrefix(key, "parent_")
+				// 验证 baseField 确实存在于子数据中（作为业务代码字段）
+				for _, item2 := range childData {
+					if _, ok := item2[baseField]; ok {
+						baseCodeField = baseField
+						selfFKCodeField = key
+						break outer
+					}
+				}
+			}
+		}
+	}
+	if baseCodeField == "" {
+		return // 无自引用 FK 代码模式，无需解析
+	}
+
+	// Step 1: 为没有 PK 的子项生成新 ULID
+	for j := range childData {
+		if v, ok := childData[j][pkField]; !ok || v == nil || v == "" {
+			childData[j][pkField] = common.NewULID()
+		}
+	}
+
+	// Step 2: 构建业务代码 → 新 ULID 映射
+	codeToULID := make(map[string]string, len(childData))
+	for j := range childData {
+		if code, ok := childData[j][baseCodeField].(string); ok && code != "" {
+			if ulid, ok := childData[j][pkField].(string); ok && ulid != "" {
+				codeToULID[code] = ulid
+			}
+		}
+	}
+
+	// Step 3: 解析自引用 FK 代码 → ULID
+	for j := range childData {
+		if parentCode, ok := childData[j][selfFKCodeField].(string); ok && parentCode != "" {
+			if parentULID, exists := codeToULID[parentCode]; exists {
+				childData[j][selfFKField] = parentULID
+			}
+			// 移除虚拟字段，避免传递给子 Handler 时产生未知字段错误
+			delete(childData[j], selfFKCodeField)
+		}
+	}
 }
