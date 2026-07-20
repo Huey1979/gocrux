@@ -489,8 +489,10 @@ func (h *GenericHandler[M]) deletePipeline(ctx context.Context, ids, codes any) 
 		return err
 	}
 
-	// 将 ids 注入 ctx，供 _afterDelete 的 GlobalStore 缓存清理使用
-	ctx = context.WithValue(ctx, deleteCacheIDsKey{}, ids)
+	// 将 pid 注入 ctx（而非原始 ids），供 _afterDelete 的 GlobalStore 缓存清理使用。
+	// pid 可能被 BeforeDelete hook 修改过（如 codes→ULID 转换），
+	// 使用修改后的值确保缓存 key 与 DB 记录一致。
+	ctx = context.WithValue(ctx, deleteCacheIDsKey{}, pid)
 	return h.afterDelete(ctx)
 }
 
@@ -509,8 +511,13 @@ func (h *GenericHandler[M]) doDelete(ctx context.Context, ids, codes any) error 
 }
 
 func (h *GenericHandler[M]) afterDelete(ctx context.Context) error {
+	// 始终运行 GlobalStore 缓存清理（框架职责），
+	// 即使实体配置了自定义 AfterDelete hook
+	if err := h._afterDelete(ctx); err != nil {
+		return err
+	}
 	if h.hooks.AfterDelete != nil {
 		return h.hooks.AfterDelete(ctx)
 	}
-	return h._afterDelete(ctx)
+	return nil
 }

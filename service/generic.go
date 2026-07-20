@@ -414,6 +414,42 @@ func (s *GenericService[M]) GetByCode(ctx context.Context, code string) (*M, err
 	return s._doGetByCode(ctx, code)
 }
 
+// ResolveCodesToIDs 将业务编码列表解析为主键 ID 列表。
+//
+// 适用于级联删除场景：当用户传 codes 而非 ids 时，
+// 需查询所有匹配的记录（不限 is_current），提取主键值用于级联子表删除。
+//
+// 返回 []any 类型的 PK 值列表，即使部分 code 无匹配记录也尽可能返回结果。
+func (s *GenericService[M]) ResolveCodesToIDs(ctx context.Context, codes []any) []any {
+	if len(codes) == 0 {
+		return nil
+	}
+	codeField := "code"
+	if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
+		codeField = resolveColumn[M](s.config.VersionFields.CodeField)
+	}
+
+	var ids []any
+	pkField := s.repo.PKField()
+	for _, code := range codes {
+		results, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+			Filters:  []repository.Filter{{Field: codeField, Op: repository.OpEQ, Value: code}},
+			Page:     1,
+			PageSize: 100,
+		})
+		if err != nil {
+			continue
+		}
+		for i := range results {
+			id := getFieldVal(&results[i], pkField)
+			if id != nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
 // ResolveOneToPublished 将单条记录解析为所属实体族的正式发布版本。
 //
 // 场景：HTTP Get?id=xxx&follow_published=true 时，前端拿到 ULID 对应的记录后，

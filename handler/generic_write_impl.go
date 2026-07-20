@@ -357,6 +357,15 @@ func (h *GenericHandler[M]) _doDelete(ctx context.Context, ids, codes any) error
 
 		idList, ok := ids.([]any)
 		if !ok || len(idList) == 0 {
+			// 用户可能传了 codes 而非 ids，需要先解析 codes→IDs 才能级联
+			if codesList, ok2 := codes.([]any); ok2 && len(codesList) > 0 {
+				if resolved := h.svc.ResolveCodesToIDs(ctx, codesList); len(resolved) > 0 {
+					idList = resolved
+				}
+			}
+		}
+
+		if len(idList) == 0 {
 			return h.svc.Delete(ctx, ids, codes)
 		}
 
