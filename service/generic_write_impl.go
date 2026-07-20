@@ -57,7 +57,11 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			vf := s.config.VersionFields
 			common.SetFieldValue(&m, vf.CurrentField, int8(1))
 			if vf.StatusField != "" {
-				common.SetFieldValue(&m, vf.StatusField, string(VersionStatusPublished))
+				// SupportsDraft() 的实体：尊重用户传入或 SetDefaults() 的值
+				// 仅当不支持草稿或值仍为空时才默认 published
+				if !m.SupportsDraft() || getStrField(&m, vf.StatusField) == "" {
+					common.SetFieldValue(&m, vf.StatusField, string(VersionStatusPublished))
+				}
 			}
 			if getStrField(&m, vf.VersionField) == "" {
 				common.SetFieldValue(&m, vf.VersionField, "v1.0")
