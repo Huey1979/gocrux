@@ -275,10 +275,10 @@ func generateRecordImpl(table *TableInfo, structName string, cfg *FieldConfig) s
 	if isAutoInc {
 		sb.WriteString(fmt.Sprintf("\t// %s 自增，由数据库生成\n", pkDBName))
 	} else if isULID {
-		sb.WriteString(fmt.Sprintf("\tif m.%s == \"\" {\n\t\tm.%s = common.NewULID()\n\t}\n", pkField, pkField))
+		sb.WriteString(fmt.Sprintf("\tcommon.InitULID(&m.%s)\n", pkField))
 	} else {
 		// 默认为 ULID 模式
-		sb.WriteString(fmt.Sprintf("\tif m.%s == \"\" {\n\t\tm.%s = common.NewULID()\n\t}\n", pkField, pkField))
+		sb.WriteString(fmt.Sprintf("\tcommon.InitULID(&m.%s)\n", pkField))
 	}
 	sb.WriteString("}\n\n")
 

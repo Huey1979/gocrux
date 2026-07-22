@@ -60,6 +60,20 @@ func ConversationID(ulidA, ulidB string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// InitULID 若 field 为空字符串则自动生成 ULID。
+// 用于简化 entity.SetID() 实现，替换重复的 if/NewULID 模板。
+//
+// 使用示例：
+//
+//	func (s *SysForm) SetID() {
+//	    common.InitULID(&s.FormULID)
+//	}
+func InitULID(field *string) {
+	if *field == "" {
+		*field = NewULID()
+	}
+}
+
 // PasswordHash 密码哈希
 func PasswordHash(password, salt string) string {
 	h := md5.New()
