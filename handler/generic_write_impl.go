@@ -225,13 +225,12 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							childData = oldChildren
 
 							// 为 backfill 数据补充 id 键，确保 GetID() 能匹配到主键
+							// 使用 childHandler.PKField() 精确定位，避免后缀匹配误取 FK（BUG-035）
+							pkField := childHandler.PKField()
 							for j := range childData {
 								if _, ok := childData[j]["id"]; !ok {
-									for k, v := range childData[j] {
-										if v != nil && v != "" && (strings.HasSuffix(strings.ToLower(k), "_ulid") || strings.HasSuffix(strings.ToLower(k), "_id")) {
-											childData[j]["id"] = v
-											break
-										}
+									if pkVal, exists := childData[j][pkField]; exists && pkVal != nil && pkVal != "" {
+										childData[j]["id"] = pkVal
 									}
 								}
 							}
