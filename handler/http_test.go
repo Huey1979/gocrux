@@ -37,7 +37,6 @@ func (t testHttpEntity) SetCreatedAt(tm time.Time)  {}
 func (t testHttpEntity) SetCreatedBy(userID string) {}
 func (t testHttpEntity) SetUpdatedAt(tm time.Time)  {}
 func (t testHttpEntity) SetUpdatedBy(userID string) {}
-func (t testHttpEntity) SetID()                     {}
 func (t testHttpEntity) SupportsDraft() bool        { return false }
 func (t testHttpEntity) SetDelete() bool            { t.IsDeleted = 1; return true }
 func (t testHttpEntity) PKField() string            { return "id" }

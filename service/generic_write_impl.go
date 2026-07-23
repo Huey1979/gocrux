@@ -42,7 +42,6 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 	for _, req := range input {
 		m := newRecord[M]()
 		m.SetDefaults()
-		m.SetID()
 		m.SetCreatedBy(userID)
 		m.SetCreatedAt(now)
 		m.SetUpdatedAt(now)

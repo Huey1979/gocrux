@@ -21,7 +21,6 @@ type Record interface {
 	SetCreatedBy(userID string)
 	SetUpdatedAt(t time.Time)
 	SetUpdatedBy(userID string)
-	SetID()
 
 	// SupportsDraft 返回当前表是否支持草稿箱。
 	// 返回 true 时实体需提供 VersionStatus 字段（通过 VersionFieldMapping 映射）。

@@ -79,7 +79,6 @@ func (t testParent) SetCreatedAt(tm time.Time)  {}
 func (t testParent) SetCreatedBy(userID string) {}
 func (t testParent) SetUpdatedAt(tm time.Time)  {}
 func (t testParent) SetUpdatedBy(userID string) {}
-func (t testParent) SetID()                     {}
 func (t testParent) SupportsDraft() bool        { return false }
 func (t testParent) SetDelete() bool            { t.IsDeleted = 1; return true }
 func (t testParent) GetULID() string            { return fmt.Sprintf("%d", t.ID) }
@@ -99,7 +98,6 @@ func (t testChild) SetCreatedAt(tm time.Time)  {}
 func (t testChild) SetCreatedBy(userID string) {}
 func (t testChild) SetUpdatedAt(tm time.Time)  {}
 func (t testChild) SetUpdatedBy(userID string) {}
-func (t testChild) SetID()                     {}
 func (t testChild) SupportsDraft() bool        { return false }
 func (t testChild) SetDelete() bool            { t.IsDeleted = 1; return true }
 func (t testChild) PKField() string            { return "id" }
