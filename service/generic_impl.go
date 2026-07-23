@@ -340,6 +340,35 @@ func resolveColumn[M Record](fieldName string) string {
 	return common.ToSnakeCase(fieldName)
 }
 
+// resolveColumnFromDB 反向解析：DB 列名 → Go 结构体字段名。
+// 遍历 M 的所有字段，找到 gorm/bson/snake 约定匹配 dbColumn 的那个，
+// 返回其 Go 字段名（如 "SiteULID"）。
+// 用于 _beforeCreate 中框架自动生成 ULID，需要从 PKField()（返回 DB 列名）
+// 反向找到 Go 字段名才能用 SetFieldValue。
+func resolveColumnFromDB[M Record](dbColumn string) string {
+	var m M
+	t := reflect.TypeOf(m)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// gorm column
+		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col == dbColumn {
+			return f.Name
+		}
+		// bson tag（MongoDB）
+		if bsonTag := f.Tag.Get("bson"); bsonTag == dbColumn {
+			return f.Name
+		}
+		// snake_case fallback
+		if common.ToSnakeCase(f.Name) == dbColumn {
+			return f.Name
+		}
+	}
+	return ""
+}
+
 // popIntParam 从 map 中取出并删除指定的键，将值转为 int。
 // 若键不存在或无法解析则返回 0。
 func popIntParam(m map[string]any, key string) int {

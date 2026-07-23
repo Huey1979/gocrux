@@ -51,6 +51,16 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			return nil, err
 		}
 
+		// 兜底：MergeTo 后 PK 仍为空 → 框架自动生成 ULID。
+		// 40 个 entity 可逐步删除 SetID() 方法，gocrux 在框架层统一处理 PK 生成。
+		if pkDBName := m.PKField(); pkDBName != "" {
+			if pkGoField := resolveColumnFromDB[M](pkDBName); pkGoField != "" {
+				if getStrField(&m, pkGoField) == "" {
+					common.SetFieldValue(&m, pkGoField, common.NewULID())
+				}
+			}
+		}
+
 		// 版本化：Create 时自动设置初始版本号 v1.0 + isCurrent + versionStatus
 		// （Update 时由 _beforeUpdateVersioned 调用 nextVersionCode 递增）
 		if s.config.VersionMode && s.config.VersionFields != nil {
