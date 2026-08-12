@@ -95,8 +95,31 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		f = v
 	case map[string]any:
 		// 分离控制参数与过滤条件
-		f.Page, f.PageSize = popIntParam(v, "page"), popIntParam(v, "page_size")
+		// 页码别名：page / pageNum / page_num（从 1 开始）
+		f.Page = popIntParam(v, "page")
+		if f.Page == 0 {
+			f.Page = popIntParam(v, "pageNum")
+		}
+		if f.Page == 0 {
+			f.Page = popIntParam(v, "page_num")
+		}
+		// 每页数量别名：page_size / pageSize（默认 20）
+		f.PageSize = popIntParam(v, "page_size")
+		if f.PageSize == 0 {
+			f.PageSize = popIntParam(v, "pageSize")
+		}
 		f.OrderBy, f.OrderDir = popStrParam(v, "order_by"), popStrParam(v, "order_dir")
+
+		// offset & size 对：起点从 0 开始，成对使用，优先于页码分页
+		_, hasOffset := v["offset"]
+		_, hasSize := v["size"]
+		if hasOffset || hasSize {
+			f.Offset = popIntParam(v, "offset") // 缺失按 0（从第一条开始）
+			if size := popIntParam(v, "size"); size > 0 {
+				f.PageSize = size
+			}
+			f.Page = 1 // offset 模式直接定位起点，页码置 1 防干扰 Repository 的 offset 计算
+		}
 
 		// 默认分页 + 默认排序
 		if f.Page < 1 {

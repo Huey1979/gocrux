@@ -1025,7 +1025,7 @@ Handler 构造时自动从 entity struct 反射出字段类型规则：
 |------|---------|
 | **Create** | body 中每个字段的**类型转换 + 格式 + 必填 + 长度** |
 | **Update** | body 中每个字段的**类型转换 + 格式 + 长度**（不强制必填） |
-| **List** | 分页参数（`page`≥1, `page_size`∈[1,100], `order_dir`∈{asc\|desc}）+ 过滤字段 |
+| **List** | 分页参数（`page`/`pageNum`/`page_num`≥1, `page_size`/`pageSize`∈[1,100], `offset`≥0 & `size`∈[1,100], `order_dir`∈{asc\|desc}）+ 过滤字段 |
 
 ### 示例：无配置时的行为
 
@@ -1654,12 +1654,21 @@ GET /api/v1/sites/list?page=1&page_size=20&site_code=S001&keyword=xxx&order_by=c
 
 URL query 参数自动转为 `map[string]any` 过滤条件。当值为切片时自动使用 `OpIn`。
 
+分页参数支持多组别名（成对使用，offset 模式优先于页码模式）：
+
+| 参数组 | 别名 | 语义 |
+|------|------|------|
+| 页码 | `page` / `pageNum` / `page_num` | 从 1 开始 |
+| 每页数量 | `page_size` / `pageSize` | 默认 20 |
+| 起点 & 数量 | `offset` & `size` | offset 从 0 开始（如 `offset=20&size=10` → 第 21~30 条） |
+
 ### 结构化过滤（Repository 层）
 
 ```go
 type ListFilters struct {
     Page     int      // 页码（>=1）
     PageSize int      // 每页条数（<=0 不分页）
+    Offset   int      // 起点偏移（>=0，从 0 开始；>0 时优先于 Page）
     Filters  []Filter // 过滤条件
     Logic    string   // "and"（默认）或 "or"
     OrderBy  string   // 排序字段（DB 列名）

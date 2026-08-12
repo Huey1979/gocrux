@@ -340,6 +340,7 @@ type Filter struct {
 type ListFilters struct {
 	Page     int      // 页码（>=1）
 	PageSize int      // 每页条数（<=0 不分页）
+	Offset   int      // 起点偏移（>=0，从 0 开始；>0 时优先于 Page 计算，0 等价于第 1 页起点）
 	Filters  []Filter // 过滤条件
 	Logic    string   // 逻辑连接符："and"（默认）、"or"
 	OrderBy  string   // 排序字段（DB 列名）
@@ -355,6 +356,12 @@ type ListFilters struct {
 // page/ pageSize：当 pageSize <= 0 时不分页、返回全部（不走 count）；否则按标准分页。
 // 返回：记录列表、总数（不分页时返回 len(results)）、错误
 func (r *CRUDRepository[M]) List(ctx context.Context, query func(*gorm.DB) *gorm.DB, page, pageSize int) ([]M, int64, error) {
+	return r.listOffset(ctx, query, page, pageSize, 0)
+}
+
+// listOffset 带起点偏移的列表查询。
+// offset > 0 时直接作为 SQL OFFSET 使用（从 0 开始）；offset <= 0 时按 page 计算。
+func (r *CRUDRepository[M]) listOffset(ctx context.Context, query func(*gorm.DB) *gorm.DB, page, pageSize, offset int) ([]M, int64, error) {
 	db := r.ReadDB(ctx).Model(new(M))
 	if query != nil {
 		db = query(db)
@@ -380,10 +387,13 @@ func (r *CRUDRepository[M]) List(ctx context.Context, query func(*gorm.DB) *gorm
 		return nil, 0, err
 	}
 
-	// 分页查询
+	// 分页查询：offset 优先，否则按页码计算
 	var results []M
-	offset := (page - 1) * pageSize
-	if err := db.Offset(offset).Limit(pageSize).Find(&results).Error; err != nil {
+	skip := offset
+	if skip <= 0 {
+		skip = (page - 1) * pageSize
+	}
+	if err := db.Offset(skip).Limit(pageSize).Find(&results).Error; err != nil {
 		return nil, 0, err
 	}
 
@@ -452,7 +462,7 @@ func (r *CRUDRepository[M]) ListByFilters(ctx context.Context, f ListFilters) ([
 		}
 		return db
 	}
-	return r.List(ctx, query, f.Page, f.PageSize)
+	return r.listOffset(ctx, query, f.Page, f.PageSize, f.Offset)
 }
 
 // applyFilter 将单个 Filter 应用到 GORM query

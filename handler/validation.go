@@ -73,13 +73,37 @@ func (e *BatchErrors) Error() string {
 	return sb.String()
 }
 
+// paginationParams 分页/排序参数集合（allControlParams 子集）。
+// Handler List() 剔除控制参数时**保留**这些 key：它们在 Service 层 _doList 会被
+// popIntParam/popStrParam 消费删除，不会泄漏为过滤条件（BUG-038 修复）。
+var paginationParams = map[string]bool{
+	// 页码（从 1 开始，三个别名）
+	"page":    true,
+	"pageNum": true,
+	"page_num": true,
+	// 每页数量（默认 20，两个别名）
+	"page_size": true,
+	"pageSize":  true,
+	// 起点 & 数量（起点从 0 开始，成对使用）
+	"offset": true,
+	"size":   true,
+	// 排序
+	"order_by":  true,
+	"order_dir": true,
+}
+
 // allControlParams 框架层面所有非字段过滤的 URL Query 参数。
 // Handler List() 用它来一次性剔除；validateInput 用它来判断是否跳过。
-// 命名统一为 snake_case（BUG-020 修复）。
+// 参数命名兼容 snake_case 与 camelCase 两种风格（BUG-020 修复）。
 var allControlParams = map[string]bool{
-	// 分页 & 排序
+	// 分页 & 排序（见 paginationParams，List() 剔除时保留）
 	"page":      true,
 	"page_size": true,
+	"pageNum":   true,
+	"page_num":  true,
+	"pageSize":  true,
+	"offset":    true,
+	"size":      true,
 	"order_by":  true,
 	"order_dir": true,
 	// 展开 & 深度
@@ -849,6 +873,11 @@ func defaultListRules() EndpointRules {
 	return EndpointRules{
 		"page":      {Type: "int", Min: Float64Ptr(1)},
 		"page_size": {Type: "int", Min: Float64Ptr(1), Max: Float64Ptr(100)},
+		"pageNum":   {Type: "int", Min: Float64Ptr(1)},
+		"page_num":  {Type: "int", Min: Float64Ptr(1)},
+		"pageSize":  {Type: "int", Min: Float64Ptr(1), Max: Float64Ptr(100)},
+		"offset":    {Type: "int", Min: Float64Ptr(0)},
+		"size":      {Type: "int", Min: Float64Ptr(1), Max: Float64Ptr(100)},
 		"order_dir": {Type: "string", Enum: []string{"asc", "desc"}},
 		"depth":     {Type: "int", Min: Float64Ptr(1)},
 	}

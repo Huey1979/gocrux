@@ -227,6 +227,12 @@ func (r *MongoCRUDRepository[M]) DeleteByFK(ctx context.Context, fkField string,
 
 // List 分页列表查询。sortDoc 可选排序（bson.D 一对一排序键，如 bson.D{{Key: "created_at", Value: -1}}）。
 func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, pageSize int, sortDoc ...bson.D) ([]M, int64, error) {
+	return r.listOffset(ctx, filter, page, pageSize, 0, sortDoc...)
+}
+
+// listOffset 带起点偏移的列表查询。
+// offset > 0 时直接作为 skip 使用（从 0 开始）；offset <= 0 时按 page 计算。
+func (r *MongoCRUDRepository[M]) listOffset(ctx context.Context, filter bson.M, page, pageSize, offset int, sortDoc ...bson.D) ([]M, int64, error) {
 	if filter == nil {
 		filter = bson.M{}
 	}
@@ -240,7 +246,10 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
 	}
-	skip := int64((page - 1) * pageSize)
+	skip := int64(offset)
+	if skip <= 0 {
+		skip = int64((page - 1) * pageSize)
+	}
 	opts := options.Find().SetSkip(skip).SetLimit(int64(pageSize))
 	if len(sortDoc) > 0 && sortDoc[0] != nil {
 		opts.SetSort(sortDoc[0])
@@ -309,7 +318,7 @@ func (r *MongoCRUDRepository[M]) RunInTx(ctx context.Context, fn func(ctx contex
 	return err
 }
 
-// ListByFilters 结构化过滤查询（将 Filter 转换为 bson），支持排序。
+// ListByFilters 结构化过滤查询（将 Filter 转换为 bson），支持排序与 offset 起点。
 func (r *MongoCRUDRepository[M]) ListByFilters(ctx context.Context, filters ListFilters) ([]M, int64, error) {
 	f := toBsonFilter(filters)
 	if filters.OrderBy != "" {
@@ -318,9 +327,9 @@ func (r *MongoCRUDRepository[M]) ListByFilters(ctx context.Context, filters List
 			dir = -1
 		}
 		sortDoc := bson.D{{Key: filters.OrderBy, Value: dir}}
-		return r.List(ctx, f, filters.Page, filters.PageSize, sortDoc)
+		return r.listOffset(ctx, f, filters.Page, filters.PageSize, filters.Offset, sortDoc)
 	}
-	return r.List(ctx, f, filters.Page, filters.PageSize)
+	return r.listOffset(ctx, f, filters.Page, filters.PageSize, filters.Offset)
 }
 
 // RawList 实现 Repo[M] 接口。query 为 bson.M 过滤器。

@@ -384,9 +384,11 @@ func (h *GenericHandler[M]) List(c *gin.Context) {
 			ctx = service.WithKeywordSearch(ctx, service.KeywordSearch{Keyword: kw, Fields: kfs})
 		}
 	}
-	// 一次性剔除所有框架控制参数，避免误传到 Service 层（BUG-019 修复）
+	// 一次性剔除框架控制参数，避免误传到 Service 层（BUG-019 修复）。
+	// 分页/排序参数（paginationParams）保留：Service 层 _doList 会 pop 消费，
+	// 不会泄漏为过滤条件（BUG-038 回归修复）。
 	for key := range filters {
-		if allControlParams[key] {
+		if allControlParams[key] && !paginationParams[key] {
 			delete(filters, key)
 		}
 	}
