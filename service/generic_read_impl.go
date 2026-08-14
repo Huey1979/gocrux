@@ -143,7 +143,10 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 			if !cols[field] {
 				continue
 			}
-			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: op, Value: value})
+			// json 参数名 → 存储列名：Mongo 实体前端驼峰参数（deliveryUlid）解析为
+			// bson 列名（delivery_ulid），避免 filterToBson 直接使用 json 名查空（BUG-039 修复）；
+			// MySQL 实体 json 名 = gorm 列名，解析后行为不变。
+			f.Filters = append(f.Filters, repository.Filter{Field: resolveColumnByName[M](field), Op: op, Value: value})
 		}
 
 	default:

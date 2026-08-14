@@ -48,18 +48,19 @@ func NewMongoCRUDRepository[M any](collectionName string) *MongoCRUDRepository[M
 	return r
 }
 
-// BatchDeprecateVersions 版本化批量废弃：将当前版本标记为非当前（isCurrent=false, versionStatus=deprecated）。
+// BatchDeprecateVersions 版本化批量废弃：将当前版本标记为非当前（is_current=false, version_status=deprecated）。
 // 供 Service._doDelete 在 VersionMode=true 时调用。
+// 字段名统一下划线风格，与实体 bson tag 一致（BUG-039 修复）。
 func (r *MongoCRUDRepository[M]) BatchDeprecateVersions(ctx context.Context, ids []any) error {
 	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}},
-		bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+		bson.M{"$set": bson.M{"is_current": false, "version_status": "deprecated"}})
 	return err
 }
 
 // BatchDeprecateVersionsByFK 版本化按外键批量废弃：级联删除子记录时使用。
 func (r *MongoCRUDRepository[M]) BatchDeprecateVersionsByFK(ctx context.Context, fkField string, fkValues []any) error {
 	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}},
-		bson.M{"$set": bson.M{"isCurrent": false, "versionStatus": "deprecated"}})
+		bson.M{"$set": bson.M{"is_current": false, "version_status": "deprecated"}})
 	return err
 }
 
@@ -351,15 +352,15 @@ func (r *MongoCRUDRepository[M]) RawList(ctx context.Context, dest any, query an
 	return nil
 }
 
-// BatchSoftDelete 批量软删除。
+// BatchSoftDelete 批量软删除（is_deleted=1，与实体 bson tag 一致，BUG-039 修复）。
 func (r *MongoCRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"isDeleted": int8(1)}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"is_deleted": int8(1)}})
 	return err
 }
 
-// BatchSoftDeleteByFK 按外键批量软删除。
+// BatchSoftDeleteByFK 按外键批量软删除（is_deleted=1，BUG-039 修复）。
 func (r *MongoCRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"isDeleted": int8(1)}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"is_deleted": int8(1)}})
 	return err
 }
 

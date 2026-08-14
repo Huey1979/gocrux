@@ -340,6 +340,38 @@ func resolveColumn[M Record](fieldName string) string {
 	return common.ToSnakeCase(fieldName)
 }
 
+// resolveColumnByName 根据前端 JSON 参数名 → 存储列名（json tag 名 → gorm/bson 列名）。
+// 遍历 M 的字段，按 json tag 精确匹配 jsonName；匹配到后返回其 gorm column / bson tag /
+// ToSnakeCase 兜底。用于 List 过滤时把前端驼峰参数（如 deliveryUlid）解析为存储列名
+// （如 delivery_ulid，与 Mongo 实体 bson tag 一致；BUG-039 修复）。
+// 未匹配到 json tag 时原样返回 jsonName（兼容直接传列名 / 无 json tag 的实体，行为不变）。
+func resolveColumnByName[M Record](jsonName string) string {
+	var m M
+	t := reflect.TypeOf(m)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		jsonTag := f.Tag.Get("json")
+		if jsonTag == "" || jsonTag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(jsonTag, ",")
+		if name != jsonName {
+			continue
+		}
+		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
+			return col
+		}
+		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
+			return bsonTag
+		}
+		return common.ToSnakeCase(name)
+	}
+	return jsonName
+}
+
 // resolveColumnFromDB 反向解析：DB 列名 → Go 结构体字段名。
 // 遍历 M 的所有字段，找到 gorm/bson/snake 约定匹配 dbColumn 的那个，
 // 返回其 Go 字段名（如 "SiteULID"）。
