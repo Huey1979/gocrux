@@ -420,6 +420,28 @@ func toBsonFilter(f ListFilters) bson.M {
 	return bson.M{"$and": and}
 }
 
+// likeToRegex 将 SQL LIKE 模式（% 任意串、_ 单字符）转为 Mongo $regex 模式，
+// 同时转义正则特殊字符，避免用户输入中的元字符破坏匹配（BUG-041 修复）。
+func likeToRegex(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteString(".")
+		default:
+			if strings.ContainsRune(".+*?[]{}()|^$\\", r) {
+				b.WriteString("\\")
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
 // filterToBson 将单个 Filter 转为 MongoDB bson 查询条件。
 func filterToBson(f Filter) bson.M {
 	switch f.Op {
@@ -428,7 +450,8 @@ func filterToBson(f Filter) bson.M {
 	case OpNEQ:
 		return bson.M{f.Field: bson.M{"$ne": f.Value}}
 	case OpLike:
-		return bson.M{f.Field: bson.M{"$regex": f.Value, "$options": "i"}}
+		// Mongo 不认 SQL LIKE 的 % _ 通配符，需先转成 regex 模式（BUG-041 修复）
+		return bson.M{f.Field: bson.M{"$regex": likeToRegex(fmt.Sprint(f.Value)), "$options": "i"}}
 	case OpGT:
 		return bson.M{f.Field: bson.M{"$gt": f.Value}}
 	case OpGTE:
