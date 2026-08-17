@@ -274,8 +274,11 @@ products, total, _ := repo.ListByFilters(ctx, repository.ListFilters{
 
 ```go
 type Repo[M any] interface {
-    Insert(ctx context.Context, entity *M) error
-    InsertBatch(ctx context.Context, entities []*M) error
+    // Insert/InsertBatch 支持可选 explicitCols（存储列名白名单）：
+    // 非空时仅显式写入这些列，使请求显式出现的零值字段（0/false/""）真实落库，
+    // 不被 GORM 零值忽略 + DB 默认值覆盖（BUG-045）；空 = 默认行为（零值走 DB 默认值）。
+    Insert(ctx context.Context, entity *M, explicitCols ...string) error
+    InsertBatch(ctx context.Context, entities []*M, explicitCols ...string) error
     GetByID(ctx context.Context, id any) (*M, error)
     GetByField(ctx context.Context, field string, value any) (*M, error)
     Save(ctx context.Context, entity *M) error

@@ -27,6 +27,13 @@ type CrudRequest[M Record] interface {
 	Validatable
 }
 
+// RequestFields 请求体通过此接口暴露"显式出现的字段"（map 键集合）。
+// MapRequest 已实现 Data()；业务自定义 Request 实现后，Create/版本化 Update 可将
+// 请求中显式出现的零值字段（0/false/""）真实落库，不被 DB 默认值覆盖（BUG-045）。
+type RequestFields interface {
+	Data() map[string]any
+}
+
 // HasIdempotencyKey 可选接口，请求体通过实现此接口提供幂等键。
 // MapRequest 已实现此接口（从 data["idempotency_key"] 提取）。
 // 业务侧自定义 Request 类型按需实现，空字符串表示不启用幂等。

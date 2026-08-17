@@ -71,6 +71,146 @@ func normalizeJSONValue(v any) {
 	}
 }
 
+// ============================================================
+// 显式字段白名单（BUG-045）
+// Create / 版本化 Update 插入时，请求中显式出现的零值字段（0/false/""）
+// 会被 GORM 零值忽略 + DB 默认值覆盖。白名单机制让这些字段真实落库。
+// ============================================================
+
+// collectExplicitColumns 收集单个请求中显式出现的字段，解析为存储列名。
+// 仅保留实体真实存在的列（过滤 idempotency_key / page 等控制键）；非空时返回列名切片。
+func collectExplicitColumns[M Record](req CrudRequest[M]) []string {
+	rf, ok := req.(RequestFields)
+	if !ok || rf == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	cols := make([]string, 0, len(rf.Data()))
+	for k := range rf.Data() {
+		col := resolveColumnByName[M](k)
+		if col == "" || !isColumnOf[M](col) {
+			continue
+		}
+		if _, dup := seen[col]; dup {
+			continue
+		}
+		seen[col] = struct{}{}
+		cols = append(cols, col)
+	}
+	return cols
+}
+
+// collectAllExplicitColumns 收集批量请求中所有显式字段列名（去重并集）。
+func collectAllExplicitColumns[M Record](input []CrudRequest[M]) []string {
+	seen := map[string]struct{}{}
+	cols := make([]string, 0)
+	for _, req := range input {
+		if req == nil {
+			continue
+		}
+		for _, c := range collectExplicitColumns[M](req) {
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			cols = append(cols, c)
+		}
+	}
+	return cols
+}
+
+// isColumnOf 判断 col 是否为实体 M 的真实存储列（gorm column / bson tag / snake 约定）。
+func isColumnOf[M Record](col string) bool {
+	var m M
+	t := reflect.TypeOf(m)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c == col {
+			return true
+		}
+		if b := f.Tag.Get("bson"); b != "" && b != "-" && b == col {
+			return true
+		}
+		if common.ToSnakeCase(f.Name) == col {
+			return true
+		}
+	}
+	return false
+}
+
+// collectNonZeroColumns 反射实体，收集所有非零字段的存储列名。
+// 非零字段即 GORM 默认会插入的字段，显式列入白名单保持原插入语义。
+func collectNonZeroColumns(m any) []string {
+	t := reflect.TypeOf(m)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	v := reflect.ValueOf(m)
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if t.Kind() != reflect.Struct || v.Kind() != reflect.Struct {
+		return nil
+	}
+	cols := make([]string, 0, 8)
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" { // 未导出字段跳过
+			continue
+		}
+		if f.Type.Kind() == reflect.Ptr || f.Type.Kind() == reflect.Interface {
+			continue // 指针/接口字段零值=nil，GORM 默认不插入，跳过
+		}
+		fv := v.Field(i)
+		if !fv.IsValid() || fv.IsZero() {
+			continue
+		}
+		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
+			cols = append(cols, col)
+		}
+	}
+	return cols
+}
+
+// createColumnWhitelist 构造 Create 的 Select 白名单（BUG-045）：
+// 白名单 = 实体非零字段列 ∪ 请求显式字段列。
+// 仅当 len(explicitCols) > 0 时返回非 nil——保证无显式字段时行为与旧版完全一致（走 DB 默认值）。
+func createColumnWhitelist[M Record](entities []*M, explicitCols []string) []string {
+	if len(explicitCols) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	cols := make([]string, 0, 16)
+	add := func(c string) {
+		if c == "" {
+			return
+		}
+		if _, dup := seen[c]; dup {
+			return
+		}
+		seen[c] = struct{}{}
+		cols = append(cols, c)
+	}
+	for _, e := range entities {
+		if e == nil {
+			continue
+		}
+		for _, c := range collectNonZeroColumns(e) {
+			add(c)
+		}
+	}
+	for _, c := range explicitCols {
+		add(c)
+	}
+	return cols
+}
+
 func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudRequest[M]) ([]*M, error) {
 	// 1. MergeTo → 将请求数据灌入实体
 	entities := make([]*M, 0, len(input))
@@ -236,7 +376,13 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 		}
 	}
 
-	if err := s.repo.InsertBatch(ctx, input); err != nil {
+	// BUG-045：请求显式字段列名白名单 → 显式零值（0/false/""）真实落库，不被 DB 默认值覆盖
+	cols := createColumnWhitelist(input, explicitColumnsFrom(ctx))
+	if len(cols) > 0 {
+		if err := s.repo.InsertBatch(ctx, input, cols...); err != nil {
+			return nil, err
+		}
+	} else if err := s.repo.InsertBatch(ctx, input); err != nil {
 		return nil, err
 	}
 	return input, nil
@@ -490,11 +636,16 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 						}
 					}
 				}
-				return tx.Create(pair.New).Error
-			})
-			if txErr != nil {
-				return nil, txErr
+			// BUG-045：请求显式字段列名白名单 → 新版本行显式零值真实落库
+			cols := createColumnWhitelist([]*M{pair.New}, explicitColumnsFrom(ctx))
+			if len(cols) > 0 {
+				return tx.Create(pair.New).Select(cols).Error
 			}
+			return tx.Create(pair.New).Error
+		})
+		if txErr != nil {
+			return nil, txErr
+		}
 		} else {
 			// MongoDB：逐条退位 + 插入新版本（repo 层方法）
 			if err := s.repo.BatchDeprecateVersionsByFK(ctx, codeCol, []any{code}); err != nil {

@@ -113,7 +113,8 @@ func (r *MongoCRUDRepository[M]) PKField() string { return r.pkField }
 // ---------- 基础 CRUD ----------
 
 // Insert 插入单条记录。
-func (r *MongoCRUDRepository[M]) Insert(ctx context.Context, entity *M) error {
+// explicitCols 忽略：Mongo 全量文档写入，无 GORM 零值忽略问题（BUG-045 仅 MySQL 需要）。
+func (r *MongoCRUDRepository[M]) Insert(ctx context.Context, entity *M, _ ...string) error {
 	data := toBsonDoc(r, entity)
 	if _, err := r.coll.InsertOne(ctx, data); err != nil {
 		return fmt.Errorf("MongoDB插入失败: %w", err)
@@ -122,7 +123,8 @@ func (r *MongoCRUDRepository[M]) Insert(ctx context.Context, entity *M) error {
 }
 
 // InsertBatch 批量插入。
-func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M) error {
+// explicitCols 忽略：同 Insert（Mongo 无零值忽略问题）。
+func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M, _ ...string) error {
 	docs := make([]any, len(entities))
 	for i, e := range entities {
 		docs[i] = toBsonDoc(r, e)

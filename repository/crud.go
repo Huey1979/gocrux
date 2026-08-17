@@ -115,16 +115,26 @@ func (r *CRUDRepository[M]) ReadDB(ctx context.Context) *gorm.DB {
 // ============================================================
 
 // Insert 插入一条记录
-func (r *CRUDRepository[M]) Insert(ctx context.Context, entity *M) error {
-	return r.DB(ctx).Create(entity).Error
+// explicitCols 非空时仅显式写入这些列（BUG-045：请求显式零值字段真实落库）。
+func (r *CRUDRepository[M]) Insert(ctx context.Context, entity *M, explicitCols ...string) error {
+	db := r.DB(ctx)
+	if len(explicitCols) > 0 {
+		db = db.Select(explicitCols)
+	}
+	return db.Create(entity).Error
 }
 
 // InsertBatch 批量插入记录
-func (r *CRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M) error {
+// explicitCols 非空时仅显式写入这些列（BUG-045），空 = 默认行为。
+func (r *CRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M, explicitCols ...string) error {
 	if len(entities) == 0 {
 		return nil
 	}
-	return r.DB(ctx).Create(entities).Error
+	db := r.DB(ctx)
+	if len(explicitCols) > 0 {
+		db = db.Select(explicitCols)
+	}
+	return db.Create(entities).Error
 }
 
 // GetByID 根据主键 ID 获取单条记录

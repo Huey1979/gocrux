@@ -79,6 +79,26 @@ func GetUserULID(ctx context.Context) string {
 	return ""
 }
 
+// CtxKeyExplicitColumns context key — 本次写入请求中"显式出现的字段"列名白名单（BUG-045）。
+// 由 Create/Update 主流程在 before 之前写入，_doCreate/_doUpdate 读取后传给
+// repo.InsertBatch / tx.Create().Select(...)，使显式零值字段（0/false/""）真实落库。
+const CtxKeyExplicitColumns ctxKey = "explicit_columns"
+
+// withExplicitColumns 将显式字段列名白名单写入 ctx。
+func withExplicitColumns(ctx context.Context, cols []string) context.Context {
+	return context.WithValue(ctx, CtxKeyExplicitColumns, cols)
+}
+
+// explicitColumnsFrom 从 ctx 提取显式字段列名白名单，无则返回 nil。
+func explicitColumnsFrom(ctx context.Context) []string {
+	if v := ctx.Value(CtxKeyExplicitColumns); v != nil {
+		if cols, ok := v.([]string); ok {
+			return cols
+		}
+	}
+	return nil
+}
+
 // ============================================================
 // ctx key — 请求 ID（由 middleware 注入，关联日志文件）
 // ============================================================
@@ -311,6 +331,11 @@ func (s *GenericService[M]) ResolveToPublished(ctx context.Context, records []M)
 // ============================================================
 
 func (s *GenericService[M]) Create(ctx context.Context, input []CrudRequest[M]) ([]*M, error) {
+	// BUG-045：收集所有请求显式字段列名 → Create 时 Select 白名单，显式零值真实落库
+	if cols := collectAllExplicitColumns[M](input); len(cols) > 0 {
+		ctx = withExplicitColumns(ctx, cols)
+	}
+
 	// 幂等检查：提取首个有效幂等键，命中则直接返回缓存
 	if key := extractIdemKey(input); key != "" && s.idemStore != nil {
 		if cached, ok := s.idemStore.Get(key); ok {
@@ -339,6 +364,16 @@ func (s *GenericService[M]) Create(ctx context.Context, input []CrudRequest[M]) 
 // Update 更新单条记录（版本化模式下创建新版本行，非原地修改）。
 // id 为记录主键，data 为 map[string]any 或 CrudRequest[M]。
 func (s *GenericService[M]) Update(ctx context.Context, id, data any) (*M, error) {
+	// BUG-045：版本化 Update 插入新行，请求显式字段列名 → Select 白名单，显式零值真实落库
+	// （非版本化走 GORM Save 全字段更新，无零值丢失问题，无需处理）
+	if s.config.VersionMode {
+		if req, ok := data.(CrudRequest[M]); ok {
+			if cols := collectExplicitColumns[M](req); len(cols) > 0 {
+				ctx = withExplicitColumns(ctx, cols)
+			}
+		}
+	}
+
 	pid, pdata, err := s.beforeUpdate(ctx, id, data)
 	if err != nil {
 		return nil, err
