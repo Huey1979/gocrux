@@ -145,12 +145,15 @@ func (s *GenericService[M]) checkUniqueDB(ctx context.Context, ent *M, group []s
 		filters = append(filters, repository.Filter{Field: s.repo.PKField(), Op: repository.OpNEQ, Value: selfPK})
 	}
 
-	// 版本化：排除同 code 族（同 code 的多个版本允许重复）
+	// 版本化：排除同 code 族（同 code 的多个版本允许重复）+ 排除已废弃版本（is_current=0，BUG-042）
 	if s.config.VersionMode && s.config.VersionFields != nil {
 		code := getStrField(ent, s.config.VersionFields.CodeField)
 		if code != "" {
 			codeCol := resolveColumn[M](s.config.VersionFields.CodeField)
 			filters = append(filters, repository.Filter{Field: codeCol, Op: repository.OpNEQ, Value: code})
+		}
+		if currentCol := resolveColumn[M](s.config.VersionFields.CurrentField); currentCol != "" {
+			filters = append(filters, repository.Filter{Field: currentCol, Op: repository.OpEQ, Value: int8(1)})
 		}
 	}
 
@@ -175,8 +178,13 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 			if code == "" {
 				continue
 			}
+			// 冲突检测按版本化语义排除已废弃版本（is_current=0）：删除后同 code 可复用（BUG-042）
+			filters := []repository.Filter{{Field: codeCol, Op: repository.OpEQ, Value: code}}
+			if currentCol := resolveColumn[M](vf.CurrentField); currentCol != "" {
+				filters = append(filters, repository.Filter{Field: currentCol, Op: repository.OpEQ, Value: int8(1)})
+			}
 			_, total, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-				Filters:  []repository.Filter{{Field: codeCol, Op: repository.OpEQ, Value: code}},
+				Filters:  filters,
 				Page:     1,
 				PageSize: 1,
 			})
