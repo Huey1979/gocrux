@@ -34,6 +34,43 @@ func (s *GenericService[M]) checkUnique(ctx context.Context, entities []*M, excl
 	return nil
 }
 
+// normalizeJSONFields 将 gorm:"type:json" 的 string 字段空串归一化为合法 JSON "null"（BUG-044）。
+// 位置：所有 MergeTo 之后、入库之前（_beforeCreate / _beforeUpdate / _beforeUpdateVersioned）。
+// 背景：MySQL JSON 列不接受空字符串 ""（Error 3140），实体 SetDefaults() 兜底防不了
+// 显式传空串（MergeTo 覆盖），此处做框架级兜底。
+func normalizeJSONFields[M Record](m *M) {
+	normalizeJSONValue(m)
+}
+
+// normalizeJSONValue 反射遍历实体字段：string 类型 + gorm tag 含 type:json + 值为 "" → 归一化为 "null"。
+// "null" 对任意 JSON 目标类型（slice/map/struct）json.Unmarshal 均合法，语义中性（表示"无配置"）。
+func normalizeJSONValue(v any) {
+	t := reflect.TypeOf(v)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return
+		}
+		rv = rv.Elem()
+	}
+	if t.Kind() != reflect.Struct || rv.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Type.Kind() != reflect.String || !strings.Contains(f.Tag.Get("gorm"), "type:json") {
+			continue
+		}
+		fv := rv.Field(i)
+		if fv.String() == "" {
+			fv.SetString("null")
+		}
+	}
+}
+
 func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudRequest[M]) ([]*M, error) {
 	// 1. MergeTo → 将请求数据灌入实体
 	entities := make([]*M, 0, len(input))
@@ -49,6 +86,8 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 		if err := req.MergeTo(&m); err != nil {
 			return nil, err
 		}
+		// BUG-044：MergeTo 后归一化 type:json 空串字段（防显式传 "" 覆盖 SetDefaults 兜底）
+		normalizeJSONFields(&m)
 
 		// 兜底：MergeTo 后 PK 仍为空 → 框架自动生成 ULID。
 		// 40 个 entity 可逐步删除 SetID() 方法，gocrux 在框架层统一处理 PK 生成。
@@ -324,6 +363,8 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	ent := *old
 	ent.SetUpdatedAt(time.Now())
 	ent.SetUpdatedBy(GetUserULID(ctx))
+	// BUG-044：MergeTo 后归一化 type:json 空串字段
+	normalizeJSONFields(&ent)
 
 	// 5. 唯一性校验（排除自身）
 	if err := s.checkUnique(ctx, []*M{&ent}, id); err != nil {
@@ -365,6 +406,8 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 
 	// 2b. 审计字段（版本化模式下新行是一版全新记录，但仍记录编辑人）
 	newEntity.SetUpdatedBy(GetUserULID(ctx))
+	// BUG-044：MergeTo 后归一化 type:json 空串字段
+	normalizeJSONFields(&newEntity)
 
 	// 3. 提取旧版本信息
 	oldVal := reflect.ValueOf(*old)
