@@ -395,7 +395,7 @@ type Record interface {
 - 返回 `true` 时实体需提供 `VersionStatus` 字段（通过 `VersionFieldMapping` 映射）
 - 版本化模式下，Update 创建新草稿；Activate 发布草稿为正式版本
 
-### 框架级写入兜底（BUG-044 / BUG-045）
+### 框架级写入兜底（BUG-044 / BUG-045 / BUG-049）
 
 写入管线（Create / Update / 版本化 Update）在 MergeTo 之后、入库之前自动执行两项兜底，无需业务配置：
 
@@ -403,7 +403,9 @@ type Record interface {
 
 **显式零值字段真实落库（BUG-045 / BUG-046 / BUG-047）** — Create / 版本化 Update 插入时，请求中**显式出现**的零值字段（`0`/`false`/`""`）真实落库，不被 GORM 零值忽略 + DB 列默认值覆盖（如 `is_enabled=0` 不再落库变 `1`）。白名单 = 实体非零字段列 ∪ 请求显式字段列；请求未显式传的零值字段仍走 DB 默认值，行为与旧版一致。实现依赖可选接口 `RequestFields`（`MapRequest` 已内置实现 `Data()`），业务自定义 Request 实现 `Data() map[string]any` 即可生效。
 
-实现细节：白名单存在时，插入走 **map 批量插入**（`repository.EntityToMapByColumns` 按白名单列集把实体反射为 `map[string]any`，键集全行一致）而非 GORM `Select(白名单)`。原因：GORM struct Create 对 `default:<非零>` 可解析 tag + 零值字段会无条件用默认值覆盖并写回实体（`callbacks/create.go`），Select 白名单无法豁免（BUG-047）；map 路径（`ConvertMapToValuesForCreate`）值原样落库（0 就是 0）。列名解析对齐 `resolveColumn`：gorm `column:` → bson tag → snake 约定兜底（BUG-046）。
+实现细节：白名单存在时，插入走 GORM `Select(白名单).Create`（struct 路径）。**方案 B（default 只允许 0 值/无）** 后实体不再携带非零 `default:` tag（gentity 生成 `default:(-)`，非零 DB 默认值语义由 `SetDefaults()` 在 Go 层承担），GORM create 回调不再用默认值覆盖零值字段，显式 `0` 原样落库；此前为绕过 GORM default 填充而引入的 map 批量插入（`EntityToMapByColumns`，BUG-047 方案 A）已回退移除。列名解析对齐 `resolveColumn`：gorm `column:` → bson tag → snake 约定兜底（BUG-046）。
+
+**裸 Save 审计时间回填（BUG-049）** — `repository.CRUDRepository.Save` 与 `BaseDAO.Update` 写库前统一回填零值的审计时间字段（`CreatedAt`/`UpdatedAt`，`time.Time{}` 或 nil 指针）。裸 `db.Save` 全字段写回，业务调用方（如版本化 `_doActivate`）未设 `CreatedAt` 时零值时间戳写 MySQL 触发 Error 1292 `'0000-00-00'`（BUG-049）。
 
 ---
 
@@ -1913,6 +1915,12 @@ exclude_tables:             # 排除表（不检查也不生成）
 - `exclude_tables`：日志表等无需框架字段的特殊表，检查/生成时均跳过
 - 检查模式下：若配置 `is_deleted: del_flag`，则检查表中是否有 `del_flag` 列
 
+### default 约定（方案 B）
+
+gorm `default:` tag 只允许 **0 值 / 无**，非零 DB 默认值（如 `default:1`、`default:'active'`、`CURRENT_TIMESTAMP`）**一律不生成 `default:xxx`**，改为生成 `default:(-)`（禁止 GORM 默认填充），其语义由实体 `SetDefaults()` 在 Go 层承担。生成时控制台会对非零默认列打印提示。
+
+原因：GORM create 回调对 `default:<非零>` 可解析 tag + 零值字段会无条件用默认值覆盖并写回实体，`Select` 白名单也无法豁免（BUG-047），导致请求显式零值（`is_enabled=0`）落库变默认值（`1`）。`_beforeCreate` 执行顺序 `SetDefaults → SetCreatedAt/At → MergeTo`，请求值最后覆盖，语义等价且显式零值可真实落库。
+
 ### 生成物
 
 ```
@@ -1930,7 +1938,7 @@ generated/
 
 | 方法 | 行为 |
 |------|------|
-| `SetDefaults()` | 遍历 DEFAULT 值，零值时回填 |
+| `SetDefaults()` | 遍历 DEFAULT 值，零值时回填（**方案 B**：非零 DB 默认值的语义由本方法在 Go 层承担，实体不生成非零 `default:` tag） |
 | `SetID()` | 主键为 `*_ulid` 生成 ULID；自增主键空操作（**框架层已在 `_beforeCreate` 自动生成 PK，此方法保留兼容、不再被调用**） |
 | `SetCreatedAt(t)` | 若表存在 `created_at`（或映射列）则赋值 |
 | `SetCreatedBy(uid)` | 若表存在 `created_by`（或映射列）则赋值 |
@@ -2013,7 +2021,7 @@ gocrux/
 │   ├── bootstrap/          # 启动引导（Init/InitMySQL/InitOther/Migrate/Close）
 │   ├── config/             # 配置加载（Config/Load + 各配置段结构体）
 │   ├── database/
-│   │   ├── mysql/          # MySQL 连接 + AutoMigrate + 类型校验
+│   │   ├── mysql/          # MySQL 连接 + 纯 SQL 迁移（migration.go/schema 系列：表结构比对 → ALTER/DROP/RENAME 修复 + DEFAULT 比对）+ 类型校验
 │   │   ├── mongodb/        # MongoDB 连接
 │   │   └── redis/          # Redis 连接
 │   ├── logger/             # 日志系统（RequestLog/ResponseLog/BusinessLog + 按天滚动）

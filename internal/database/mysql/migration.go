@@ -1,344 +1,171 @@
 package mysql
 
 import (
-	"errors"
 	"fmt"
-	"reflect"
+	"sort"
 	"strings"
 
-	"github.com/Huey1979/gocrux/internal/config"
-
-	errs "github.com/Huey1979/gocrux/errors"
-	mysqldrv "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 )
 
-// Migrate 自动迁移表结构
-// models 由外部注入，使用者需要传入自己的 GORM 模型定义。
+// ============================================================
+// Migrate — 纯 SQL 数据库迁移（不依赖 GORM AutoMigrate）
+// ============================================================
+
+// Migrate 根据 models（entity 定义）管理数据库 schema。
+// models 由外部注入，使用者需要传入自己的 GORM 模型定义（entity 指针或值）。
+//
+// 流程：
+//  1. 从 entity struct 解析预期 schema（列 + 索引 + 默认值）
+//  2. 从 information_schema 读取实际 schema
+//  3. 纠正历史 ULID 列名（_ul_id → _ulid，GORM AutoMigrate 时代的产物）
+//  4. 比对，找出差异
+//  5. 建缺失的表（自写 CREATE TABLE）
+//  6. 记录多余的表（仅警告，不删除）
+//  7. 修复不一致的表（按有数据/无数据分别处理）
+//  8. 输出警告汇总
+//
+// 本实现替代旧的 GORM AutoMigrate 方案（规避其 1091 重试、索引/列改名不可预测等
+// 历史问题），参考 heims 项目内部自写的 migration 移植为公共组件。
 func Migrate(models ...any) error {
 	if len(models) == 0 {
 		logrus.Info("无模型需要迁移，跳过")
 		return nil
 	}
 
-	// 1. 执行 AutoMigrate（创建不存在的表和列）
-	//    GORM 遇到首个错误就会停止，若因残留索引/列导致 Error 1091，
-	//    忽略错误后重试一次，确保后续模型都能被处理。
-	if err := DB.InternalDB().AutoMigrate(models...); err != nil {
-		if isError1091(err) {
-			logrus.Warnf("AutoMigrate 首次遇到 1091 错误（已忽略），重试自动迁移: %v", err)
-			if err2 := DB.InternalDB().AutoMigrate(models...); err2 != nil {
-				if isError1091(err2) {
-					logrus.Warnf("AutoMigrate 重试仍遇 1091 错误（已忽略），继续: %v", err2)
-				} else {
-					return errs.ErrAutoMigrate(err2)
-				}
-			}
-		} else {
-			return errs.ErrAutoMigrate(err)
+	// 1. 读取预期 schema
+	expected, err := readEntitySchemas(models)
+	if err != nil {
+		return fmt.Errorf("读取 entity schema 失败: %w", err)
+	}
+
+	// 2. 读取实际 schema（entity 定义的表）
+	actual, err := readActualSchemas(expected)
+	if err != nil {
+		return fmt.Errorf("读取数据库 schema 失败: %w", err)
+	}
+
+	// 2.5 查询 MySQL 中所有表（不受 entity 列表限制），用于检测多余的表
+	allDBTables, err := getAllDBTableNames()
+	if err != nil {
+		return fmt.Errorf("读取数据库全部表名失败: %w", err)
+	}
+
+	// 2.6 纠正历史 ULID 列名（_ul_id → _ulid）
+	actual, err = fixULIDColumnNames(expected, actual)
+	if err != nil {
+		return fmt.Errorf("纠正 ULID 列名失败: %w", err)
+	}
+
+	// 3. 比对 + 输出诊断日志
+	missingTables, extraTables, diffs := compareSchemas(expected, actual)
+
+	// 额外检测：MySQL 中存在但 entity 未定义的表
+	extraFromDB := findExtraTables(allDBTables, expected)
+	extraTables = append(extraTables, extraFromDB...)
+
+	logrus.Infof("[migration] 预期 %d 表 | MySQL 实际 %d 表 | 缺失 %d | 多余 %d | 差异 %d",
+		len(expected), len(allDBTables), len(missingTables), len(extraTables), len(diffs))
+	for _, t := range missingTables {
+		logrus.Infof("[migration]   缺失: %s", t.Name)
+	}
+	for _, t := range extraTables {
+		logrus.Warnf("[migration]   多余: %s（保留未删除）", t.Name)
+	}
+	for _, d := range diffs {
+		logrus.Infof("[migration]   差异: %s（缺列%d 多列%d 冲突%d 缺索引%d 多索引%d）",
+			d.Table, len(d.MissingColumns), len(d.ExtraColumns), len(d.ColumnConflicts),
+			len(d.MissingIndexes), len(d.ExtraIndexes))
+	}
+
+	// 4. 建缺失的表
+	for _, t := range missingTables {
+		if err := fixMissingTable(t); err != nil {
+			return fmt.Errorf("建表 %s 失败: %w", t.Name, err)
 		}
 	}
 
-	// 2. 检测并尝试自动修复所有问题
-	failed := detectAndFixAllIssues(models)
-	if len(failed) > 0 {
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf(
-			"\n========== 表结构验证不通过（共 %d 项无法自动修复）==========\n\n", len(failed)))
-		for i, f := range failed {
-			sb.WriteString(fmt.Sprintf("【问题 %d】%s\n", i+1, f))
+	// 5. 记录多余的表（仅警告）
+	var warnings []string
+	for _, t := range extraTables {
+		warnings = append(warnings, fmt.Sprintf("多余的表: %s（未在 entity 中定义，保留未删除）", t.Name))
+	}
+
+	// 6. 修复不一致的表（传入完整预期 schema，空表 DROP 后直接重建）
+	expMap := make(map[string]tableSchema, len(expected))
+	for _, e := range expected {
+		expMap[e.Name] = e
+	}
+	for _, d := range diffs {
+		exp, ok := expMap[d.Table]
+		if !ok {
+			return fmt.Errorf("内部错误: 预期 schema 中找不到表 %s", d.Table)
 		}
-		sb.WriteString("====================================================\n")
-		sb.WriteString("请手动修复上述问题后重新启动服务。\n")
-		return fmt.Errorf("%s", sb.String())
+		w, err := fixConflicts(d, exp)
+		if err != nil {
+			return fmt.Errorf("修复表 %s 失败: %w", d.Table, err)
+		}
+		warnings = append(warnings, w...)
+	}
+
+	// 7. 输出汇总
+	if len(warnings) > 0 {
+		sort.Strings(warnings)
+		logrus.Warnf("\n========== Schema 迁移警告（共 %d 项）==========\n%s\n================================================",
+			len(warnings), strings.Join(warnings, "\n"))
 	}
 
 	return nil
 }
 
-// dbColInfo 数据库列信息
-type dbColInfo struct {
-	dataType string
-	colType  string
-}
+// fixULIDColumnNames 纠正历史上 GORM AutoMigrate 产生的 ULID 列名错误（_ul_id → _ulid）。
+// 对每张实际表：若实际列名为 xxx_ul_id 而预期列名为 xxx_ulid，执行
+// ALTER TABLE ... RENAME COLUMN，并在内存中同步更新列名与索引列名。
+// 返回纠正后的实际 schema（调用方后续比对使用）。
+func fixULIDColumnNames(expected, actual []tableSchema) ([]tableSchema, error) {
+	// 预期列名索引：表名 → 列名集合
+	expCols := make(map[string]map[string]bool, len(expected))
+	for _, t := range expected {
+		cols := make(map[string]bool, len(t.Columns))
+		for _, c := range t.Columns {
+			cols[c.Name] = true
+		}
+		expCols[t.Name] = cols
+	}
 
-// modelColInfo 模型列信息
-type modelColInfo struct {
-	goType string
-	colTag string
-	size   int
-}
-
-// detectAndFixAllIssues 检测所有表并尝试 ALTER TABLE 修复
-func detectAndFixAllIssues(models []any) []string {
-	var failed []string
-
-	for _, model := range models {
-		if !DB.InternalDB().Migrator().HasTable(model) {
+	for i := range actual {
+		expSet, ok := expCols[actual[i].Name]
+		if !ok {
 			continue
 		}
-
-		tableName := getTableName(model)
-		if tableName == "" {
-			continue
-		}
-
-		dbCols := getDBColumnInfo(tableName)
-		if dbCols == nil {
-			failed = append(failed, fmt.Sprintf("表 %s: 无法读取 information_schema.columns", tableName))
-			continue
-		}
-
-		modelCols := getModelColumnInfo(model)
-
-		for _, mc := range modelCols {
-			wrongName := correctToWrongULIDName(mc.colTag)
-			wrongCol, wrongExists := dbCols[wrongName]
-			_, correctExists := dbCols[mc.colTag]
-
-			if wrongExists && !correctExists {
-				sql := fmt.Sprintf("ALTER TABLE `%s` RENAME COLUMN `%s` TO `%s`", tableName, wrongName, mc.colTag)
-				if err := DB.InternalDB().Exec(sql).Error; err != nil {
-					failed = append(failed, fmt.Sprintf(
-						"表 %s: ULID 列名不一致\n  数据库中列名: %s (%s)\n  模型期望列名: %s\n  尝试执行: %s\n  失败原因: %v",
-						tableName, wrongName, wrongCol.colType, mc.colTag, sql, err))
-				} else {
-					logrus.Infof("✓ 已修复: %s.%s → %s", tableName, wrongName, mc.colTag)
-					dbCols[mc.colTag] = wrongCol
-					delete(dbCols, wrongName)
-				}
-			}
-
-			dbCol, dbExists := dbCols[mc.colTag]
-			if !dbExists {
+		for j := range actual[i].Columns {
+			col := &actual[i].Columns[j]
+			if !strings.HasSuffix(col.Name, "_ul_id") {
 				continue
 			}
+			correct := strings.TrimSuffix(col.Name, "_ul_id") + "_ulid"
+			if !expSet[correct] {
+				continue
+			}
+			sql := fmt.Sprintf("ALTER TABLE `%s` RENAME COLUMN `%s` TO `%s`", actual[i].Name, col.Name, correct)
+			if err := DB.InternalDB().Exec(sql).Error; err != nil {
+				return nil, fmt.Errorf("重命名列 %s.%s → %s 失败: %w", actual[i].Name, col.Name, correct, err)
+			}
+			logrus.Infof("✓ 已修复: %s.%s → %s", actual[i].Name, col.Name, correct)
+			col.Name = correct
+		}
+	}
 
-			expectedSQL := goTypeToMySQL(mc.goType, mc.size)
-			if hasTypeConflict(dbCol.dataType, dbCol.colType, mc.goType) {
-				sql := fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `%s` %s",
-					tableName, mc.colTag, expectedSQL)
-				if err := DB.InternalDB().Exec(sql).Error; err != nil {
-					failed = append(failed, fmt.Sprintf(
-						"表 %s.%s: 类型不兼容\n  数据库类型: %s (%s)\n  模型期望:   %s (Go %s)\n  尝试执行: %s\n  失败原因: %v",
-						tableName, mc.colTag, dbCol.dataType, dbCol.colType,
-						expectedSQL, mc.goType, sql, err))
-				} else {
-					logrus.Infof("✓ 已修复: %s.%s 类型 %s → %s",
-						tableName, mc.colTag, dbCol.dataType, expectedSQL)
+	// 同步索引中的列名（若索引引用了被改名的列）
+	for i := range actual {
+		for j := range actual[i].Indexes {
+			for k, c := range actual[i].Indexes[j].Columns {
+				if strings.HasSuffix(c, "_ul_id") {
+					actual[i].Indexes[j].Columns[k] = strings.TrimSuffix(c, "_ul_id") + "_ulid"
 				}
 			}
 		}
 	}
 
-	return failed
-}
-
-func getDBColumnInfo(tableName string) map[string]dbColInfo {
-	sqlDB, err := DB.InternalDB().DB()
-	if err != nil {
-		return nil
-	}
-
-	rows, err := sqlDB.Query(
-		"SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.columns "+
-			"WHERE table_schema = ? AND table_name = ?",
-		config.Cfg.MySQL.Database, tableName)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	result := make(map[string]dbColInfo)
-	for rows.Next() {
-		var colName, dataType, colType string
-		if err := rows.Scan(&colName, &dataType, &colType); err != nil {
-			continue
-		}
-		result[colName] = dbColInfo{dataType: dataType, colType: colType}
-	}
-	return result
-}
-
-func getModelColumnInfo(model interface{}) []modelColInfo {
-	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return nil
-	}
-
-	var result []modelColInfo
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.Anonymous {
-			if f.Type.Kind() == reflect.Struct {
-				result = append(result, getModelColumnInfo(reflect.New(f.Type).Interface())...)
-			}
-			continue
-		}
-
-		colTag := extractColumnTag(f.Tag.Get("gorm"))
-		if colTag == "" {
-			continue
-		}
-
-		size := extractSizeTag(f.Tag.Get("gorm"))
-		goType := resolveGoType(f.Type)
-
-		result = append(result, modelColInfo{
-			goType: goType,
-			colTag: colTag,
-			size:   size,
-		})
-	}
-	return result
-}
-
-func extractColumnTag(gormTag string) string {
-	parts := strings.Split(gormTag, ";")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if strings.HasPrefix(p, "column:") {
-			return strings.TrimPrefix(p, "column:")
-		}
-	}
-	return ""
-}
-
-func extractSizeTag(gormTag string) int {
-	parts := strings.Split(gormTag, ";")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if strings.HasPrefix(p, "size:") {
-			var v int
-			fmt.Sscanf(strings.TrimPrefix(p, "size:"), "%d", &v)
-			return v
-		}
-	}
-	return 0
-}
-
-func resolveGoType(t reflect.Type) string {
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	switch t.Kind() {
-	case reflect.String:
-		return "string"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return "int"
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return "uint"
-	case reflect.Float32, reflect.Float64:
-		return "float"
-	case reflect.Bool:
-		return "bool"
-	case reflect.Struct:
-		return "struct"
-	default:
-		return t.Kind().String()
-	}
-}
-
-func goTypeToMySQL(goType string, size int) string {
-	switch goType {
-	case "string":
-		if size > 0 {
-			return fmt.Sprintf("VARCHAR(%d)", size)
-		}
-		return "VARCHAR(255)"
-	case "int":
-		return "INT"
-	case "uint":
-		return "INT UNSIGNED"
-	case "float":
-		return "DOUBLE"
-	case "bool":
-		return "TINYINT(1)"
-	case "struct":
-		return "DATETIME"
-	default:
-		return "VARCHAR(255)"
-	}
-}
-
-func hasTypeConflict(dbDataType, dbColType, goType string) bool {
-	dbLower := strings.ToLower(dbDataType)
-	switch goType {
-	case "string":
-		if containsAny(dbLower, "varchar", "char", "text", "json", "enum", "longtext", "mediumtext", "tinytext") {
-			return false
-		}
-	case "int", "uint":
-		if containsAny(dbLower, "int", "integer") {
-			return false
-		}
-	case "float":
-		if containsAny(dbLower, "float", "double", "decimal") {
-			return false
-		}
-	case "bool":
-		if containsAny(dbLower, "tinyint", "bit") {
-			return false
-		}
-	case "struct":
-		if containsAny(dbLower, "datetime", "timestamp", "date", "time") {
-			return false
-		}
-	}
-	return true
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func getTableName(model interface{}) string {
-	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return ""
-	}
-	name := t.Name()
-	var result []rune
-	for i, r := range name {
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			result = append(result, '_')
-		}
-		result = append(result, r)
-	}
-	return strings.ToLower(string(result))
-}
-
-func correctToWrongULIDName(correct string) string {
-	return strings.Replace(correct, "_ulid", "_ul_id", 1)
-}
-
-// isError1091 检查错误链中是否包含 MySQL Error 1091（Can't DROP — 删除不存在的列/索引）。
-//
-// GORM AutoMigrate 在索引/列重命名时会尝试 DROP 旧名称，若表被外部重建过导致旧对象已不存在，
-// MySQL 将返回 Error 1091，GORM 会立即停止处理后续模型。本函数用于识别此场景，配合重试机制
-// 确保所有模型都能被 AutoMigrate 处理到。
-func isError1091(err error) bool {
-	for err != nil {
-		// 兜底：字符串匹配
-		if strings.Contains(err.Error(), "Error 1091") {
-			return true
-		}
-		var mysqlErr *mysqldrv.MySQLError
-		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1091 {
-			return true
-		}
-		err = errors.Unwrap(err)
-	}
-	return false
+	return actual, nil
 }

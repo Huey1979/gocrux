@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"time"
 
 	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/internal/database/mysql"
@@ -116,32 +117,27 @@ func (r *CRUDRepository[M]) ReadDB(ctx context.Context) *gorm.DB {
 
 // Insert 插入一条记录
 // explicitCols 非空时仅显式写入这些列（BUG-045：请求显式零值字段真实落库）。
-// BUG-047：白名单模式改用 map 插入——GORM struct Create 对 default:<非零> 可解析 tag +
-// 零值字段会无条件用默认值覆盖并写回实体（callbacks/create.go），Select 白名单无法豁免；
-// map 路径（ConvertMapToValuesForCreate）值原样落库（0 就是 0）。
+// 方案 B（default 只允许 0 值/无）后恢复 struct+Select 白名单路径：无非零 default tag 时
+// GORM create 回调不再用默认值覆盖零值，显式 0 原样落库，map 绕过不再必要（BUG-047 方案 A 回退）。
 func (r *CRUDRepository[M]) Insert(ctx context.Context, entity *M, explicitCols ...string) error {
 	db := r.DB(ctx)
 	if len(explicitCols) > 0 {
-		return db.Model(new(M)).Create(EntityToMapByColumns(entity, explicitCols)).Error
+		return db.Model(new(M)).Select(explicitCols).Create(entity).Error
 	}
 	return db.Create(entity).Error
 }
 
 // InsertBatch 批量插入记录
 // explicitCols 非空时仅显式写入这些列（BUG-045），空 = 默认行为。
-// BUG-047：白名单模式改用 []map 批量插入（理由同 Insert，map 值原样落库）。
-// 所有行按同一 explicitCols 构造，保证列集一致（GORM 批量 map 插入对缺列行补 NULL）。
+// 方案 B（default 只允许 0 值/无）后恢复 struct+Select 白名单路径（理由同 Insert，
+// BUG-047 方案 A 回退）：无非零 default tag 时 GORM 不再用默认值覆盖零值字段。
 func (r *CRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M, explicitCols ...string) error {
 	if len(entities) == 0 {
 		return nil
 	}
 	db := r.DB(ctx)
 	if len(explicitCols) > 0 {
-		rows := make([]map[string]any, 0, len(entities))
-		for _, ent := range entities {
-			rows = append(rows, EntityToMapByColumns(ent, explicitCols))
-		}
-		return db.Model(new(M)).Create(rows).Error
+		return db.Model(new(M)).Select(explicitCols).Create(entities).Error
 	}
 	return db.Create(entities).Error
 }
@@ -188,7 +184,11 @@ func (r *CRUDRepository[M]) ExistsByField(ctx context.Context, field string, val
 }
 
 // Save 保存记录（upsert，根据主键判断 create 还是 update）
+// BUG-049：不再裸调 db.Save——裸 Save 绕过 gocrux 审计字段维护，业务调用方
+// （如版本化 _doActivate）未设 CreatedAt 时，零值时间戳全字段写库触发 MySQL
+// Error 1292 ('0000-00-00')。收口：写前统一回填零值的审计时间字段（CreatedAt/UpdatedAt）。
 func (r *CRUDRepository[M]) Save(ctx context.Context, entity *M) error {
+	ensureAuditTime(entity)
 	return r.DB(ctx).Save(entity).Error
 }
 
@@ -725,82 +725,67 @@ func extractColumn(tag string, defaultVal string) string {
 }
 
 // ============================================================
-// 实体 → map（BUG-047 白名单插入）
+// 审计字段维护（BUG-049）
 // ============================================================
 
-// EntityToMapByColumns 按列白名单将实体反射为 map（列名 → 字段值），供 GORM map 插入使用。
-// BUG-047：GORM struct Create 对 default:<非零> 可解析 tag + 零值字段无条件用默认值覆盖并
-// 写回实体（callbacks/create.go line 288-292），Select 白名单无法豁免；map 插入路径
-// （ConvertMapToValuesForCreate）值原样落库（0 就是 0），彻底绕过该行为。
-// 列名 → Go 字段解析规则与 service.resolveColumnFromDB 对齐（gorm column → bson → snake 兜底）。
-// 注意：批量插入时调用方必须对每行传同一 cols（白名单全局并集），保证各行键集一致——
-// GORM 批量 map 插入对缺列的行补 NULL，列集不一致会在 NOT NULL 列误插 NULL。
-func EntityToMapByColumns(entity any, cols []string) map[string]any {
-	row := make(map[string]any, len(cols))
+var timeType = reflect.TypeOf(time.Time{})
+
+// ensureAuditTime 写前统一维护审计时间字段：实体中 CreatedAt/UpdatedAt 为零值
+// （time.Time{} 或 nil 指针）时回填当前时间。
+// 用于收口裸 db.Save——GORM Save 全字段写回，零值时间戳写 MySQL 会触发
+// Error 1292 '0000-00-00'（BUG-049：repo.Save 绕过 gocrux 审计字段维护钩子）。
+// 反射遍历支持匿名嵌入 struct（如 AuditFields）；未导出字段跳过。
+func ensureAuditTime(entity any) {
+	now := time.Now()
 	rv := reflect.ValueOf(entity)
 	for rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
-			return row
+			return
 		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return row
+		return
 	}
-	for _, col := range cols {
-		if idx, ok := columnFieldIndex(rv.Type(), col); ok {
-			fv := rv.FieldByIndex(idx)
-			if fv.IsValid() && fv.CanInterface() {
-				row[col] = fv.Interface()
-			}
-		}
-	}
-	return row
+	walkSetTimeField(rv, "CreatedAt", now)
+	walkSetTimeField(rv, "UpdatedAt", now)
 }
 
-// columnFieldIndex 按存储列名（gorm column → bson tag → snake 约定）查找 Go 字段索引路径。
-// 支持嵌入 struct（如 gorm.DeletedAt）递归；未导出字段跳过。
-// BUG-048：匿名嵌入 struct 本身无 DB 列名（其子字段由 GORM 展开），不作为 map key 匹配，
-// 仅递归查找带真实列名的子字段——否则反查 audit_fields 命中嵌入字段本身 →
-// row[audit_fields]=struct → GORM 批量 map 插入报 unsupported type。
-func columnFieldIndex(t reflect.Type, col string) ([]int, bool) {
-	if col == "" {
-		return nil, false
-	}
-	var walk func(typ reflect.Type, prefix []int) ([]int, bool)
-	walk = func(typ reflect.Type, prefix []int) ([]int, bool) {
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			if f.PkgPath != "" { // 未导出字段跳过
-				continue
+// walkSetTimeField 递归查找并回填指定名称的零值时间字段。
+func walkSetTimeField(rv reflect.Value, fieldName string, now time.Time) {
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if f.PkgPath != "" { // 未导出字段跳过
+			continue
+		}
+		fv := rv.Field(i)
+		// 匿名嵌入 struct → 递归
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			walkSetTimeField(fv, fieldName, now)
+			continue
+		}
+		if f.Name != fieldName {
+			continue
+		}
+		switch {
+		case f.Type == timeType:
+			// time.Time 值类型：仅零值回填
+			if tv, _ := fv.Interface().(time.Time); tv.IsZero() && fv.CanSet() {
+				fv.Set(reflect.ValueOf(now))
 			}
-			// 匿名嵌入 struct：本身不参与列名匹配，仅递归其带真实列名的子字段
-			if f.Anonymous && f.Type.Kind() == reflect.Struct {
-				if idx, ok := walk(f.Type, appendPath(prefix, i)); ok {
-					return idx, true
+		case f.Type.Kind() == reflect.Ptr && f.Type.Elem() == timeType:
+			// *time.Time：nil 或指向零值 → 回填
+			if fv.IsNil() && fv.CanSet() {
+				nt := now
+				fv.Set(reflect.ValueOf(&nt))
+			} else if !fv.IsNil() && fv.Elem().CanSet() {
+				if tv, _ := fv.Elem().Interface().(time.Time); tv.IsZero() {
+					fv.Elem().Set(reflect.ValueOf(now))
 				}
-				continue
-			}
-			if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c != "" && c == col {
-				return appendPath(prefix, i), true
-			}
-			if b := f.Tag.Get("bson"); b != "" && b != "-" && b == col {
-				return appendPath(prefix, i), true
-			}
-			if common.ToSnakeCase(f.Name) == col {
-				return appendPath(prefix, i), true
 			}
 		}
-		return nil, false
 	}
-	return walk(t, nil)
-}
-
-// appendPath 追加字段索引到路径（返回新切片，不修改原切片）。
-func appendPath(prefix []int, i int) []int {
-	idx := make([]int, 0, len(prefix)+1)
-	idx = append(idx, prefix...)
-	return append(idx, i)
 }
 
 // ============================================================

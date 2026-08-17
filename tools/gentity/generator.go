@@ -171,12 +171,39 @@ func buildGormTag(col ColumnInfo) string {
 	} else if strings.HasPrefix(t, "json") {
 		parts = append(parts, "type:json")
 	}
-	// 默认值
+	// 默认值（方案 B：default 只允许 0 值/无）
+	//   - 0 值默认（"0"/"0.0"/"false"/""）→ 保留 gorm default tag（GORM 填充等价，无副作用）
+	//   - 非零默认（"1"/"active"/"CURRENT_TIMESTAMP"）→ 生成 default:(-)，禁止 GORM 默认填充。
+	//     非零默认的语义由 SetDefaults() 在 Go 层承担（_beforeCreate 顺序：
+	//     SetDefaults → SetCreatedAt/At → MergeTo，请求值最后覆盖）。
+	//     原因：GORM create 回调对 default:<非零> 可解析 tag + 零值字段会无条件用默认值
+	//     覆盖并写回实体（callbacks/create.go），Select 白名单也无法豁免（BUG-047），
+	//     导致请求显式 0 落库变 1（BUG-045 根因）。
 	if col.Default.Valid {
-		parts = append(parts, fmt.Sprintf("default:%s", col.Default.String))
+		if isZeroColumnDefault(col) {
+			parts = append(parts, fmt.Sprintf("default:%s", col.Default.String))
+		} else {
+			parts = append(parts, "default:(-)")
+		}
 	}
 
 	return strings.Join(parts, ";")
+}
+
+// isZeroColumnDefault 判断 DB 列默认值是否为 0 值（方案 B 允许 default 只保留 0 值/无）。
+// 去引号/去空白后为 ""、"0"、"0.0"、"false" → 0 值；其余（"1"、"active"、
+// "CURRENT_TIMESTAMP" 等）→ 非零。
+func isZeroColumnDefault(col ColumnInfo) bool {
+	if !col.Default.Valid {
+		return false
+	}
+	v := strings.TrimSpace(col.Default.String)
+	v = strings.Trim(v, "'\"")
+	switch strings.ToLower(v) {
+	case "", "0", "0.0", "false":
+		return true
+	}
+	return false
 }
 
 // ============================================================

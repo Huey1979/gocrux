@@ -643,9 +643,10 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 			// BUG-045：请求显式字段列名白名单 → 新版本行显式零值真实落库
 			cols := createColumnWhitelist([]*M{pair.New}, explicitColumnsFrom(ctx))
 			if len(cols) > 0 {
-				// BUG-047：白名单模式改用 map 插入——GORM struct Create 的 default 填充
-				// 会覆盖零值（Select 白名单无法豁免），map 值原样落库（0 就是 0）
-				return tx.Model(new(M)).Create(repository.EntityToMapByColumns(pair.New, cols)).Error
+				// 方案 B（default 只允许 0 值/无）后恢复 struct+Select：
+				// 无非零 default tag，GORM create 回调不再用默认值覆盖零值字段，
+				// 显式 0 原样落库，map 绕过不再必要（BUG-047 方案 A 回退）
+				return tx.Model(new(M)).Select(cols).Create(pair.New).Error
 			}
 			return tx.Create(pair.New).Error
 		})

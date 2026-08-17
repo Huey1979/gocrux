@@ -107,6 +107,15 @@ func main() {
 		}
 		fmt.Printf("(%d 列) ", len(ti.Columns))
 
+		// 方案 B 生成期提示：非零 DB 默认值的列，gorm tag 不再生成 default:xxx（改 default:(-)），
+		// 非零默认语义由 SetDefaults() 承担（避免 GORM default 填充覆盖请求显式零值）。
+		for _, col := range ti.Columns {
+			if col.Default.Valid && !isZeroColumnDefault(col) {
+				fmt.Printf("\n  提示: 列 %s 默认值 %q 非零（方案 B），gorm tag 将生成 default:(-)，默认值语义由 SetDefaults() 承担",
+					col.Name, col.Default.String)
+			}
+		}
+
 		// 生成实体（传入字段配置）
 		entityPath := filepath.Join(entityDir, tName+".go")
 		if err := os.WriteFile(entityPath, []byte(generateEntity(ti, cfg)), 0644); err != nil {

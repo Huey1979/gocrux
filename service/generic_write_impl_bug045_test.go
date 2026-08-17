@@ -3,19 +3,18 @@ package service
 import (
 	"testing"
 	"time"
-
-	"github.com/Huey1979/gocrux/repository"
 )
 
-// bug045Doc 模拟带非零 DB 默认值的数值字段实体（如 is_enabled default:1）。
+// bug045Doc 模拟方案 B 形态的实体：default tag 只允许 0 值/无，非零 DB 默认值
+// （如 is_enabled 原 default:1）的语义由 SetDefaults() 在 Go 层承担。
 type bug045Doc struct {
 	ID         string    `gorm:"column:id;primaryKey" json:"id"`
 	Name       string    `gorm:"column:name" json:"name"`
-	IsEnabled  int8      `gorm:"column:is_enabled;default:1" json:"is_enabled"`
+	IsEnabled  int8      `gorm:"column:is_enabled" json:"is_enabled"`
 	IsDeleted  int8      `gorm:"column:is_deleted" json:"is_deleted"`
 	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
-	FormConfig string    `gorm:"type:json" json:"form_config"`  // BUG-046：无 column: 名，snake 兜底
-	Extra      string    `bson:"extra_data" json:"extra"`        // BUG-046：无 gorm tag，bson 兜底
+	FormConfig string    `gorm:"type:json" json:"form_config"` // BUG-046：无 column: 名，snake 兜底
+	Extra      string    `bson:"extra_data" json:"extra"`      // BUG-046：无 gorm tag，bson 兜底
 }
 
 func (d *bug045Doc) SetDefaults()                {}
@@ -125,28 +124,6 @@ func TestCreateColumnWhitelist(t *testing.T) {
 	}
 }
 
-// TestBug047WhitelistMapPreservesExplicitZero 验证 BUG-047 修复组合：
-// createColumnWhitelist 产出的白名单经 repository.EntityToMapByColumns 转为 map 时，
-// 显式零值字段（default:1 的 is_enabled=0）值原样保留，不被 GORM struct default 填充覆盖。
-func TestBug047WhitelistMapPreservesExplicitZero(t *testing.T) {
-	doc := &bug045Doc{ID: "ulid1", Name: "x", IsEnabled: 0, CreatedAt: time.Now(), FormConfig: "{}"}
-	cols := createColumnWhitelist[*bug045Doc]([]**bug045Doc{&doc}, []string{"is_enabled"})
-	row := repository.EntityToMapByColumns(doc, cols)
-
-	if v, ok := row["is_enabled"]; !ok || v != int8(0) {
-		t.Errorf("BUG-047: is_enabled must be preserved as 0 in map, got %#v", v)
-	}
-	if v, ok := row["id"]; !ok || v != "ulid1" {
-		t.Errorf("id missing/wrong: %#v", v)
-	}
-	if v, ok := row["form_config"]; !ok || v != "{}" {
-		t.Errorf("type:json form_config missing/wrong: %#v", v)
-	}
-	if _, ok := row["is_deleted"]; ok {
-		t.Errorf("zero-value non-explicit col is_deleted must not be in map: %#v", row)
-	}
-}
-
 // Bug048Audit（导出类型，与 heims AuditFields 一致）/ bug048Doc 模拟嵌入 AuditFields 的实体（BUG-048）。
 type Bug048Audit struct {
 	CreatedBy string    `gorm:"column:created_by;size:26" json:"created_by"`
@@ -161,8 +138,8 @@ type bug048Doc struct {
 
 // TestCollectNonZeroColumnsSkipsEmbeddedStruct 验证 BUG-048：
 // 匿名嵌入 struct（AuditFields，子字段非零 → 嵌入字段本身非零）不得被
-// ToSnakeCase 兜底为 audit_fields 收进白名单（旧 Select 静默忽略无害，
-// BUG-047 map 路径会 row[audit_fields]=struct → 500）。
+// ToSnakeCase 兜底为 audit_fields 收进白名单（旧 Select 静默忽略无害；
+// BUG-047 map 路径曾 row[audit_fields]=struct → 500，map 已回退，防御逻辑保留）。
 func TestCollectNonZeroColumnsSkipsEmbeddedStruct(t *testing.T) {
 	doc := &bug048Doc{ID: "ulid1", Name: "x", Bug048Audit: Bug048Audit{CreatedBy: "u1", CreatedAt: time.Now()}}
 	cols := collectNonZeroColumns(doc)

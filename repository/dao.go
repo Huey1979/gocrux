@@ -125,7 +125,8 @@ func (d *BaseDAO) Update(ctx context.Context, entity interface{}) error {
 	// 1. 扩展：更新前处理（如版本管理）
 	d.onBeforeUpdate(entity)
 
-	// 2. 数据库更新
+	// 2. 数据库更新（收口 db.Save：写前回填零值审计时间字段，BUG-049）
+	ensureAuditTime(entity)
 	if err := mysql.DB.WithCtx(ctx).Save(entity).Error; err != nil {
 		return err
 	}
