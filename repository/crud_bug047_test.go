@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -125,5 +126,55 @@ func TestInsertBatchWhitelistSkipsGormDefaultFill(t *testing.T) {
 	}
 	if got2.IsEnabled != 1 || got2.ListPageSize != 20 {
 		t.Errorf("sanity: struct+Select should still be filled with defaults (1/20), got %d/%d", got2.IsEnabled, got2.ListPageSize)
+	}
+}
+
+// Bug048Audit 模拟 heims AuditFields（导出类型，与真实 entity 一致）：匿名嵌入的审计字段 struct。
+type Bug048Audit struct {
+	CreatedBy string    `gorm:"column:created_by;size:26" json:"created_by"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+}
+
+// bug048Doc 模拟嵌入 AuditFields 的实体（SysForm/SysBiChart 等 124 个 entity，BUG-048）。
+type bug048Doc struct {
+	ID   string `gorm:"column:id;primaryKey" json:"id"`
+	Name string `gorm:"column:name" json:"name"`
+	Bug048Audit
+}
+
+// TestEntityToMapByColumnsSkipsEmbeddedStruct 验证 BUG-048：
+// 匿名嵌入 struct 本身无 DB 列名，columnFieldIndex 反查其 snake 名必须失败（不产 struct 值），
+// 但其带真实列名的子字段（created_by/created_at）仍可递归命中。
+func TestEntityToMapByColumnsSkipsEmbeddedStruct(t *testing.T) {
+	now := time.Now()
+	doc := &bug048Doc{ID: "ulid1", Name: "x", Bug048Audit: Bug048Audit{CreatedBy: "u1", CreatedAt: now}}
+
+	// 嵌入字段本身（ToSnakeCase 兜底为 audit_fields）：不得作为 map key，否则 row[audit_fields]=struct
+	row := EntityToMapByColumns(doc, []string{"id", "name", "audit_fields"})
+	if _, ok := row["audit_fields"]; ok {
+		t.Errorf("BUG-048: embedded struct must not become map key audit_fields: %#v", row)
+	}
+	if v, ok := row["id"]; !ok || v != "ulid1" {
+		t.Errorf("id missing/wrong: %#v", v)
+	}
+	if v, ok := row["name"]; !ok || v != "x" {
+		t.Errorf("name missing/wrong: %#v", v)
+	}
+
+	// 嵌入子字段（真实列名）仍可反查命中
+	row2 := EntityToMapByColumns(doc, []string{"created_by", "created_at"})
+	if v, ok := row2["created_by"]; !ok || v != "u1" {
+		t.Errorf("embedded child created_by missing/wrong: %#v", v)
+	}
+	if v, ok := row2["created_at"]; !ok || v != now {
+		t.Errorf("embedded child created_at missing/wrong: %#v", v)
+	}
+
+	// columnFieldIndex 直接断言（传解指针后的 struct 类型）
+	if _, ok := columnFieldIndex(reflect.TypeOf(doc).Elem(), "audit_fields"); ok {
+		t.Error("BUG-048: columnFieldIndex must not resolve embedded struct name audit_fields")
+	}
+	if _, ok := columnFieldIndex(reflect.TypeOf(doc).Elem(), "created_by"); !ok {
+		t.Error("embedded child column created_by must be resolvable")
 	}
 }

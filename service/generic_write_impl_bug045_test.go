@@ -146,3 +146,34 @@ func TestBug047WhitelistMapPreservesExplicitZero(t *testing.T) {
 		t.Errorf("zero-value non-explicit col is_deleted must not be in map: %#v", row)
 	}
 }
+
+// Bug048Audit（导出类型，与 heims AuditFields 一致）/ bug048Doc 模拟嵌入 AuditFields 的实体（BUG-048）。
+type Bug048Audit struct {
+	CreatedBy string    `gorm:"column:created_by;size:26" json:"created_by"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+}
+
+type bug048Doc struct {
+	ID   string `gorm:"column:id;primaryKey" json:"id"`
+	Name string `gorm:"column:name" json:"name"`
+	Bug048Audit
+}
+
+// TestCollectNonZeroColumnsSkipsEmbeddedStruct 验证 BUG-048：
+// 匿名嵌入 struct（AuditFields，子字段非零 → 嵌入字段本身非零）不得被
+// ToSnakeCase 兜底为 audit_fields 收进白名单（旧 Select 静默忽略无害，
+// BUG-047 map 路径会 row[audit_fields]=struct → 500）。
+func TestCollectNonZeroColumnsSkipsEmbeddedStruct(t *testing.T) {
+	doc := &bug048Doc{ID: "ulid1", Name: "x", Bug048Audit: Bug048Audit{CreatedBy: "u1", CreatedAt: time.Now()}}
+	cols := collectNonZeroColumns(doc)
+	got := map[string]bool{}
+	for _, c := range cols {
+		got[c] = true
+	}
+	if got["audit_fields"] {
+		t.Errorf("BUG-048: embedded struct must not be collected as audit_fields: %v", cols)
+	}
+	if !got["id"] || !got["name"] {
+		t.Errorf("normal non-zero columns must be kept: %v", cols)
+	}
+}

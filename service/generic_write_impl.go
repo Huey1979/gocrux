@@ -154,6 +154,13 @@ func collectNonZeroColumns(m any) []string {
 		if f.PkgPath != "" { // 未导出字段跳过
 			continue
 		}
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			// BUG-048：匿名嵌入 struct（AuditFields / gorm.DeletedAt）本身无 DB 列名，
+			// 其子字段由 GORM 展开处理。此前被 ToSnakeCase 兜底为 audit_fields 收进白名单，
+			// BUG-047 map 路径反查命中嵌入字段本身 → row[audit_fields]=struct → 500
+			// "unsupported type ...AuditFields, a struct"。
+			continue
+		}
 		if f.Type.Kind() == reflect.Ptr || f.Type.Kind() == reflect.Interface {
 			continue // 指针/接口字段零值=nil，GORM 默认不插入，跳过
 		}

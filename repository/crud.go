@@ -760,6 +760,9 @@ func EntityToMapByColumns(entity any, cols []string) map[string]any {
 
 // columnFieldIndex 按存储列名（gorm column → bson tag → snake 约定）查找 Go 字段索引路径。
 // 支持嵌入 struct（如 gorm.DeletedAt）递归；未导出字段跳过。
+// BUG-048：匿名嵌入 struct 本身无 DB 列名（其子字段由 GORM 展开），不作为 map key 匹配，
+// 仅递归查找带真实列名的子字段——否则反查 audit_fields 命中嵌入字段本身 →
+// row[audit_fields]=struct → GORM 批量 map 插入报 unsupported type。
 func columnFieldIndex(t reflect.Type, col string) ([]int, bool) {
 	if col == "" {
 		return nil, false
@@ -771,6 +774,13 @@ func columnFieldIndex(t reflect.Type, col string) ([]int, bool) {
 			if f.PkgPath != "" { // 未导出字段跳过
 				continue
 			}
+			// 匿名嵌入 struct：本身不参与列名匹配，仅递归其带真实列名的子字段
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				if idx, ok := walk(f.Type, appendPath(prefix, i)); ok {
+					return idx, true
+				}
+				continue
+			}
 			if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c != "" && c == col {
 				return appendPath(prefix, i), true
 			}
@@ -779,12 +789,6 @@ func columnFieldIndex(t reflect.Type, col string) ([]int, bool) {
 			}
 			if common.ToSnakeCase(f.Name) == col {
 				return appendPath(prefix, i), true
-			}
-			// 嵌入 struct（如 gorm.DeletedAt）递归
-			if f.Anonymous && f.Type.Kind() == reflect.Struct {
-				if idx, ok := walk(f.Type, appendPath(prefix, i)); ok {
-					return idx, true
-				}
 			}
 		}
 		return nil, false
