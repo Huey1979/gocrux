@@ -89,7 +89,6 @@ type Site struct {
 
 // 必须实现 service.Record 接口
 func (s *Site) SetDefaults()                {}
-func (s *Site) SetID()                      { s.SiteULID = common.NewULID() }
 func (s *Site) SetCreatedAt(t time.Time)    { s.CreatedAt = t }
 func (s *Site) SetCreatedBy(userID string)  {}
 func (s *Site) SetUpdatedAt(t time.Time)    { s.UpdatedAt = t }
@@ -366,7 +365,6 @@ sess := common.GetMongoSession(ctx)         // MongoCRUDRepository 获取 Sessio
 ```go
 type Record interface {
     SetDefaults()                     // 设置默认值
-    SetID()                           // 自动生成主键（ULID/自增）
     SetCreatedAt(t time.Time)         // 设置创建时间
     SetCreatedBy(userID string)       // 设置创建人
     SetUpdatedAt(t time.Time)         // 设置更新时间
@@ -377,6 +375,8 @@ type Record interface {
     SelfFKField() string              // 自关联外键字段名（如 "parent_ulid"）；空字符串=无自关联
 }
 ```
+
+> **说明**：`SetID()` 已从接口移除——主键 ULID 由框架在 `_beforeCreate` 中自动生成（依据 `PKField()` 反向解析 Go 字段名），实体无需再实现。
 
 ### 软删除
 
@@ -394,6 +394,14 @@ type Record interface {
 
 - 返回 `true` 时实体需提供 `VersionStatus` 字段（通过 `VersionFieldMapping` 映射）
 - 版本化模式下，Update 创建新草稿；Activate 发布草稿为正式版本
+
+### 框架级写入兜底（BUG-044 / BUG-045）
+
+写入管线（Create / Update / 版本化 Update）在 MergeTo 之后、入库之前自动执行两项兜底，无需业务配置：
+
+**type:json 空串归一化（BUG-044）** — string 类型 + gorm tag 含 `type:json` 的字段，若 MergeTo 后值为 `""`，自动改写为 `"null"`。MySQL JSON 列不接受空字符串（Error 3140），实体 `SetDefaults()` 兜底防不了显式传空串（MergeTo 覆盖），由框架层统一归一化。`"null"` 对任意 JSON 目标类型（slice/map/struct）均合法，语义中性（表示"无配置"）。
+
+**显式零值字段真实落库（BUG-045）** — Create / 版本化 Update 插入时，请求中**显式出现**的零值字段（`0`/`false`/`""`）通过 GORM `Create().Select(白名单)` 真实落库，不被 GORM 零值忽略 + DB 列默认值覆盖（如 `is_enabled=0` 不再落库变 `1`）。白名单 = 实体非零字段列 ∪ 请求显式字段列；请求未显式传的零值字段仍走 DB 默认值，行为与旧版一致。实现依赖可选接口 `RequestFields`（`MapRequest` 已内置实现 `Data()`），业务自定义 Request 实现 `Data() map[string]any` 即可生效。
 
 ---
 
@@ -1359,6 +1367,10 @@ Config[entity.Site]{
 2. 深拷贝 → 合并请求字段 → 生成新 ULID + 新 VersionCode
 3. 事务中：旧行 `is_current=0` → 插入新行 `is_current=1`，新版本默认为 `draft`
 
+### 版本化 Create 的 code 冲突检测
+
+版本化实体 Create 时不允许使用已存在的 code（应去 Update 而非 Create）；冲突检测与 `EnableUniqueValidation` 唯一性校验均排除已废弃版本（`is_current=0`，删除版本化记录时置位），删除后同 code 可复用（BUG-042）。
+
 ### Activate（发布/回滚）
 
 ```http
@@ -1917,7 +1929,7 @@ generated/
 | 方法 | 行为 |
 |------|------|
 | `SetDefaults()` | 遍历 DEFAULT 值，零值时回填 |
-| `SetID()` | 主键为 `*_ulid` 生成 ULID；自增主键空操作 |
+| `SetID()` | 主键为 `*_ulid` 生成 ULID；自增主键空操作（**框架层已在 `_beforeCreate` 自动生成 PK，此方法保留兼容、不再被调用**） |
 | `SetCreatedAt(t)` | 若表存在 `created_at`（或映射列）则赋值 |
 | `SetCreatedBy(uid)` | 若表存在 `created_by`（或映射列）则赋值 |
 | `SetUpdatedAt(t)` | 若表存在 `updated_at`（或映射列）则赋值 |

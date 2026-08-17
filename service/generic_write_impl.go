@@ -34,29 +34,39 @@ func (s *GenericService[M]) checkUnique(ctx context.Context, entities []*M, excl
 	return nil
 }
 
-// normalizeJSONFields 将 gorm:"type:json" 的 string 字段空串归一化为合法 JSON "null"（BUG-044）。
-// 位置：所有 MergeTo 之后、入库之前（_beforeCreate / _beforeUpdate / _beforeUpdateVersioned）。
-// 背景：MySQL JSON 列不接受空字符串 ""（Error 3140），实体 SetDefaults() 兜底防不了
-// 显式传空串（MergeTo 覆盖），此处做框架级兜底。
-func normalizeJSONFields[M Record](m *M) {
-	normalizeJSONValue(m)
-}
-
-// normalizeJSONValue 反射遍历实体字段：string 类型 + gorm tag 含 type:json + 值为 "" → 归一化为 "null"。
-// "null" 对任意 JSON 目标类型（slice/map/struct）json.Unmarshal 均合法，语义中性（表示"无配置"）。
-func normalizeJSONValue(v any) {
+// derefStruct 解指针直到 struct，返回其 reflect.Type 与可反射读取的 reflect.Value。
+// v 为 nil（接口或指针）或最终非 struct 时返回 ok=false，全程不 panic。
+// 供 normalizeJSONValue / collectNonZeroColumns / getFieldVal / getStrField 共用，
+// 消除各函数重复的解指针样板。
+func derefStruct(v any) (reflect.Type, reflect.Value, bool) {
 	t := reflect.TypeOf(v)
+	if t == nil {
+		return nil, reflect.Value{}, false
+	}
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
-			return
+			return nil, reflect.Value{}, false
 		}
 		rv = rv.Elem()
 	}
 	if t.Kind() != reflect.Struct || rv.Kind() != reflect.Struct {
+		return nil, reflect.Value{}, false
+	}
+	return t, rv, true
+}
+
+// normalizeJSONValue 反射遍历实体字段：string 类型 + gorm tag 含 type:json + 值为 "" → 归一化为 "null"（BUG-044）。
+// "null" 对任意 JSON 目标类型（slice/map/struct）json.Unmarshal 均合法，语义中性（表示"无配置"）。
+// 位置：所有 MergeTo 之后、入库之前（_beforeCreate / _beforeUpdate / _beforeUpdateVersioned）。
+// 背景：MySQL JSON 列不接受空字符串 ""（Error 3140），实体 SetDefaults() 兜底防不了
+// 显式传空串（MergeTo 覆盖），此处做框架级兜底。
+func normalizeJSONValue(v any) {
+	t, rv, ok := derefStruct(v)
+	if !ok {
 		return
 	}
 	for i := 0; i < t.NumField(); i++ {
@@ -120,42 +130,19 @@ func collectAllExplicitColumns[M Record](input []CrudRequest[M]) []string {
 }
 
 // isColumnOf 判断 col 是否为实体 M 的真实存储列（gorm column / bson tag / snake 约定）。
+// 复用 resolveColumnFromDB 反向解析（命中即视为真实列），避免重复的字段遍历逻辑。
 func isColumnOf[M Record](col string) bool {
-	var m M
-	t := reflect.TypeOf(m)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+	if col == "" {
+		return false
 	}
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c == col {
-			return true
-		}
-		if b := f.Tag.Get("bson"); b != "" && b != "-" && b == col {
-			return true
-		}
-		if common.ToSnakeCase(f.Name) == col {
-			return true
-		}
-	}
-	return false
+	return resolveColumnFromDB[M](col) != ""
 }
 
 // collectNonZeroColumns 反射实体，收集所有非零字段的存储列名。
 // 非零字段即 GORM 默认会插入的字段，显式列入白名单保持原插入语义。
 func collectNonZeroColumns(m any) []string {
-	t := reflect.TypeOf(m)
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	v := reflect.ValueOf(m)
-	for v.Kind() == reflect.Ptr {
-		if v.IsNil() {
-			return nil
-		}
-		v = v.Elem()
-	}
-	if t.Kind() != reflect.Struct || v.Kind() != reflect.Struct {
+	t, v, ok := derefStruct(m)
+	if !ok {
 		return nil
 	}
 	cols := make([]string, 0, 8)
@@ -227,7 +214,7 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			return nil, err
 		}
 		// BUG-044：MergeTo 后归一化 type:json 空串字段（防显式传 "" 覆盖 SetDefaults 兜底）
-		normalizeJSONFields(&m)
+		normalizeJSONValue(&m)
 
 		// 兜底：MergeTo 后 PK 仍为空 → 框架自动生成 ULID。
 		// 40 个 entity 可逐步删除 SetID() 方法，gocrux 在框架层统一处理 PK 生成。
@@ -510,7 +497,7 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	ent.SetUpdatedAt(time.Now())
 	ent.SetUpdatedBy(GetUserULID(ctx))
 	// BUG-044：MergeTo 后归一化 type:json 空串字段
-	normalizeJSONFields(&ent)
+	normalizeJSONValue(&ent)
 
 	// 5. 唯一性校验（排除自身）
 	if err := s.checkUnique(ctx, []*M{&ent}, id); err != nil {
@@ -553,7 +540,7 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	// 2b. 审计字段（版本化模式下新行是一版全新记录，但仍记录编辑人）
 	newEntity.SetUpdatedBy(GetUserULID(ctx))
 	// BUG-044：MergeTo 后归一化 type:json 空串字段
-	normalizeJSONFields(&newEntity)
+	normalizeJSONValue(&newEntity)
 
 	// 3. 提取旧版本信息
 	oldVal := reflect.ValueOf(*old)

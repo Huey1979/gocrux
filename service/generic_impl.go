@@ -287,11 +287,8 @@ func itoa(n int) string {
 
 // getStrField 反射读取实体指定字段的 string 值
 func getStrField(_entity any, fieldName string) string {
-	v := reflect.ValueOf(_entity)
-	for v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
+	_, v, ok := derefStruct(_entity)
+	if !ok {
 		return ""
 	}
 	f := v.FieldByName(fieldName)
@@ -303,11 +300,8 @@ func getStrField(_entity any, fieldName string) string {
 
 // getFieldVal 反射读取实体指定字段的原始值（保持类型，用于 DB 精确匹配）
 func getFieldVal(_entity any, fieldName string) any {
-	v := reflect.ValueOf(_entity)
-	for v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
+	_, v, ok := derefStruct(_entity)
+	if !ok {
 		return nil
 	}
 	f := v.FieldByName(fieldName)
@@ -389,8 +383,8 @@ func resolveColumnFromDB[M Record](dbColumn string) string {
 		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col == dbColumn {
 			return f.Name
 		}
-		// bson tag（MongoDB）
-		if bsonTag := f.Tag.Get("bson"); bsonTag == dbColumn {
+		// bson tag（MongoDB；"-" 表示忽略，不参与匹配）
+		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" && bsonTag == dbColumn {
 			return f.Name
 		}
 		// snake_case fallback
