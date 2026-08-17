@@ -3,6 +3,8 @@ package service
 import (
 	"testing"
 	"time"
+
+	"github.com/Huey1979/gocrux/repository"
 )
 
 // bug045Doc 模拟带非零 DB 默认值的数值字段实体（如 is_enabled default:1）。
@@ -120,5 +122,27 @@ func TestCreateColumnWhitelist(t *testing.T) {
 	}
 	if got["is_deleted"] {
 		t.Errorf("zero-value non-explicit col is_deleted must not be in whitelist: %v", cols)
+	}
+}
+
+// TestBug047WhitelistMapPreservesExplicitZero 验证 BUG-047 修复组合：
+// createColumnWhitelist 产出的白名单经 repository.EntityToMapByColumns 转为 map 时，
+// 显式零值字段（default:1 的 is_enabled=0）值原样保留，不被 GORM struct default 填充覆盖。
+func TestBug047WhitelistMapPreservesExplicitZero(t *testing.T) {
+	doc := &bug045Doc{ID: "ulid1", Name: "x", IsEnabled: 0, CreatedAt: time.Now(), FormConfig: "{}"}
+	cols := createColumnWhitelist[*bug045Doc]([]**bug045Doc{&doc}, []string{"is_enabled"})
+	row := repository.EntityToMapByColumns(doc, cols)
+
+	if v, ok := row["is_enabled"]; !ok || v != int8(0) {
+		t.Errorf("BUG-047: is_enabled must be preserved as 0 in map, got %#v", v)
+	}
+	if v, ok := row["id"]; !ok || v != "ulid1" {
+		t.Errorf("id missing/wrong: %#v", v)
+	}
+	if v, ok := row["form_config"]; !ok || v != "{}" {
+		t.Errorf("type:json form_config missing/wrong: %#v", v)
+	}
+	if _, ok := row["is_deleted"]; ok {
+		t.Errorf("zero-value non-explicit col is_deleted must not be in map: %#v", row)
 	}
 }

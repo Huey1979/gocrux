@@ -116,23 +116,32 @@ func (r *CRUDRepository[M]) ReadDB(ctx context.Context) *gorm.DB {
 
 // Insert 插入一条记录
 // explicitCols 非空时仅显式写入这些列（BUG-045：请求显式零值字段真实落库）。
+// BUG-047：白名单模式改用 map 插入——GORM struct Create 对 default:<非零> 可解析 tag +
+// 零值字段会无条件用默认值覆盖并写回实体（callbacks/create.go），Select 白名单无法豁免；
+// map 路径（ConvertMapToValuesForCreate）值原样落库（0 就是 0）。
 func (r *CRUDRepository[M]) Insert(ctx context.Context, entity *M, explicitCols ...string) error {
 	db := r.DB(ctx)
 	if len(explicitCols) > 0 {
-		db = db.Select(explicitCols)
+		return db.Model(new(M)).Create(EntityToMapByColumns(entity, explicitCols)).Error
 	}
 	return db.Create(entity).Error
 }
 
 // InsertBatch 批量插入记录
 // explicitCols 非空时仅显式写入这些列（BUG-045），空 = 默认行为。
+// BUG-047：白名单模式改用 []map 批量插入（理由同 Insert，map 值原样落库）。
+// 所有行按同一 explicitCols 构造，保证列集一致（GORM 批量 map 插入对缺列行补 NULL）。
 func (r *CRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M, explicitCols ...string) error {
 	if len(entities) == 0 {
 		return nil
 	}
 	db := r.DB(ctx)
 	if len(explicitCols) > 0 {
-		db = db.Select(explicitCols)
+		rows := make([]map[string]any, 0, len(entities))
+		for _, ent := range entities {
+			rows = append(rows, EntityToMapByColumns(ent, explicitCols))
+		}
+		return db.Model(new(M)).Create(rows).Error
 	}
 	return db.Create(entities).Error
 }
@@ -716,3 +725,79 @@ func extractColumn(tag string, defaultVal string) string {
 }
 
 // ============================================================
+// 实体 → map（BUG-047 白名单插入）
+// ============================================================
+
+// EntityToMapByColumns 按列白名单将实体反射为 map（列名 → 字段值），供 GORM map 插入使用。
+// BUG-047：GORM struct Create 对 default:<非零> 可解析 tag + 零值字段无条件用默认值覆盖并
+// 写回实体（callbacks/create.go line 288-292），Select 白名单无法豁免；map 插入路径
+// （ConvertMapToValuesForCreate）值原样落库（0 就是 0），彻底绕过该行为。
+// 列名 → Go 字段解析规则与 service.resolveColumnFromDB 对齐（gorm column → bson → snake 兜底）。
+// 注意：批量插入时调用方必须对每行传同一 cols（白名单全局并集），保证各行键集一致——
+// GORM 批量 map 插入对缺列的行补 NULL，列集不一致会在 NOT NULL 列误插 NULL。
+func EntityToMapByColumns(entity any, cols []string) map[string]any {
+	row := make(map[string]any, len(cols))
+	rv := reflect.ValueOf(entity)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return row
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return row
+	}
+	for _, col := range cols {
+		if idx, ok := columnFieldIndex(rv.Type(), col); ok {
+			fv := rv.FieldByIndex(idx)
+			if fv.IsValid() && fv.CanInterface() {
+				row[col] = fv.Interface()
+			}
+		}
+	}
+	return row
+}
+
+// columnFieldIndex 按存储列名（gorm column → bson tag → snake 约定）查找 Go 字段索引路径。
+// 支持嵌入 struct（如 gorm.DeletedAt）递归；未导出字段跳过。
+func columnFieldIndex(t reflect.Type, col string) ([]int, bool) {
+	if col == "" {
+		return nil, false
+	}
+	var walk func(typ reflect.Type, prefix []int) ([]int, bool)
+	walk = func(typ reflect.Type, prefix []int) ([]int, bool) {
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.PkgPath != "" { // 未导出字段跳过
+				continue
+			}
+			if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c != "" && c == col {
+				return appendPath(prefix, i), true
+			}
+			if b := f.Tag.Get("bson"); b != "" && b != "-" && b == col {
+				return appendPath(prefix, i), true
+			}
+			if common.ToSnakeCase(f.Name) == col {
+				return appendPath(prefix, i), true
+			}
+			// 嵌入 struct（如 gorm.DeletedAt）递归
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				if idx, ok := walk(f.Type, appendPath(prefix, i)); ok {
+					return idx, true
+				}
+			}
+		}
+		return nil, false
+	}
+	return walk(t, nil)
+}
+
+// appendPath 追加字段索引到路径（返回新切片，不修改原切片）。
+func appendPath(prefix []int, i int) []int {
+	idx := make([]int, 0, len(prefix)+1)
+	idx = append(idx, prefix...)
+	return append(idx, i)
+}
+
+// ============================================================
+
