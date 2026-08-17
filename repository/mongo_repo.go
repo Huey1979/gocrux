@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/internal/database/mongodb"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -353,15 +355,101 @@ func (r *MongoCRUDRepository[M]) RawList(ctx context.Context, dest any, query an
 }
 
 // BatchSoftDelete 批量软删除（is_deleted=1，与实体 bson tag 一致，BUG-039 修复）。
+// BUG-043 修复：合并 SetDelete() 设置的非零附加字段（is_trashed/trashed_at 等），
+// 否则实体自定义的垃圾桶/回收站语义字段会全部丢失。
 func (r *MongoCRUDRepository[M]) BatchSoftDelete(ctx context.Context, ids []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": bson.M{"is_deleted": int8(1)}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{r.pkField: bson.M{"$in": ids}}, bson.M{"$set": softDeleteSet(softDeleteProbe[M]())})
 	return err
 }
 
 // BatchSoftDeleteByFK 按外键批量软删除（is_deleted=1，BUG-039 修复）。
+// BUG-043 修复：与 BatchSoftDelete 一致，合并 SetDelete() 设置的附加字段。
 func (r *MongoCRUDRepository[M]) BatchSoftDeleteByFK(ctx context.Context, fkField string, fkValues []any) error {
-	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": bson.M{"is_deleted": int8(1)}})
+	_, err := r.coll.UpdateMany(ctx, bson.M{fkField: bson.M{"$in": fkValues}}, bson.M{"$set": softDeleteSet(softDeleteProbe[M]())})
 	return err
+}
+
+// softDeleteSet 构造软删除 $set 文档：is_deleted=1 + SetDelete() 设置的非零附加字段。
+// 若实体 SetDelete() 只设置 is_deleted（gentity 生成的默认形态），行为与修复前完全一致。
+func softDeleteSet(m any) bson.M {
+	set := bson.M{"is_deleted": int8(1)}
+	if extra := softDeleteExtraFields(m); len(extra) > 0 {
+		for k, v := range extra {
+			if k == "is_deleted" {
+				continue // 保持原写入类型，避免破坏已存数据的一致性
+			}
+			set[k] = v
+		}
+	}
+	return set
+}
+
+// softDeleteExtraFields 对实体零值实例调用 SetDelete()，提取其设置的非零字段。
+// 返回 nil 表示实体不支持软删或未设置附加字段（BUG-043 修复）。
+func softDeleteExtraFields(m any) bson.M {
+	sd, ok := m.(interface{ SetDelete() bool })
+	if !ok || !sd.SetDelete() {
+		return nil
+	}
+	data, err := bson.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	var raw bson.M
+	if err := bson.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	extra := bson.M{}
+	for k, v := range raw {
+		if isZeroBsonValue(v) {
+			continue
+		}
+		extra[k] = v
+	}
+	return extra
+}
+
+// softDeleteProbe 创建 M 的非 nil 零值实例（M 为指针类型时分配底层结构），
+// 用于在零值上安全调用 SetDelete() 提取附加字段。
+func softDeleteProbe[M any]() M {
+	var z M
+	t := reflect.TypeOf(z)
+	if t.Kind() == reflect.Ptr {
+		return reflect.New(t.Elem()).Interface().(M)
+	}
+	return z
+}
+
+// isZeroBsonValue 判断 bson 反序列化值是否为零值。
+// 零值字段跳过不合并，避免把实体其余未设置字段覆盖掉已有数据。
+func isZeroBsonValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case bool:
+		return !t
+	case int:
+		return t == 0
+	case int8, int16, int32, int64:
+		return reflect.ValueOf(v).Int() == 0
+	case uint, uint8, uint16, uint32, uint64:
+		return reflect.ValueOf(v).Uint() == 0
+	case float32, float64:
+		return reflect.ValueOf(v).Float() == 0
+	case time.Time:
+		return t.IsZero()
+	case primitive.DateTime:
+		// 注意：零值 time.Time{} 编码为负毫秒（非 0），需转回 time.Time 判断
+		return t.Time().IsZero()
+	case primitive.A:
+		return len(t) == 0
+	case primitive.M:
+		return len(t) == 0
+	default:
+		return false
+	}
 }
 
 // BatchFindByPK 批量按主键查询。
