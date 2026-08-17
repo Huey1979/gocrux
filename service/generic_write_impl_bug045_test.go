@@ -7,11 +7,13 @@ import (
 
 // bug045Doc 模拟带非零 DB 默认值的数值字段实体（如 is_enabled default:1）。
 type bug045Doc struct {
-	ID        string    `gorm:"column:id;primaryKey" json:"id"`
-	Name      string    `gorm:"column:name" json:"name"`
-	IsEnabled int8      `gorm:"column:is_enabled;default:1" json:"is_enabled"`
-	IsDeleted int8      `gorm:"column:is_deleted" json:"is_deleted"`
-	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+	ID         string    `gorm:"column:id;primaryKey" json:"id"`
+	Name       string    `gorm:"column:name" json:"name"`
+	IsEnabled  int8      `gorm:"column:is_enabled;default:1" json:"is_enabled"`
+	IsDeleted  int8      `gorm:"column:is_deleted" json:"is_deleted"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
+	FormConfig string    `gorm:"type:json" json:"form_config"`  // BUG-046：无 column: 名，snake 兜底
+	Extra      string    `bson:"extra_data" json:"extra"`        // BUG-046：无 gorm tag，bson 兜底
 }
 
 func (d *bug045Doc) SetDefaults()                {}
@@ -71,7 +73,7 @@ func (r *bug045PlainReq) GetID() any                       { return nil }
 func (r *bug045PlainReq) Validate() error                  { return nil }
 
 func TestCollectNonZeroColumns(t *testing.T) {
-	doc := &bug045Doc{ID: "ulid1", Name: "x", IsEnabled: 0, CreatedAt: time.Now()}
+	doc := &bug045Doc{ID: "ulid1", Name: "x", IsEnabled: 0, CreatedAt: time.Now(), FormConfig: "{}", Extra: "x"}
 	cols := collectNonZeroColumns(doc)
 	got := map[string]bool{}
 	for _, c := range cols {
@@ -79,6 +81,14 @@ func TestCollectNonZeroColumns(t *testing.T) {
 	}
 	if !got["id"] || !got["name"] || !got["created_at"] {
 		t.Errorf("non-zero columns expected id/name/created_at: %v", cols)
+	}
+	// BUG-046：gorm tag 仅 type:json（无 column: 名）的非零字段 → snake 兜底进白名单
+	if !got["form_config"] {
+		t.Errorf("type:json non-zero column form_config must be collected (BUG-046): %v", cols)
+	}
+	// BUG-046：无 gorm column 但有 bson tag 的非零字段 → bson tag 进白名单
+	if !got["extra_data"] {
+		t.Errorf("bson-tagged non-zero column extra_data must be collected (BUG-046): %v", cols)
 	}
 	if got["is_enabled"] {
 		t.Error("is_enabled=0 is zero value, must not be collected")

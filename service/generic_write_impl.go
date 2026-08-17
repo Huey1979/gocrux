@@ -140,6 +140,9 @@ func isColumnOf[M Record](col string) bool {
 
 // collectNonZeroColumns 反射实体，收集所有非零字段的存储列名。
 // 非零字段即 GORM 默认会插入的字段，显式列入白名单保持原插入语义。
+// 列名解析与 resolveColumn 对齐：gorm column → bson tag → ToSnakeCase 兜底
+// （BUG-046：gorm tag 仅含 type:json 等无 column: 名的字段此前被静默丢弃，
+// 导致 Create 不插入该列、DB 列默认值空串落库 → activate 全字段 Save 写回空串报 3140）。
 func collectNonZeroColumns(m any) []string {
 	t, v, ok := derefStruct(m)
 	if !ok {
@@ -158,9 +161,16 @@ func collectNonZeroColumns(m any) []string {
 		if !fv.IsValid() || fv.IsZero() {
 			continue
 		}
-		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
-			cols = append(cols, col)
+		col := common.ExtractGormColumn(f.Tag.Get("gorm"))
+		if col == "" {
+			// BUG-046：gorm tag 无 column: 名（如 type:json）→ bson tag → snake 约定兜底
+			if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
+				col = bsonTag
+			} else {
+				col = common.ToSnakeCase(f.Name)
+			}
 		}
+		cols = append(cols, col)
 	}
 	return cols
 }
