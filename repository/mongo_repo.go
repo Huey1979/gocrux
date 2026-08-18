@@ -611,7 +611,14 @@ func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 		if tag == "" || tag == "-" {
 			continue
 		}
-		doc = append(doc, bson.E{Key: tag, Value: v.Field(i).Interface()})
+		// BUG-053：bson tag 可能带选项（如 bson:"link_url,omitempty"），
+		// 只能取逗号前段作为字段 key——否则落库 key 变 "link_url,omitempty"（带逗号），
+		// 读取时 mongo-driver 按标准解析取 link_url，字段读不到（create 后全空）。
+		key := tag
+		if i := strings.IndexByte(tag, ','); i >= 0 {
+			key = tag[:i]
+		}
+		doc = append(doc, bson.E{Key: key, Value: v.Field(i).Interface()})
 	}
 	return doc
 }
@@ -628,6 +635,10 @@ func extractPKVal(entity any, pkField string) any {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		tag := t.Field(i).Tag.Get("bson")
+		// BUG-053：与 toBsonDoc 一致，bson tag 只取逗号前段（去 omitempty 等选项）。
+		if idx := strings.IndexByte(tag, ','); idx >= 0 {
+			tag = tag[:idx]
+		}
 		if tag == pkField || (tag == "" && t.Field(i).Name == pkField) {
 			return v.Field(i).Interface()
 		}
