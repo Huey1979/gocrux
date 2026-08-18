@@ -223,7 +223,7 @@ Content-Type: application/json
 - Body 中的 `ids`、`id`、框架控制参数、级联字段会被自动剥离，其余全部作为 DB 列更新
 - 自动补充 `updated_at` / `updated_by` 审计字段
 
-**支持钩子**：`BeforeBatchUpdate(ids, updates) → DoBatchUpdate → AfterBatchUpdate(ids, updates)`，可在 before 中修改 ids/updates，在 after 中做缓存清理、事件通知等后续处理。
+**支持钩子**：`BeforeBatchUpdate(ids, updates) → DoBatchUpdate → AfterBatchUpdate(ids, updates)`，可在 before 中修改 ids/updates，在 after 中做缓存清理、事件通知等后续处理。**空 ids 语义（BUG-052）**：请求缺 ids 报 4001（Handler 层拦截）；`BeforeBatchUpdate` 过滤后 ids 为空时**无操作静默成功**（返回 200），不再报「缺少必需参数: ids」——与 SQL `WHERE pk IN ()` 无操作语义一致，供权限过滤等场景使用。
 
 **适用场景**：批量审核、批量状态变更、批量打标等无需级联和逐条独立校验的场景。
 

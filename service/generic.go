@@ -389,12 +389,19 @@ func (s *GenericService[M]) Update(ctx context.Context, id, data any) (*M, error
 // SQL: UPDATE table SET ... WHERE pk IN (id1, id2, ...)
 // 不做级联更新、不做版本管理；版本化模式直接返回错误。
 // updates 为待更新的字段 map（仅 DB 列名，已由 Handler 层剥离控制参数）。
+// BUG-052：ids 为空（含 BeforeBatchUpdate hook 过滤后为空）时无操作返回 nil，
+// 不报「缺少必需参数」——请求层面缺 ids 已由 Handler 层拦截。
 func (s *GenericService[M]) BatchUpdateByIDs(ctx context.Context, ids []any, updates map[string]any) error {
 	if s.config.VersionMode {
 		return errs.ErrBatchUpdateSimpleNotSupportVersion
 	}
 	if len(ids) == 0 {
-		return errs.ErrMissingParam("ids")
+		// BUG-052：空 ids 视为无操作成功（返回 nil）。
+		// Handler 层已在请求解析时拦截「请求缺 ids / 空数组」（ErrMissingParam），
+		// 此处 ids 为空只可能来自 BeforeBatchUpdate hook 过滤——如 heims 权限过滤
+		// 后全部记录被排除（notify-delivery 非接收人标记已读），应无操作返回成功，
+		// 与 SQL `WHERE pk IN ()` 无操作语义一致。
+		return nil
 	}
 	if len(updates) == 0 {
 		return errs.ErrMissingParam("updates")
