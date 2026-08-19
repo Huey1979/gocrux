@@ -595,11 +595,20 @@ func filterToBson(f Filter) bson.M {
 // ---------- 辅助 ----------
 
 // toBsonDoc 将 struct 转为 bson.D（BSON 文档）。
+// 支持 bson:",inline"（mongo-driver 语义）标记的匿名嵌入 struct 递归展开。
 func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 	v := reflect.ValueOf(entity)
 	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
+	return toBsonDocFields(v)
+}
+
+// toBsonDocFields 递归遍历 struct 字段生成 bson.D。
+// 匿名嵌入 struct 必须显式标记 bson:",inline"（或 bson:",inline,omitempty"）才会展开——
+// 与 mongo-driver 语义一致，避免无标记匿名字段被隐式写入导致行为变化（P3 增强建议）。
+// 展开的子字段遵循与顶层一致的 bson tag 规则：无 tag / "-" 跳过，带选项取逗号前段。
+func toBsonDocFields(v reflect.Value) bson.D {
 	t := v.Type()
 	doc := make(bson.D, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
@@ -611,6 +620,11 @@ func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 		if tag == "" || tag == "-" {
 			continue
 		}
+		// P3：bson:",inline" 标记的匿名嵌入 struct → 递归展开子字段
+		if f.Anonymous && f.Type.Kind() == reflect.Struct && isBsonInline(tag) {
+			doc = append(doc, toBsonDocFields(v.Field(i))...)
+			continue
+		}
 		// BUG-053：bson tag 可能带选项（如 bson:"link_url,omitempty"），
 		// 只能取逗号前段作为字段 key——否则落库 key 变 "link_url,omitempty"（带逗号），
 		// 读取时 mongo-driver 按标准解析取 link_url，字段读不到（create 后全空）。
@@ -618,12 +632,31 @@ func toBsonDoc[M any](r *MongoCRUDRepository[M], entity *M) bson.D {
 		if i := strings.IndexByte(tag, ','); i >= 0 {
 			key = tag[:i]
 		}
+		if key == "" { // 防御：bson:",omitempty" 之类无 key 的非法 tag 不写空 key
+			continue
+		}
 		doc = append(doc, bson.E{Key: key, Value: v.Field(i).Interface()})
 	}
 	return doc
 }
 
-// extractPKVal 从 struct 提取主键值。
+// isBsonInline 判断 bson tag 是否为 inline 选项（mongo-driver 语义）：
+// 首段（key）必须为空，后续选项段含 "inline"（如 bson:",inline" / bson:",inline,omitempty"）。
+// 注意 bson:"inline"（无逗号）首段是字段名，不算 inline 选项。
+func isBsonInline(tag string) bool {
+	parts := strings.Split(tag, ",")
+	if parts[0] != "" {
+		return false
+	}
+	for _, opt := range parts[1:] {
+		if opt == "inline" {
+			return true
+		}
+	}
+	return false
+}
+
+// extractPKVal 从 struct 提取主键值（支持匿名嵌入 struct 递归查找）。
 func extractPKVal(entity any, pkField string) any {
 	v := reflect.ValueOf(entity)
 	for v.Kind() == reflect.Ptr {
@@ -632,25 +665,40 @@ func extractPKVal(entity any, pkField string) any {
 	if v.Kind() != reflect.Struct {
 		return nil
 	}
+	return extractPKValFields(v, pkField)
+}
+
+// extractPKValFields 递归查找主键字段值（P3：匿名嵌入 struct 递归，与 ensureAuditTime 一致）。
+func extractPKValFields(v reflect.Value, pkField string) any {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("bson")
+		f := t.Field(i)
+		if f.PkgPath != "" { // 未导出字段跳过（避免 Interface() panic）
+			continue
+		}
+		tag := f.Tag.Get("bson")
 		// BUG-053：与 toBsonDoc 一致，bson tag 只取逗号前段（去 omitempty 等选项）。
 		if idx := strings.IndexByte(tag, ','); idx >= 0 {
 			tag = tag[:idx]
 		}
-		if tag == pkField || (tag == "" && t.Field(i).Name == pkField) {
+		if tag == pkField || (tag == "" && f.Name == pkField) {
 			return v.Field(i).Interface()
 		}
-		colTag := t.Field(i).Tag.Get("gorm")
+		colTag := f.Tag.Get("gorm")
 		if strings.Contains(colTag, "column:"+pkField) {
 			return v.Field(i).Interface()
+		}
+		// 匿名嵌入 struct → 递归查找
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			if val := extractPKValFields(v.Field(i), pkField); val != nil {
+				return val
+			}
 		}
 	}
 	return nil
 }
 
-// detectPK 从 bson 标签自动推导主键。
+// detectPK 从 bson 标签自动推导主键（支持匿名嵌入 struct 递归查找）。
 func (r *MongoCRUDRepository[M]) detectPK() {
 	var m M
 	v := reflect.ValueOf(m)
@@ -660,25 +708,46 @@ func (r *MongoCRUDRepository[M]) detectPK() {
 	if v.Kind() != reflect.Struct {
 		return
 	}
+	if col := findPKField(v); col != "" {
+		r.pkField = col
+		return
+	}
+	r.pkField = "_id"
+}
+
+// findPKField 递归查找主键列名：优先 bson:"_id"，其次 GORM primaryKey → column。
+func findPKField(v reflect.Value) string {
 	t := v.Type()
+	// 第一轮：bson:"_id"
 	for i := 0; i < t.NumField(); i++ {
-		if tag := t.Field(i).Tag.Get("bson"); tag == "_id" {
-			r.pkField = "_id"
-			return
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		if tag := f.Tag.Get("bson"); tag == "_id" {
+			return "_id"
 		}
 	}
-	// fallback: GORM primaryKey → extract column
+	// 第二轮：匿名嵌入 struct 递归 + GORM primaryKey → extract column
 	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("gorm")
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			if col := findPKField(v.Field(i)); col != "" {
+				return col
+			}
+		}
+		tag := f.Tag.Get("gorm")
 		if strings.Contains(tag, "primaryKey") {
-			col := common.ExtractGormColumn(t.Field(i).Tag.Get("gorm"))
+			col := common.ExtractGormColumn(f.Tag.Get("gorm"))
 			if col != "" {
-				r.pkField = col
-				return
+				return col
 			}
 		}
 	}
-	r.pkField = "_id"
+	return ""
 }
 
 // toStructSlice 泛型类型反射 helper（预留）

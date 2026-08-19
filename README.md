@@ -267,6 +267,15 @@ products, total, _ := repo.ListByFilters(ctx, repository.ListFilters{
 
 `MongoCRUDRepository` 也提供 `Batch` 系列批量方法：`BatchSoftDelete`、`BatchSoftDeleteByFK`、`BatchFindByPK`、`BatchFindByFK`、`BatchHardDelete`、`BatchHardDeleteByFK`。
 
+#### bson tag 规则（写入路径）
+
+`MongoCRUDRepository` 的写入（`Insert`/`InsertBatch`/`Save`）通过 `toBsonDoc` 反射生成 BSON 文档，规则：
+
+- 仅写入带 `bson` tag 的导出字段；`bson:"-"` 与无 tag 字段跳过；
+- tag 带选项时取逗号前段为 key（`bson:"link_url,omitempty"` → key=`link_url`）；
+- 匿名嵌入 struct 需显式标记 `bson:",inline"`（或 `bson:",inline,omitempty"`）才会递归展开（与 mongo-driver 语义一致），子字段遵循同样规则——可用于收敛审计字段等公共嵌入；未标记的匿名字段不展开；
+- 主键推导（`detectPK`）与主键提取（`extractPKVal`）同样支持匿名嵌入 struct 递归查找。
+
 ### Repo[M] 接口
 
 `repository/repo.go` 定义了统一的仓储接口，`CRUDRepository`（MySQL/GORM）与 `MongoCRUDRepository`（MongoDB）均实现此接口：
