@@ -410,6 +410,8 @@ type Record interface {
 
 **type:json 空串归一化（BUG-044）** — string 类型 + gorm tag 含 `type:json` 的字段，若 MergeTo 后值为 `""`，自动改写为 `"null"`。MySQL JSON 列不接受空字符串（Error 3140），实体 `SetDefaults()` 兜底防不了显式传空串（MergeTo 覆盖），由框架层统一归一化。`"null"` 对任意 JSON 目标类型（slice/map/struct）均合法，语义中性（表示"无配置"）。
 
+**type:json 原生 JSON 传参（BUG-055）** — 自动字段校验（`deriveFieldRules`）将 `gorm:"type:json"` 的 string 字段推导为 `Type=string, Format=json`；Create/Update 请求可直接传**原生 JSON 数组/对象**（`["01KW_TECH_DEPT"]` / `{"op":"eq"}`），校验层自动 `json.Marshal` 序列化为 JSON 字符串落库，不再报「无法转为字符串类型」。`json.RawMessage` 字段同样支持（先 `json.Valid` 校验）。兼容既有传 JSON 字符串的调用方（`string` 分支原样通过）。
+
 **显式零值字段真实落库（BUG-045 / BUG-046 / BUG-047）** — Create / 版本化 Update 插入时，请求中**显式出现**的零值字段（`0`/`false`/`""`）真实落库，不被 GORM 零值忽略 + DB 列默认值覆盖（如 `is_enabled=0` 不再落库变 `1`）。白名单 = 实体非零字段列 ∪ 请求显式字段列；请求未显式传的零值字段仍走 DB 默认值，行为与旧版一致。实现依赖可选接口 `RequestFields`（`MapRequest` 已内置实现 `Data()`），业务自定义 Request 实现 `Data() map[string]any` 即可生效。
 
 实现细节：白名单存在时，插入走 GORM `Select(白名单).Create`（struct 路径）。**方案 B（default 只允许 0 值/无）** 后实体不再携带非零 `default:` tag（gentity 生成 `default:(-)`，非零 DB 默认值语义由 `SetDefaults()` 在 Go 层承担），GORM create 回调不再用默认值覆盖零值字段，显式 `0` 原样落库；此前为绕过 GORM default 填充而引入的 map 批量插入（`EntityToMapByColumns`，BUG-047 方案 A）已回退移除。列名解析对齐 `resolveColumn`：gorm `column:` → bson tag → snake 约定兜底（BUG-046）。

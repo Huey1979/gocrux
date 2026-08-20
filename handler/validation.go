@@ -387,6 +387,21 @@ func coerceToString(field string, val any) (any, error) {
 	switch v := val.(type) {
 	case string:
 		return v, nil
+	case json.RawMessage:
+		// JSON 原生字节（json.RawMessage 字段）：验证合法性后原样返回
+		if !json.Valid(v) {
+			return nil, errs.ErrFieldValidation(field, "不是有效的JSON格式")
+		}
+		return string(v), nil
+	case []any, map[string]any:
+		// JSON 数组/对象（BUG-055）：序列化为 JSON 字符串后返回，
+		// 使 gorm:"type:json" 的 string 字段可接收原生 JSON 结构
+		// （API 文档/前端按 JSON 数组/对象传参不再被拒）。
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, errs.ErrFieldValidation(field, "无法转为JSON字符串")
+		}
+		return string(b), nil
 	case float64:
 		// JSON 数字：123 → "123", 123.5 → "123.5"
 		if v == float64(int64(v)) {
@@ -519,7 +534,10 @@ func checkFormat(field, format string, val any) error {
 	s := fmt.Sprint(val)
 	switch format {
 	case "json":
-		if !json.Valid([]byte(s)) {
+		// BUG-055 防御：val 可能仍是未序列化的数组/对象/RawMessage
+		// （如手工配置 rule.Type 为空但 Format=json），先序列化再校验；
+		// 正常路径（validateField 已 coerceToString）val 已是 string。
+		if !jsonValueValid(val) {
 			return errs.ErrFieldValidation(field, "不是有效的JSON格式")
 		}
 	case "datetime":
@@ -566,6 +584,23 @@ func checkFormat(field, format string, val any) error {
 		}
 	}
 	return nil
+}
+
+// jsonValueValid 判断值是否为合法 JSON（BUG-055 防御分支）：
+// string 直接 json.Valid；[]any/map[string]any/json.RawMessage 先 Marshal/Valid 校验；
+// 其余类型退回 fmt.Sprint 字符串校验（保持旧行为）。
+func jsonValueValid(val any) bool {
+	switch v := val.(type) {
+	case string:
+		return json.Valid([]byte(v))
+	case json.RawMessage:
+		return json.Valid(v)
+	case []any, map[string]any:
+		_, err := json.Marshal(v)
+		return err == nil
+	default:
+		return json.Valid([]byte(fmt.Sprint(val)))
+	}
 }
 
 // ============================================================
