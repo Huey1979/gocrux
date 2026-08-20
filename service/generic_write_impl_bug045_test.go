@@ -136,11 +136,13 @@ type bug048Doc struct {
 	Bug048Audit
 }
 
-// TestCollectNonZeroColumnsSkipsEmbeddedStruct 验证 BUG-048：
+// TestCollectNonZeroColumnsExpandsEmbeddedStruct 验证 BUG-048 + BUG-054：
 // 匿名嵌入 struct（AuditFields，子字段非零 → 嵌入字段本身非零）不得被
-// ToSnakeCase 兜底为 audit_fields 收进白名单（旧 Select 静默忽略无害；
-// BUG-047 map 路径曾 row[audit_fields]=struct → 500，map 已回退，防御逻辑保留）。
-func TestCollectNonZeroColumnsSkipsEmbeddedStruct(t *testing.T) {
+// ToSnakeCase 兜底为 audit_fields 收进白名单（BUG-048：旧 Select 静默忽略无害；
+// BUG-047 map 路径曾 row[audit_fields]=struct → 500，map 已回退，防御逻辑保留），
+// 但其非零子字段（审计列）必须递归展开进白名单（BUG-054：GORM 全字段 Create
+// 时嵌入子字段同样落库，白名单应保持同一插入语义）。
+func TestCollectNonZeroColumnsExpandsEmbeddedStruct(t *testing.T) {
 	doc := &bug048Doc{ID: "ulid1", Name: "x", Bug048Audit: Bug048Audit{CreatedBy: "u1", CreatedAt: time.Now()}}
 	cols := collectNonZeroColumns(doc)
 	got := map[string]bool{}
@@ -149,6 +151,12 @@ func TestCollectNonZeroColumnsSkipsEmbeddedStruct(t *testing.T) {
 	}
 	if got["audit_fields"] {
 		t.Errorf("BUG-048: embedded struct must not be collected as audit_fields: %v", cols)
+	}
+	if !got["created_by"] {
+		t.Errorf("BUG-054: non-zero embedded col created_by must be expanded: %v", cols)
+	}
+	if !got["created_at"] {
+		t.Errorf("BUG-054: non-zero embedded col created_at must be expanded: %v", cols)
 	}
 	if !got["id"] || !got["name"] {
 		t.Errorf("normal non-zero columns must be kept: %v", cols)

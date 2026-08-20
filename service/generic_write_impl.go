@@ -144,10 +144,25 @@ func isColumnOf[M Record](col string) bool {
 // （BUG-046：gorm tag 仅含 type:json 等无 column: 名的字段此前被静默丢弃，
 // 导致 Create 不插入该列、DB 列默认值空串落库 → activate 全字段 Save 写回空串报 3140）。
 func collectNonZeroColumns(m any) []string {
-	t, v, ok := derefStruct(m)
+	_, v, ok := derefStruct(m)
 	if !ok {
 		return nil
 	}
+	return collectNonZeroFields(v)
+}
+
+// deletedAtType 软删除标记类型（gorm.DeletedAt）。
+// 其列 deleted_at 由 GORM 管线管理，白名单不可/无需列出，递归展开时整体跳过。
+var deletedAtType = reflect.TypeOf(gorm.DeletedAt{})
+
+// collectNonZeroFields 递归收集 struct 的非零叶子字段存储列名。
+// 匿名嵌入 struct（AuditFields / gorm.DeletedAt）递归展开其非零子字段（BUG-054）：
+// GORM 全字段 Create 时嵌入子字段同样落库，白名单应保持同一插入语义——否则
+// 请求含显式字段 → Select 白名单不含 _beforeCreate 设置的审计列 → 审计字段不落库
+// （内存有、库中空，依赖 created_by 的草稿可见性过滤失效）。
+// 仅展开子字段叶子列，嵌入 struct 本身不作为列（不回归 BUG-048）。
+func collectNonZeroFields(v reflect.Value) []string {
+	t := v.Type()
 	cols := make([]string, 0, 8)
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -155,10 +170,15 @@ func collectNonZeroColumns(m any) []string {
 			continue
 		}
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
-			// BUG-048：匿名嵌入 struct（AuditFields / gorm.DeletedAt）本身无 DB 列名，
-			// 其子字段由 GORM 展开处理。此前被 ToSnakeCase 兜底为 audit_fields 收进白名单，
-			// BUG-047 map 路径反查命中嵌入字段本身 → row[audit_fields]=struct → 500
-			// "unsupported type ...AuditFields, a struct"。
+			// gorm.DeletedAt 特判：deleted_at 列由 GORM 管线维护，
+			// 其子字段 Time/Valid 不得被 ToSnakeCase 展开成 time/valid 列。
+			if f.Type == deletedAtType {
+				continue
+			}
+			// BUG-048 教训：嵌入 struct 本身无 DB 列名，不得 ToSnakeCase 兜底为
+			// audit_fields 收进白名单（BUG-047 map 路径曾 row[audit_fields]=struct → 500）；
+			// BUG-054：递归展开其非零子字段。
+			cols = append(cols, collectNonZeroFields(v.Field(i))...)
 			continue
 		}
 		if f.Type.Kind() == reflect.Ptr || f.Type.Kind() == reflect.Interface {
