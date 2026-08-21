@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -12,8 +13,8 @@ import (
 	"github.com/Huey1979/gocrux/common"
 	"github.com/Huey1979/gocrux/expression"
 
-	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/constants"
+	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/service"
 
 	"github.com/gin-gonic/gin"
@@ -588,8 +589,15 @@ func (h *GenericHandler[M]) DoCreate(ctx context.Context, requests []map[string]
 // handleError 将 Service 层 error 映射为 HTTP 响应。
 // 使用 errors.Is 与 errs 包中的哨兵错误精确匹配。
 // 错误消息统一透传返回前端，不再对未匹配错误吞掉详情。
+// BizError（BUG-058）：透传自定义业务码+消息，属于预期的业务校验失败，
+// 不记录 Error 级日志（避免业务校验噪音）；其余错误记录日志后透传详情。
 func (h *GenericHandler[M]) handleError(c *gin.Context, err error) {
 	code := mapServiceError(err)
+	var bizErr *errs.BizError
+	if errors.As(err, &bizErr) {
+		ErrorWithMsg(c, code, bizErr.Msg)
+		return
+	}
 	InternalErrorWithDetail(c, code, err)
 }
 

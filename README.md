@@ -1193,6 +1193,17 @@ HTTP Body
 - **框架校验**：字段级别的类型、长度、范围、枚举 — **零配置即可用**
 - **业务校验**：跨字段逻辑、数据库唯一性、状态迁移 — 按需覆盖
 
+**业务校验错误码（BUG-058）** — 业务校验/钩子返回的普通错误默认映射为 `code=500`。需要返回自定义业务码时，使用 `errs.NewBizError(code, msg)`：
+
+```go
+// Service 层钩子中
+if existing {
+    return nil, errs.NewBizError(15002, "同目录下已存在同名文件或文件夹")
+}
+```
+
+`handler.handleError` 通过 `errors.As` 识别 `*errs.BizError`，响应携带对应业务码 + 消息，且不记录 Error 级日志（预期业务失败，避免日志噪音）；支持 `fmt.Errorf("...: %w", err)` 嵌套包装。现有哨兵错误（`ErrRecordNotFound`/`ErrMissingParam`/`ErrDuplicateCode` 等）映射优先级不变。
+
 ### BatchErrorMode — 批量错误收集
 
 `HandlerConfig.BatchErrorMode` 控制批量操作（Create / update 数组模式）时的错误处理行为：

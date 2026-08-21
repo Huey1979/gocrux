@@ -267,3 +267,24 @@ func ErrCloseMongoDB(cause error) error {
 func ErrCloseRedis(cause error) error {
 	return fmt.Errorf("关闭Redis失败: %w", cause)
 }
+
+// ============================================================
+// 携带业务码的错误 — 供业务校验/钩子返回自定义业务码（BUG-058）
+// ============================================================
+
+// BizError 携带业务码的错误类型。
+// 用于业务校验失败需要返回自定义业务码（而非统一映射为 500）的场景，
+// 例如 heims 文档中心钩子返回 15001/15002/15003 等业务错误码。
+// handler.mapServiceError 通过 errors.As 识别该类型并透传业务码。
+type BizError struct {
+	Code int
+	Msg  string
+}
+
+func (e *BizError) Error() string { return e.Msg }
+
+// NewBizError 创建携带业务码的错误。
+// 可直接作为 error 返回，也可用 fmt.Errorf("%w", ...) 嵌套包装（errors.As 仍可识别）。
+func NewBizError(code int, msg string) *BizError {
+	return &BizError{Code: code, Msg: msg}
+}
