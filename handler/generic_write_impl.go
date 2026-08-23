@@ -248,21 +248,25 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							passToChild = true
 						}
 						// 当 passToChild=true 时（版本化 or 非版本化全量替换），
-						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）
-					if passToChild && hasChildren {
-						for j := range childData {
-							delete(childData[j], childHandler.PKField())
-							delete(childData[j], "id")
+						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）。
+						// 版本化父表回填（未携带子表）同样进入：清除 PK 走 CREATE，
+						// 为每个新版本复制重建子表快照，旧版本子行保持不变（BUG-059）。
+						if passToChild && (hasChildren || passParentVersioned) {
+							for j := range childData {
+								delete(childData[j], childHandler.PKField())
+								delete(childData[j], "id")
+							}
+							// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
+							// PK 已清除，在此生成新 ULID 并解析代码字段，子 Handler 的
+							// _beforeCreate → MergeTo 会保留这些值。
+							if sfk := childHandler.SelfFKField(); sfk != "" {
+								resolveSelfFKCodeRefs(childData, childHandler.PKField(), sfk)
+							}
 						}
-						// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
-						// PK 已清除，在此生成新 ULID 并解析代码字段，子 Handler 的
-						// _beforeCreate → MergeTo 会保留这些值。
-						if sfk := childHandler.SelfFKField(); sfk != "" {
-							resolveSelfFKCodeRefs(childData, childHandler.PKField(), sfk)
-						}
-					}
-						// 补充子数据时，现有子记录只需更新 FK，不强制创建
-						if !hasChildren && oldPK != nil {
+						// 补充子数据时：
+						// - 非版本化父表：现有子记录只需更新 FK，不强制创建（原地改 FK 语义保留，BUG-018/020）
+						// - 版本化父表：passToChild 保持 true，回填数据已清除 PK，走 CREATE 复制重建（BUG-059）
+						if !hasChildren && oldPK != nil && !passParentVersioned {
 							passToChild = false
 						}
 						// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
