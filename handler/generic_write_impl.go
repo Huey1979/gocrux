@@ -225,11 +225,16 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 							childData = oldChildren
 
 							// 为 backfill 数据补充 id 键，确保 GetID() 能匹配到主键
-							// 使用 childHandler.PKField() 精确定位，避免后缀匹配误取 FK（BUG-035）
+							// 使用 childHandler.PKField() 精确定位，避免后缀匹配误取 FK（BUG-035）。
+							// childData 的 key 是 JSON 字段名（marshalToMap），PKField() 可能返回
+							// gorm 列名（如 field_ulid）而非 JSON 名（ulid，gentity 约定），
+							// 两者都查，避免 id 注入失败（BUG-060）。
 							pkField := childHandler.PKField()
 							for j := range childData {
 								if _, ok := childData[j]["id"]; !ok {
 									if pkVal, exists := childData[j][pkField]; exists && pkVal != nil && pkVal != "" {
+										childData[j]["id"] = pkVal
+									} else if pkVal, exists := childData[j]["ulid"]; exists && pkVal != nil && pkVal != "" {
 										childData[j]["id"] = pkVal
 									}
 								}
@@ -253,8 +258,16 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						// 为每个新版本复制重建子表快照，旧版本子行保持不变（BUG-059）。
 						if passToChild && (hasChildren || passParentVersioned) {
 							for j := range childData {
+								// 清除子记录旧 PK：childData 的 key 是 JSON 字段名（marshalToMap），
+								// 而 PKField() 可能返回 gorm 列名（如 field_ulid）或 JSON 名（如 ulid，BUG-035）。
+								// 两种 key 都删——"ulid" 是 gentity 统一的 JSON 主键名约定（BUG-060 根因：
+								// 只删 gorm 列名导致 JSON 名 ulid 残留 → MergeTo 灌入旧 PK →
+								// _beforeCreate 判定非空复用旧 ULID → MySQL 1062）。
+								// 不做 *_ulid 后缀匹配（不误删 FK 字段，如 form_ulid / parent_item_ulid）。
 								delete(childData[j], childHandler.PKField())
+								delete(childData[j], "ulid")
 								delete(childData[j], "id")
+								delete(childData[j], "ID")
 							}
 							// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
 							// PK 已清除，在此生成新 ULID 并解析代码字段，子 Handler 的
@@ -446,9 +459,12 @@ outer:
 	}
 
 	// Step 1: 为没有 PK 的子项生成新 ULID
+	// childData 的 key 是 JSON 字段名（marshalToMap），PKField() 可能返回 gorm 列名
+	// （如 field_ulid）而 JSON 主键名是 "ulid"（gentity 约定，BUG-060）。
+	// 读写统一走 JSON 名（写时两个 key 都写，MergeTo 只认 JSON 名）。
 	for j := range childData {
-		if v, ok := childData[j][pkField]; !ok || v == nil || v == "" {
-			childData[j][pkField] = common.NewULID()
+		if v, ok := readPKValue(childData[j], pkField); !ok || v == nil || v == "" {
+			writePKValue(childData[j], pkField, common.NewULID())
 		}
 	}
 
@@ -456,8 +472,10 @@ outer:
 	codeToULID := make(map[string]string, len(childData))
 	for j := range childData {
 		if code, ok := childData[j][baseCodeField].(string); ok && code != "" {
-			if ulid, ok := childData[j][pkField].(string); ok && ulid != "" {
-				codeToULID[code] = ulid
+			if pkV, _ := readPKValue(childData[j], pkField); pkV != nil {
+				if ulid, ok := pkV.(string); ok && ulid != "" {
+					codeToULID[code] = ulid
+				}
 			}
 		}
 	}
@@ -472,4 +490,27 @@ outer:
 			delete(childData[j], selfFKCodeField)
 		}
 	}
+}
+
+// readPKValue 从 JSON map 中读取主键值。
+// childData 的 key 是 JSON 字段名（marshalToMap），而 PKField() 可能返回 gorm 列名
+// （如 field_ulid）或 JSON 名（如 ulid，BUG-035 实体）。两种 key 都尝试（BUG-060）。
+func readPKValue(m map[string]any, pkField string) (any, bool) {
+	if v, ok := m[pkField]; ok {
+		return v, true
+	}
+	if pkField != "ulid" {
+		if v, ok := m["ulid"]; ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// writePKValue 向 JSON map 写入主键值。
+// 同时写 pkField 与 JSON 名 "ulid"：MergeTo 通过 json 反序列化灌入实体，
+// 只认 JSON tag 名（gentity 统一 "ulid"），未匹配的 key（如 gorm 列名）会被忽略，写入无害。
+func writePKValue(m map[string]any, pkField, v string) {
+	m[pkField] = v
+	m["ulid"] = v
 }
