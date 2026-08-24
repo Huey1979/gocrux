@@ -311,6 +311,17 @@ func getFieldVal(_entity any, fieldName string) any {
 	return f.Interface()
 }
 
+// parseBsonKey 解析 bson tag，取逗号前段作为真正的 MongoDB 字段名。
+// bson:"xxx,omitempty" / bson:"xxx,omitempty,inline" 等带选项的 tag，
+// 原样使用会把 ",omitempty" 当成字段名，List 过滤永远匹配不到（BUG-061）。
+// 与 repository/mongo_repo.go（BUG-053）的解析方式保持一致。
+func parseBsonKey(bsonTag string) string {
+	if idx := strings.IndexByte(bsonTag, ','); idx >= 0 {
+		return bsonTag[:idx]
+	}
+	return bsonTag
+}
+
 // resolveColumn 根据 Go 结构体字段名 → GORM column 名称
 // 遍历 M 的字段，匹配 fieldName，从 gorm tag 提取 column。
 func resolveColumn[M Record](fieldName string) string {
@@ -327,9 +338,9 @@ func resolveColumn[M Record](fieldName string) string {
 	if col := common.ExtractGormColumn(gormTag); col != "" {
 		return col
 	}
-	// MongoDB: 回退到 bson tag（如 BizRecord）
+	// MongoDB: 回退到 bson tag（如 BizRecord），取逗号前段（BUG-061）
 	if bsonTag := f.Tag.Get("bson"); bsonTag != "" {
-		return bsonTag
+		return parseBsonKey(bsonTag)
 	}
 	return common.ToSnakeCase(fieldName)
 }
@@ -359,7 +370,7 @@ func resolveColumnByName[M Record](jsonName string) string {
 			return col
 		}
 		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
-			return bsonTag
+			return parseBsonKey(bsonTag)
 		}
 		return common.ToSnakeCase(name)
 	}
@@ -383,8 +394,8 @@ func resolveColumnFromDB[M Record](dbColumn string) string {
 		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col == dbColumn {
 			return f.Name
 		}
-		// bson tag（MongoDB；"-" 表示忽略，不参与匹配）
-		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" && bsonTag == dbColumn {
+		// bson tag（MongoDB；"-" 表示忽略，不参与匹配；取逗号前段，BUG-061）
+		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" && parseBsonKey(bsonTag) == dbColumn {
 			return f.Name
 		}
 		// snake_case fallback
@@ -441,9 +452,9 @@ func knownColumns[M Record]() map[string]bool {
 		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
 			cols[col] = true
 		}
-		// bson tag
+		// bson tag（取逗号前段，避免 `bson:"xxx,omitempty"` 产生错误键，BUG-061）
 		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
-			cols[bsonTag] = true
+			cols[parseBsonKey(bsonTag)] = true
 		}
 		// json tag (fallback)
 		if jsonTag := f.Tag.Get("json"); jsonTag != "" && jsonTag != "-" {
