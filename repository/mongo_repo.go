@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Huey1979/gocrux/common"
+	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/internal/database/mongodb"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -135,15 +136,24 @@ func (r *MongoCRUDRepository[M]) InsertBatch(ctx context.Context, entities []*M,
 	return nil
 }
 
+// mapMongoFindError 归一化 Mongo FindOne 错误（GetByID/GetByField 共用，BUG-062）：
+//   - mongo.ErrNoDocuments → errs.ErrRecordNotFound 哨兵错误。handler/errors.go mapServiceError
+//     通过 errors.Is 识别为 CodeNotFound（404）；此前返回裸 fmt.Errorf("record not found")
+//     不匹配任何哨兵，落入默认分支变 500。
+//   - 其余错误包装为 MongoDB查询失败，保留原错误链。
+func mapMongoFindError(err error) error {
+	if err == mongo.ErrNoDocuments {
+		return errs.ErrRecordNotFound
+	}
+	return fmt.Errorf("MongoDB查询失败: %w", err)
+}
+
 // GetByID 按主键查询。
 func (r *MongoCRUDRepository[M]) GetByID(ctx context.Context, id any) (*M, error) {
 	filter := bson.M{r.pkField: id}
 	var result M
 	if err := r.ReadColl(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, fmt.Errorf("record not found")
-		}
-		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
+		return nil, mapMongoFindError(err)
 	}
 	return &result, nil
 }
@@ -153,10 +163,7 @@ func (r *MongoCRUDRepository[M]) GetByField(ctx context.Context, field string, v
 	filter := bson.M{field: value}
 	var result M
 	if err := r.ReadColl(ctx).FindOne(ctx, filter).Decode(&result); err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, fmt.Errorf("record not found")
-		}
-		return nil, fmt.Errorf("MongoDB查询失败: %w", err)
+		return nil, mapMongoFindError(err)
 	}
 	return &result, nil
 }
