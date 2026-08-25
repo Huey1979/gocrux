@@ -242,27 +242,40 @@ func (r *MongoCRUDRepository[M]) List(ctx context.Context, filter bson.M, page, 
 	return r.listOffset(ctx, filter, page, pageSize, 0, sortDoc...)
 }
 
-// listOffset 带起点偏移的列表查询。
-// offset > 0 时直接作为 skip 使用（从 0 开始）；offset <= 0 时按 page 计算。
-func (r *MongoCRUDRepository[M]) listOffset(ctx context.Context, filter bson.M, page, pageSize, offset int, sortDoc ...bson.D) ([]M, int64, error) {
-	if filter == nil {
-		filter = bson.M{}
+// mongoPageOpts 计算 Mongo 查询的 skip/limit 分页参数。
+// 契约与 ListFilters 及 MySQL 仓储一致（BUG-063）：pageSize <= 0 表示不分页全量返回
+// （返回 ok=false，调用方不设 Skip/Limit）；pageSize > 0 时正常分页，offset 优先于 page。
+func mongoPageOpts(page, pageSize, offset int) (skip, limit int64, ok bool) {
+	if pageSize <= 0 {
+		// 全量：不设 Skip/Limit（MongoDB 驱动不设 Limit 即返回全部）
+		return 0, 0, false
 	}
 	if page < 1 {
 		page = 1
 	}
-	if pageSize <= 0 {
-		pageSize = 20
+	skip = int64(offset)
+	if skip <= 0 {
+		skip = int64((page - 1) * pageSize)
+	}
+	return skip, int64(pageSize), true
+}
+
+// listOffset 带起点偏移的列表查询。
+// offset > 0 时直接作为 skip 使用（从 0 开始）；offset <= 0 时按 page 计算。
+// 分页决策统一走 mongoPageOpts：pageSize<=0 全量返回（DoList 级联/Reference 展开
+// 传 PageSize=0 依赖此语义，修复前被重置为 20 导致展开只返回前 20 条，BUG-063）。
+func (r *MongoCRUDRepository[M]) listOffset(ctx context.Context, filter bson.M, page, pageSize, offset int, sortDoc ...bson.D) ([]M, int64, error) {
+	if filter == nil {
+		filter = bson.M{}
 	}
 	total, err := r.ReadColl(ctx).CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, fmt.Errorf("MongoDB计数失败: %w", err)
 	}
-	skip := int64(offset)
-	if skip <= 0 {
-		skip = int64((page - 1) * pageSize)
+	opts := options.Find()
+	if skip, limit, ok := mongoPageOpts(page, pageSize, offset); ok {
+		opts.SetSkip(skip).SetLimit(limit)
 	}
-	opts := options.Find().SetSkip(skip).SetLimit(int64(pageSize))
 	if len(sortDoc) > 0 && sortDoc[0] != nil {
 		opts.SetSort(sortDoc[0])
 	}
