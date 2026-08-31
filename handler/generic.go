@@ -212,7 +212,7 @@ type HandlerConfig[M service.Record] struct {
 //	两个入口共享同一条管线，钩子在两个场景下都生效。
 type GenericHandler[M service.Record] struct {
 	svc        *service.GenericService[M]
-	svcName    string // 注册表中的名称，仅用于日志/错误信息
+	svcName    string // 资源名：用于权限校验（Perm.Check）、日志 trace 与级联 visited 防循环
 	config     HandlerConfig[M]
 	hooks      HandlerHooks[M]  // Handler 层钩子（如未设置，fallback 到 _xxx 默认实现）
 	handlerReg *HandlerRegistry // 子 Handler 注册表（级联时用于查找子 Handler）
@@ -243,13 +243,19 @@ func NewGenericHandler[M service.Record](
 }
 
 // NewGenericHandlerWithSvc 直接传入 Service 实例创建 Handler。
+// resource 指定该 Handler 的资源名（等价于 NewGenericHandler 的 svcName），
+// 用于权限校验（Perm.Check）、日志 trace 与级联 visited 防循环；不能为空字符串。
 func NewGenericHandlerWithSvc[M service.Record](
 	svc *service.GenericService[M],
+	resource string,
 	cfg HandlerConfig[M],
 ) *GenericHandler[M] {
+	if resource == "" {
+		panic("NewGenericHandlerWithSvc: resource 不能为空")
+	}
 	h := &GenericHandler[M]{
 		svc:     svc,
-		svcName: "(direct)",
+		svcName: resource,
 		config:  cfg,
 	}
 	h.initValidation()

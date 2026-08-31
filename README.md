@@ -141,8 +141,8 @@ func main() {
         UniqueFields:            [][]string{{"site_code"}},
     })
 
-    // 创建 Handler
-    h := handler.NewGenericHandlerWithSvc(svc, handler.HandlerConfig[entity.Site]{
+    // 创建 Handler（第二个参数是资源名，用于权限校验与日志，不能为空）
+    h := handler.NewGenericHandlerWithSvc(svc, "site", handler.HandlerConfig[entity.Site]{
         PathPrefix: "/api/v1/sites",
     })
 
@@ -323,7 +323,7 @@ repo := repository.NewMongoCRUDRepository[entity.Product]("products")
 svc := service.NewGenericServiceWithRepo(repo, service.Config[entity.Product]{
     EntityName: "product",
 })
-h := handler.NewGenericHandlerWithSvc(svc, handler.HandlerConfig[entity.Product]{
+h := handler.NewGenericHandlerWithSvc(svc, "product", handler.HandlerConfig[entity.Product]{
     PathPrefix: "/api/v1/product",
 })
 ```
@@ -919,7 +919,7 @@ HandlerConfig[entity.SysForm]{
 ### 直接注册
 
 ```go
-h := handler.NewGenericHandlerWithSvc(svc, cfg)
+h := handler.NewGenericHandlerWithSvc(svc, "site", cfg)
 h.RegisterRoutes(router.Group("/api/v1/sites"))
 ```
 

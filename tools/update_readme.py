@@ -87,7 +87,7 @@ repo := repository.NewMongoCRUDRepository[entity.Product]("products")
 svc := service.NewGenericServiceWithRepo(repo, service.Config[entity.Product]{
     EntityName: "product",
 })
-h := handler.NewGenericHandlerWithSvc(svc, handler.HandlerConfig[entity.Product]{
+h := handler.NewGenericHandlerWithSvc(svc, "product", handler.HandlerConfig[entity.Product]{
     PathPrefix: "/api/v1/product",
 })
 ```
