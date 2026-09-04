@@ -619,8 +619,11 @@ func validateField(rule *FieldRule, field string, data map[string]any) error {
 	if !exists || val == nil {
 		return nil
 	}
-	// 忽略空字符串（非必填时）
-	if !rule.Required && isEmpty(val) {
+	// 忽略标量空值（非必填时）：nil/空字符串不参与后续校验。
+	// 容器类型（[]any / map[string]any / json.RawMessage）即使为空也必须继续走
+	// coerceValue 的类型归一化（BUG-064：空数组若在此被 isEmpty 提前放行，
+	// 原始 []any 直达 json.Unmarshal，目标字段为 string 时报 500）。
+	if !rule.Required && isScalarEmpty(val) {
 		return nil
 	}
 
@@ -744,7 +747,8 @@ func validateInputCollect(rules EndpointRules, data map[string]any, endpoint str
 	return batchErrs
 }
 
-// isEmpty 判断值是否为空（nil / 空字符串）。
+// isEmpty 判断值是否为空（nil / 空字符串 / 空数组）。
+// 用于必填判空（required 传空数组视为未填）；容器类型语义见 isScalarEmpty。
 func isEmpty(v any) bool {
 	if v == nil {
 		return true
@@ -754,6 +758,23 @@ func isEmpty(v any) bool {
 		return x == ""
 	case []any:
 		return len(x) == 0
+	default:
+		return false
+	}
+}
+
+// isScalarEmpty 判断是否为标量空值（nil / 空字符串）。
+// 与 isEmpty 的区别：容器类型（[]any / map[string]any / json.RawMessage）
+// 一律判 false——即使空容器也必须继续走 coerceValue 的类型归一化
+// （BUG-064），不能在「非必填空值跳过」处被放行，否则原始 []any/map
+// 会绕过 coerceToString 直达 json.Unmarshal 造成写入 500。
+func isScalarEmpty(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch x := v.(type) {
+	case string:
+		return x == ""
 	default:
 		return false
 	}

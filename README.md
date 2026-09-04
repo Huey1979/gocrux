@@ -412,7 +412,7 @@ type Record interface {
 
 **type:json 空串归一化（BUG-044）** — string 类型 + gorm tag 含 `type:json` 的字段，若 MergeTo 后值为 `""`，自动改写为 `"null"`。MySQL JSON 列不接受空字符串（Error 3140），实体 `SetDefaults()` 兜底防不了显式传空串（MergeTo 覆盖），由框架层统一归一化。`"null"` 对任意 JSON 目标类型（slice/map/struct）均合法，语义中性（表示"无配置"）。
 
-**type:json 原生 JSON 传参（BUG-055）** — 自动字段校验（`deriveFieldRules`）将 `gorm:"type:json"` 的 string 字段推导为 `Type=string, Format=json`；Create/Update 请求可直接传**原生 JSON 数组/对象**（`["01KW_TECH_DEPT"]` / `{"op":"eq"}`），校验层自动 `json.Marshal` 序列化为 JSON 字符串落库，不再报「无法转为字符串类型」。`json.RawMessage` 字段同样支持（先 `json.Valid` 校验）。兼容既有传 JSON 字符串的调用方（`string` 分支原样通过）。
+**type:json 原生 JSON 传参（BUG-055）** — 自动字段校验（`deriveFieldRules`）将 `gorm:"type:json"` 的 string 字段推导为 `Type=string, Format=json`；Create/Update 请求可直接传**原生 JSON 数组/对象**（`["01KW_TECH_DEPT"]` / `{"op":"eq"}`），校验层自动 `json.Marshal` 序列化为 JSON 字符串落库，不再报「无法转为字符串类型」。`json.RawMessage` 字段同样支持（先 `json.Valid` 校验）。兼容既有传 JSON 字符串的调用方（`string` 分支原样通过）。**空容器同样归一化（BUG-064）** — 非必填字段传**空数组 `[]` / 空对象 `{}`** 不再被「空值跳过校验」提前放行，而是继续序列化为 `"[]"` / `"{}"` 落库（`validateField` 的空值跳过仅对标量 nil/空字符串生效）；required 字段传空数组仍报「必填」。
 
 **显式零值字段真实落库（BUG-045 / BUG-046 / BUG-047）** — Create / 版本化 Update 插入时，请求中**显式出现**的零值字段（`0`/`false`/`""`）真实落库，不被 GORM 零值忽略 + DB 列默认值覆盖（如 `is_enabled=0` 不再落库变 `1`）。白名单 = 实体非零字段列 ∪ 请求显式字段列；请求未显式传的零值字段仍走 DB 默认值，行为与旧版一致。实现依赖可选接口 `RequestFields`（`MapRequest` 已内置实现 `Data()`），业务自定义 Request 实现 `Data() map[string]any` 即可生效。
 
