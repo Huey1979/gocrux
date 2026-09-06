@@ -227,14 +227,23 @@ func (s *GenericService[M]) IsVersionMode() bool {
 //
 // 仓储层按主键的读写（GetByID / UpdateByID / Save …）不追加软删条件，
 // 且 heims 实体用自维护的 IsDeleted 列而非 gorm.DeletedAt，GORM 不会自动过滤。
-// 因此服务层收口：按主键取到记录后在此判定是否已删，get/update 一律按
-// 「记录不存在」处理，与 _doList / _doGetByCode 的软删过滤对齐。
+//
+// 收口策略（读写不对称，有意如此）：
+//   - 写路径（Update / BatchUpdateByIDs）：已删记录一律拒绝，返回 ErrRecordNotFound。
+//     理由：这是数据完整性问题（静默改写、版本化"复活"），不是权限问题。
+//     需要修改已删记录时，先 Restore 再 Update。
+//   - 读路径（Get）：**不做过滤**，记录照常返回（含 is_deleted 标记）。
+//     理由：是否允许查看已删数据属业务权限语义，应由应用端在 AfterGet 钩子中
+//     按 IsSoftDeleted() 自行判定（无权则返回 403 / 置空），框架不越俎代庖
+//     ——否则回收站、查看详情、恢复等场景会被框架彻底堵死。
 // ============================================================
 
-// deletedCol 返回软删判定配置：(DB 列名, 未删除时的值, 是否启用软删)。
+// DeletedColumn 返回软删判定配置：(DB 列名, 未删除时的值, 是否启用软删)。
 // 实体 SetDelete() 返回 false（无软删列）时 ok=false —— 调用方不得拼接过滤条件，
 // 否则无该列的表会报未知列。
-func (s *GenericService[M]) deletedCol() (field string, liveVal any, ok bool) {
+//
+// 导出供应用端在 AfterGet 等钩子中自行判定（BUG-069）。
+func (s *GenericService[M]) DeletedColumn() (field string, liveVal any, ok bool) {
 	m := newRecord[M]()
 	if !m.SetDelete() {
 		return "", nil, false
@@ -252,20 +261,30 @@ func (s *GenericService[M]) deletedCol() (field string, liveVal any, ok bool) {
 
 // softDeleteFilter 构造「未删除」过滤条件，供 ListByFilters 类查询复用。
 func (s *GenericService[M]) softDeleteFilter() (repository.Filter, bool) {
-	field, val, ok := s.deletedCol()
+	field, val, ok := s.DeletedColumn()
 	if !ok {
 		return repository.Filter{}, false
 	}
 	return repository.Filter{Field: field, Op: repository.OpEQ, Value: val}, true
 }
 
-// isSoftDeleted 判定记录是否已被软删除。
+// IsSoftDeleted 判定记录是否已被软删除。
 // 取不到软删字段（实体无该列）时一律返回 false，避免误伤不支持软删的实体。
-func (s *GenericService[M]) isSoftDeleted(m *M) bool {
+//
+// 导出供应用端在 AfterGet 钩子中决定是否向当前调用方暴露已删数据（BUG-069），
+// 典型用法：
+//
+//	func (s *XxxService) afterGet(ctx context.Context, m *Entity) (*Entity, error) {
+//	    if s.IsSoftDeleted(m) && !hasRecycleBinPerm(ctx) {   // 仅恢复/回收站权限可见
+//	        return m, nil                                     // 或置空敏感字段 / 返回 ErrRecordNotFound
+//	    }
+//	    return m, nil
+//	}
+func (s *GenericService[M]) IsSoftDeleted(m *M) bool {
 	if m == nil {
 		return false
 	}
-	col, liveVal, ok := s.deletedCol()
+	col, liveVal, ok := s.DeletedColumn()
 	if !ok {
 		return false
 	}
@@ -530,6 +549,35 @@ func (s *GenericService[M]) Delete(ctx context.Context, ids, codes any) error {
 		return err
 	}
 	return s.afterDelete(ctx, pid, pdata)
+}
+
+// Restore 批量恢复已软删记录（BUG-069 配套能力）。
+//
+// 语义：仅把软删字段置回「未删值」（如 is_deleted=0），**不改动任何业务字段**。
+// 「恢复」与「修改」严格分离：已删记录不可直接 Update（写路径已收口拒绝），
+// 必须先 Restore 再 Update —— 这样版本化实体不会以已删旧行为底派生
+// is_current=1 的新版本行（即"复活"），恢复动作本身也保持幂等可审计。
+//
+// 不支持软删的实体（SetDelete() 返回 false，删除走物理删 + 备份日志）
+// 返回 ErrSoftDeleteNotSupported。
+func (s *GenericService[M]) Restore(ctx context.Context, ids []any) error {
+	if len(ids) == 0 {
+		return errs.ErrMissingParam("ids")
+	}
+	field, liveVal, ok := s.DeletedColumn()
+	if !ok {
+		return errs.ErrSoftDeleteNotSupported
+	}
+
+	updates := map[string]any{field: liveVal}
+	updates["updated_at"] = time.Now()
+	if uid := GetUserULID(ctx); uid != "" {
+		updates["updated_by"] = uid
+	}
+
+	// 直接走仓储层：**不能**用 service 的 BatchUpdateByIDs —— 它会剔除已删 id
+	// （BUG-069 写路径收口），用它恢复会把待恢复的记录自己过滤掉。
+	return s.repo.UpdateByIDs(ctx, ids, updates)
 }
 
 // Get 按主键查询单条记录（不含展开，仅数据库查询）。

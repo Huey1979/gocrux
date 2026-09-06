@@ -418,6 +418,31 @@ func (h *GenericHandler[M]) _afterDelete(ctx context.Context) error {
 	return nil
 }
 
+// ============================================================
+// Restore — 恢复已软删记录（BUG-069）
+//
+// 与 Update 严格分离：Restore 只把软删字段置回「未删值」，
+// 不承载任何业务字段修改；需要改已删记录时先 Restore 再 Update。
+// ============================================================
+
+func (h *GenericHandler[M]) _beforeRestore(_ context.Context, ids any) (any, error) {
+	// 默认：透传
+	return ids, nil
+}
+
+func (h *GenericHandler[M]) _doRestore(ctx context.Context, ids any) error {
+	idList, ok := ids.([]any)
+	if !ok || len(idList) == 0 {
+		return errs.ErrMissingParam("ids")
+	}
+	return h.svc.Restore(ctx, idList)
+}
+
+func (h *GenericHandler[M]) _afterRestore(_ context.Context, _ any) error {
+	// 默认：空操作
+	return nil
+}
+
 // resolveSelfFKCodeRefs 解析同一批次子数据中的自引用 FK 代码字段。
 //
 // 背景：某些实体（如 SysMenuItem）通过 parent_menu_code（代码）表达

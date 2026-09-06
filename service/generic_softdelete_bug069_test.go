@@ -30,14 +30,15 @@ type bug069Doc struct {
 	ULID      string    `gorm:"column:ulid;primaryKey;size:26" json:"ulid"`
 	Name      string    `gorm:"column:name;size:100" json:"name"`
 	IsDeleted int8      `gorm:"column:is_deleted;default:0" json:"-"`
-	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"` // BatchUpdateByIDs 自动补审计字段
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
+	UpdatedBy string    `gorm:"column:updated_by;size:26" json:"updated_by"` // Restore/BatchUpdateByIDs 自动补审计字段
 }
 
 func (d *bug069Doc) SetDefaults()             {}
 func (d *bug069Doc) SetCreatedAt(_ time.Time) {}
 func (d *bug069Doc) SetCreatedBy(string)      {}
 func (d *bug069Doc) SetUpdatedAt(t time.Time) { d.UpdatedAt = t }
-func (d *bug069Doc) SetUpdatedBy(string)      {}
+func (d *bug069Doc) SetUpdatedBy(uid string)  { d.UpdatedBy = uid }
 func (d *bug069Doc) SupportsDraft() bool      { return false }
 func (d *bug069Doc) SetDelete() bool          { d.IsDeleted = 1; return true }
 func (d *bug069Doc) PKField() string          { return "ulid" }
@@ -133,9 +134,10 @@ func openBug069DB(t *testing.T, objs ...any) *gorm.DB {
 	return db
 }
 
-// TestBug069GetDeletedRecordReturnsNotFound 用例 1：
-// create → delete → get 必须 ErrRecordNotFound（修复前返回完整记录）。
-func TestBug069GetDeletedRecordReturnsNotFound(t *testing.T) {
+// TestBug069GetKeepsDeletedRecordForHook 用例 1（读路径语义）：
+// create → delete → get **照常返回**记录（带 is_deleted=1）——
+// 是否可见交由应用端 AfterGet 钩子判定，框架不拦截（回收站/恢复场景需要读得到）。
+func TestBug069GetKeepsDeletedRecordForHook(t *testing.T) {
 	db := openBug069DB(t, &bug069Doc{})
 	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{})
 	ctx := context.Background()
@@ -169,9 +171,16 @@ func TestBug069GetDeletedRecordReturnsNotFound(t *testing.T) {
 		t.Fatalf("is_deleted = %d, want 1", raw.IsDeleted)
 	}
 
-	// BUG-069 核心：已删记录必须按不存在处理
-	if _, err := svc.Get(ctx, id); !goerrors.Is(err, errs.ErrRecordNotFound) {
-		t.Fatalf("BUG-069: Get deleted record must be ErrRecordNotFound, got %v", err)
+	// BUG-069：读路径不过滤 —— 记录照常返回，且携带 is_deleted 标记供应用端判定
+	gotAfterDelete, err := svc.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("BUG-069: get must not filter deleted records (app layer decides), got %v", err)
+	}
+	if (*gotAfterDelete).IsDeleted != 1 {
+		t.Errorf("deleted record must carry is_deleted=1 for app-layer judgement, got %d", (*gotAfterDelete).IsDeleted)
+	}
+	if !svc.IsSoftDeleted(gotAfterDelete) {
+		t.Error("IsSoftDeleted must detect the returned record as deleted (app-layer hook entry point)")
 	}
 }
 
@@ -350,9 +359,15 @@ func TestBug069CustomDeletedFieldConfig(t *testing.T) {
 	if err := db.Model(&bug069CustomDoc{}).Where("ulid = ?", id).Update("deleted", "y").Error; err != nil {
 		t.Fatalf("mark deleted: %v", err)
 	}
-	if _, err := svc.Get(ctx, id); !goerrors.Is(err, errs.ErrRecordNotFound) {
-		t.Errorf("BUG-069: custom deleted field must be honored in get, got %v", err)
+	// 读路径不过滤：记录照常返回，应用端用 IsSoftDeleted 判定可见性
+	gotDeleted, err := svc.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get must not filter deleted records, got %v", err)
 	}
+	if !svc.IsSoftDeleted(gotDeleted) {
+		t.Error("custom deleted field must be detected by IsSoftDeleted")
+	}
+	// 写路径收口：已删记录不可 update（需先 Restore）
 	if _, err := svc.Update(ctx, id, &bug069Req[*bug069CustomDoc]{
 		data: map[string]any{"name": "hacked"},
 	}); !goerrors.Is(err, errs.ErrRecordNotFound) {
@@ -395,6 +410,65 @@ func TestBug069BatchUpdateByIDsSkipsDeleted(t *testing.T) {
 	}
 	if liveRow.Name != "batch" {
 		t.Errorf("live row must still be updated, name = %q", liveRow.Name)
+	}
+}
+
+// TestBug069RestoreThenUpdate 恢复链路（BUG-069 配套能力）：
+// 已删记录不可 update → Restore 之后才可 update，即「先恢复、再修改」。
+func TestBug069RestoreThenUpdate(t *testing.T) {
+	db := openBug069DB(t, &bug069Doc{})
+	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{})
+	ctx := context.WithValue(context.Background(), CtxKeyUserULID, "restorer-ulid")
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069Doc]{
+		&bug069Req[*bug069Doc]{data: map[string]any{"name": "origin"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := (*created[0]).ULID
+	if err := svc.Delete(ctx, []any{id}, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// 1) 已删 → update 被拒（写路径收口）
+	if _, err := svc.Update(ctx, id, &bug069Req[*bug069Doc]{
+		data: map[string]any{"name": "direct"},
+	}); !goerrors.Is(err, errs.ErrRecordNotFound) {
+		t.Fatalf("BUG-069: update before restore must be rejected, got %v", err)
+	}
+
+	// 2) Restore —— 只把软删字段置回未删值
+	if err := svc.Restore(ctx, []any{id}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	var afterRestore bug069Doc
+	if err := db.Where("ulid = ?", id).First(&afterRestore).Error; err != nil {
+		t.Fatalf("query after restore: %v", err)
+	}
+	if afterRestore.IsDeleted != 0 {
+		t.Errorf("is_deleted after restore = %d, want 0", afterRestore.IsDeleted)
+	}
+	if afterRestore.Name != "origin" {
+		t.Errorf("restore must not modify business fields, name = %q want origin", afterRestore.Name)
+	}
+
+	// 3) 恢复后 → update 成功（先恢复、再修改）
+	updated, err := svc.Update(ctx, id, &bug069Req[*bug069Doc]{data: map[string]any{"name": "modified"}})
+	if err != nil {
+		t.Fatalf("update after restore: %v", err)
+	}
+	if (*updated).Name != "modified" {
+		t.Errorf("name after update = %q, want modified", (*updated).Name)
+	}
+}
+
+// TestBug069RestoreUnsupportedEntityIntegration 物理删实体无恢复语义。
+func TestBug069RestoreUnsupportedEntityIntegration(t *testing.T) {
+	db := openBug069DB(t, &bug069NoDelDoc{})
+	svc := NewGenericService[*bug069NoDelDoc](repository.NewCRUDWithDB[*bug069NoDelDoc](db), Config[*bug069NoDelDoc]{})
+	if err := svc.Restore(context.Background(), []any{"x"}); !goerrors.Is(err, errs.ErrSoftDeleteNotSupported) {
+		t.Errorf("Restore on physical-delete entity = %v, want ErrSoftDeleteNotSupported", err)
 	}
 }
 

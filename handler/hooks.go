@@ -41,6 +41,12 @@ type HandlerHooks[M service.Record] struct {
 	DoDelete     func(ctx context.Context, ids, codes any) error
 	AfterDelete  func(ctx context.Context) error
 
+	// -------- Restore（恢复已软删记录，BUG-069） --------
+	// 仅把软删标记置回未删值，不改业务字段；需要修改已删记录时先 Restore 再 Update。
+	BeforeRestore func(ctx context.Context, ids any) (any, error)
+	DoRestore     func(ctx context.Context, ids any) error
+	AfterRestore  func(ctx context.Context, ids any) error
+
 	// -------- Get --------
 	BeforeGet func(ctx context.Context, req *GetRequest) (*GetRequest, error)
 	DoGet     func(ctx context.Context, req *GetRequest) (map[string]any, error)

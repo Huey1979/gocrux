@@ -33,6 +33,10 @@ var (
 	ErrRecordNotFound                       = errors.New("记录不存在")
 	ErrInvalidVersionStatusTransition       = errors.New("不允许的版本状态迁移")
 	ErrBatchUpdateSimpleNotSupportVersion   = errors.New("简单批量更新不支持版本化管理表")
+
+	// ErrSoftDeleteNotSupported 实体不支持软删除（SetDelete() 返回 false，
+	// 删除走物理删 + 备份日志），因此没有"恢复"语义（BUG-069）。
+	ErrSoftDeleteNotSupported = errors.New("实体不支持软删除，无法恢复")
 )
 
 // ============================================================

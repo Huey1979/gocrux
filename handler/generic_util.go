@@ -90,12 +90,36 @@ func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
 	r.POST(p+"/update", h.Update)
 	r.POST(p+"/batch-update", h.BatchUpdate)
 	r.POST(p+"/delete", h.Delete)
+	// BUG-069：仅支持软删的实体注册恢复路由（物理删实体无恢复语义）
+	if supportsSoftDelete[M]() {
+		r.POST(p+"/restore", h.Restore)
+	}
 	if h.svc.SupportsVersion() {
 		r.POST(p+"/activate", h.Activate)
 		r.GET(p+"/versions", h.ListVersions)
 		r.POST(p+"/edit-version", h.EditVersion)
 		r.GET(p+"/versions-archived", h.ListArchivedVersions)
 	}
+}
+
+// supportsSoftDelete 判断实体是否支持软删（Record.SetDelete() 返回 true）。
+// 用于决定是否注册 /restore 路由：走物理删的实体没有恢复语义（BUG-069）。
+//
+// 注意：SetDelete() 会顺带把软删字段置位，这里在**新分配的临时零值实例**上调用，
+// 不触碰任何业务数据。
+func supportsSoftDelete[M service.Record]() bool {
+	var zero M
+	t := reflect.TypeOf(zero)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	if sd, ok := reflect.New(t).Interface().(interface{ SetDelete() bool }); ok {
+		return sd.SetDelete()
+	}
+	return false
 }
 
 // ============================================================

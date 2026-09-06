@@ -34,6 +34,11 @@ func mapServiceError(err error) constants.BusinessCode {
 		return constants.CodeBadRequest
 	}
 
+	// 软删除（BUG-069）：不支持软删的实体没有恢复语义
+	if errors.Is(err, errs.ErrSoftDeleteNotSupported) {
+		return constants.CodeBadRequest
+	}
+
 	// 业务码错误（BUG-058）：钩子/业务校验返回 BizError 时透传自定义业务码。
 	// 置于哨兵错误之后，保证现有哨兵映射优先级不回归。
 	var bizErr *errs.BizError

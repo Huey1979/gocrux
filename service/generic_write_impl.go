@@ -508,7 +508,8 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	// 此处是版本化与非版本化两条写路径的共同入口，单点收口即同时杜绝
 	// ① 非版本化 Save 全行覆盖改写已删记录；② 版本化以已删旧行为底插入
 	// is_current=1 新行（把已删实体复活成当前生效版本）。
-	if s.isSoftDeleted(old) {
+	// 需要修改已删记录时，先 Restore（只把软删标记置回未删值）再 Update。
+	if s.IsSoftDeleted(old) {
 		return nil, nil, errs.ErrRecordNotFound
 	}
 

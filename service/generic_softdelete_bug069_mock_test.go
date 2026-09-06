@@ -30,6 +30,7 @@ type bug069MockRepo[M Record] struct {
 	byIDErr     error
 	lastFilters repository.ListFilters
 	lastIDs     []any
+	lastUpdates map[string]any
 	updateCalls int
 	listCalls   int
 }
@@ -56,9 +57,10 @@ func (m *bug069MockRepo[M]) ListByFilters(_ context.Context, f repository.ListFi
 	return out, int64(len(out)), nil
 }
 
-func (m *bug069MockRepo[M]) UpdateByIDs(_ context.Context, ids []any, _ map[string]any) error {
+func (m *bug069MockRepo[M]) UpdateByIDs(_ context.Context, ids []any, updates map[string]any) error {
 	m.updateCalls++
 	m.lastIDs = ids
+	m.lastUpdates = updates
 	return nil
 }
 
@@ -138,29 +140,29 @@ func bug069MatchFilters[M Record](row M, filters []repository.Filter) bool {
 func TestBug069DeletedColSemantics(t *testing.T) {
 	// 无软删列实体
 	svcNo := &GenericService[*bug069NoDelDoc]{}
-	if _, _, ok := svcNo.deletedCol(); ok {
+	if _, _, ok := svcNo.DeletedColumn(); ok {
 		t.Error("SetDelete()=false must report ok=false (no soft-delete column)")
 	}
 	if _, ok := svcNo.softDeleteFilter(); ok {
 		t.Error("SetDelete()=false must not produce a soft-delete filter")
 	}
 	noDelRow := &bug069NoDelDoc{ULID: "u", Name: "n"}
-	if svcNo.isSoftDeleted(&noDelRow) {
+	if svcNo.IsSoftDeleted(&noDelRow) {
 		t.Error("entity without soft-delete column must never be treated as deleted")
 	}
 
 	// 默认配置
 	svc := &GenericService[*bug069Doc]{}
-	field, val, ok := svc.deletedCol()
+	field, val, ok := svc.DeletedColumn()
 	if !ok || field != "is_deleted" || val != int8(0) {
-		t.Errorf("deletedCol() = (%q, %v, %v), want (is_deleted, 0, true)", field, val, ok)
+		t.Errorf("DeletedColumn() = (%q, %v, %v), want (is_deleted, 0, true)", field, val, ok)
 	}
 	delRow := &bug069Doc{ULID: "u", IsDeleted: 1}
-	if !svc.isSoftDeleted(&delRow) {
+	if !svc.IsSoftDeleted(&delRow) {
 		t.Error("is_deleted=1 must be detected as deleted")
 	}
 	liveRow := &bug069Doc{ULID: "u"}
-	if svc.isSoftDeleted(&liveRow) {
+	if svc.IsSoftDeleted(&liveRow) {
 		t.Error("is_deleted=0 must be treated as live")
 	}
 
@@ -168,32 +170,39 @@ func TestBug069DeletedColSemantics(t *testing.T) {
 	svcCustom := &GenericService[*bug069CustomDoc]{
 		config: Config[*bug069CustomDoc]{DeletedField: "deleted", DeletedValue: "n"},
 	}
-	field, val, ok = svcCustom.deletedCol()
+	field, val, ok = svcCustom.DeletedColumn()
 	if !ok || field != "deleted" || val != "n" {
-		t.Errorf("custom deletedCol() = (%q, %v, %v), want (deleted, n, true)", field, val, ok)
+		t.Errorf("custom DeletedColumn() = (%q, %v, %v), want (deleted, n, true)", field, val, ok)
 	}
 	f, ok := svcCustom.softDeleteFilter()
 	if !ok || f.Field != "deleted" || f.Op != repository.OpEQ || f.Value != "n" {
 		t.Errorf("softDeleteFilter() = %+v, want {deleted eq n}", f)
 	}
 	customDel := &bug069CustomDoc{ULID: "u", Deleted: "y"}
-	if !svcCustom.isSoftDeleted(&customDel) {
+	if !svcCustom.IsSoftDeleted(&customDel) {
 		t.Error("custom deleted='y' must be detected as deleted")
 	}
 	customLive := &bug069CustomDoc{ULID: "u", Deleted: "n"}
-	if svcCustom.isSoftDeleted(&customLive) {
+	if svcCustom.IsSoftDeleted(&customLive) {
 		t.Error("custom deleted='n' must be treated as live")
 	}
 }
 
-// TestBug069DoGetRejectsDeletedRecord _doGet 对已删记录返回 ErrRecordNotFound。
-func TestBug069DoGetRejectsDeletedRecord(t *testing.T) {
+// TestBug069GetKeepsDeletedRecordForAppLayer 读路径**不做**软删过滤：
+// 已删记录照常返回（携带 is_deleted 标记），是否允许调用方查看属业务权限，
+// 由应用端在 AfterGet 钩子中用 IsSoftDeleted() 判定（403 / 置空）。
+// 框架若在此拦截，回收站查看与恢复场景将被堵死。
+func TestBug069GetKeepsDeletedRecordForAppLayer(t *testing.T) {
 	ctx := context.Background()
 
 	deleted := &bug069MockRepo[*bug069Doc]{byID: &bug069Doc{ULID: "u1", Name: "x", IsDeleted: 1}}
 	svcDeleted := &GenericService[*bug069Doc]{repo: deleted}
-	if _, err := svcDeleted._doGet(ctx, "u1"); err != errs.ErrRecordNotFound {
-		t.Errorf("BUG-069: _doGet on deleted record = %v, want ErrRecordNotFound", err)
+	gotDeleted, err := svcDeleted._doGet(ctx, "u1")
+	if err != nil {
+		t.Fatalf("BUG-069: get must not filter deleted records (app layer decides), got %v", err)
+	}
+	if !svcDeleted.IsSoftDeleted(gotDeleted) {
+		t.Error("returned record must carry the deleted flag so the app layer can judge visibility")
 	}
 
 	live := &bug069MockRepo[*bug069Doc]{byID: &bug069Doc{ULID: "u2", Name: "ok"}}
@@ -264,6 +273,52 @@ func TestBug069BatchUpdateAllDeletedNoOp(t *testing.T) {
 	}
 	if repo.updateCalls != 0 {
 		t.Errorf("all-deleted ids must not reach repo.UpdateByIDs, calls = %d", repo.updateCalls)
+	}
+}
+
+// TestBug069RestoreOnlyTouchesDeletedFlag Restore 只把软删字段置回「未删值」：
+// updates 中不得出现任何业务字段（恢复 ≠ 修改）。
+func TestBug069RestoreOnlyTouchesDeletedFlag(t *testing.T) {
+	repo := &bug069MockRepo[*bug069Doc]{}
+	svc := &GenericService[*bug069Doc]{repo: repo}
+
+	if err := svc.Restore(context.Background(), []any{"a", "b"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if repo.updateCalls != 1 {
+		t.Fatalf("repo.UpdateByIDs calls = %d, want 1", repo.updateCalls)
+	}
+	if len(repo.lastIDs) != 2 {
+		t.Errorf("ids = %v, want [a b]", repo.lastIDs)
+	}
+	if v, ok := repo.lastUpdates["is_deleted"]; !ok || v != int8(0) {
+		t.Errorf("updates must set is_deleted = 0, got %v", repo.lastUpdates)
+	}
+	if _, ok := repo.lastUpdates["name"]; ok {
+		t.Errorf("Restore must not touch business columns, got %v", repo.lastUpdates)
+	}
+	if _, ok := repo.lastUpdates["updated_at"]; !ok {
+		t.Errorf("Restore must fill updated_at audit column, got %v", repo.lastUpdates)
+	}
+	// 必须绕过 BatchUpdateByIDs 的已删剔除（否则待恢复的记录会被自己过滤掉）
+	if repo.listCalls != 0 {
+		t.Errorf("Restore must go straight to repo.UpdateByIDs, listCalls = %d", repo.listCalls)
+	}
+}
+
+// TestBug069RestoreUnsupportedEntity 物理删实体无恢复语义。
+func TestBug069RestoreUnsupportedEntity(t *testing.T) {
+	repo := &bug069MockRepo[*bug069NoDelDoc]{}
+	svc := &GenericService[*bug069NoDelDoc]{repo: repo}
+
+	if err := svc.Restore(context.Background(), []any{"a"}); err != errs.ErrSoftDeleteNotSupported {
+		t.Errorf("Restore on non-soft-delete entity = %v, want ErrSoftDeleteNotSupported", err)
+	}
+	if repo.updateCalls != 0 {
+		t.Errorf("must not reach repo, updateCalls = %d", repo.updateCalls)
+	}
+	if err := svc.Restore(context.Background(), nil); !errs.IsMissingParam(err) {
+		t.Errorf("Restore with empty ids = %v, want missing param", err)
 	}
 }
 

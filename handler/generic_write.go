@@ -510,6 +510,73 @@ func (h *GenericHandler[M]) doDelete(ctx context.Context, ids, codes any) error 
 	return h._doDelete(ctx, ids, codes)
 }
 
+// Restore 恢复已软删记录（仅把软删标记置回未删值，不改业务字段）
+// POST /{prefix}/restore
+//
+// 与 Update 分离：已删记录不可直接 Update，必须先 Restore 再 Update。
+// 仅支持软删的实体注册此路由（物理删实体无恢复语义）。
+func (h *GenericHandler[M]) Restore(c *gin.Context) {
+	if !h.checkPerm(c, "restore") {
+		return
+	}
+	ctx := c.Request.Context()
+
+	var raw struct {
+		IDs []any `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		h.handleError(c, err)
+		return
+	}
+	if len(raw.IDs) == 0 {
+		h.handleError(c, errs.ErrMissingParam("ids"))
+		return
+	}
+
+	if err := h.restorePipeline(ctx, raw.IDs); err != nil {
+		h.handleError(c, err)
+		return
+	}
+	SuccessWithMessage(c, "恢复成功", nil)
+}
+
+// restorePipeline 统一管线。
+func (h *GenericHandler[M]) restorePipeline(ctx context.Context, ids any) (err error) {
+	start := traceStart(ctx, h.svcName+".restore", logrus.Fields{"ids": ids})
+	defer func() { traceEnd(ctx, h.svcName+".restore", start, err) }()
+	pid, err := h.beforeRestore(ctx, ids)
+	if err != nil {
+		return err
+	}
+
+	if err := h.doRestore(ctx, pid); err != nil {
+		return err
+	}
+
+	return h.afterRestore(ctx, pid)
+}
+
+func (h *GenericHandler[M]) beforeRestore(ctx context.Context, ids any) (any, error) {
+	if h.hooks.BeforeRestore != nil {
+		return h.hooks.BeforeRestore(ctx, ids)
+	}
+	return h._beforeRestore(ctx, ids)
+}
+
+func (h *GenericHandler[M]) doRestore(ctx context.Context, ids any) error {
+	if h.hooks.DoRestore != nil {
+		return h.hooks.DoRestore(ctx, ids)
+	}
+	return h._doRestore(ctx, ids)
+}
+
+func (h *GenericHandler[M]) afterRestore(ctx context.Context, ids any) error {
+	if h.hooks.AfterRestore != nil {
+		return h.hooks.AfterRestore(ctx, ids)
+	}
+	return h._afterRestore(ctx, ids)
+}
+
 func (h *GenericHandler[M]) afterDelete(ctx context.Context) error {
 	// 始终运行 GlobalStore 缓存清理（框架职责），
 	// 即使实体配置了自定义 AfterDelete hook

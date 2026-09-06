@@ -28,11 +28,10 @@ func (s *GenericService[M]) _doGet(ctx context.Context, id any) (*M, error) {
 		}
 		return nil, err
 	}
-	// BUG-069：按主键读到的记录若已被软删，一律按「记录不存在」处理（404）。
-	// 与 _doList / _doGetByCode 的软删过滤对齐，避免已删记录被按 ULID 精确读回。
-	if s.isSoftDeleted(result) {
-		return nil, errs.ErrRecordNotFound
-	}
+	// BUG-069：读路径**不做**软删过滤 —— 已删记录照常返回（含 is_deleted 标记）。
+	// 是否允许调用方查看已删数据属业务权限语义，由应用端在 AfterGet 钩子中
+	// 用 IsSoftDeleted() 自行判定（无权则 403 / 置空）；框架若在此拦截，
+	// 回收站查看、恢复等场景将被彻底堵死。
 	return result, nil
 }
 func (s *GenericService[M]) _afterGet(ctx context.Context, result *M) (*M, error) { return result, nil }
@@ -67,7 +66,7 @@ func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, 
 		{Field: codeCol, Op: repository.OpEQ, Value: code},
 		{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
 	}
-	if delField, delVal, ok := s.deletedCol(); ok {
+	if delField, delVal, ok := s.DeletedColumn(); ok {
 		filters = append(filters, repository.Filter{Field: delField, Op: repository.OpEQ, Value: delVal})
 	}
 	results, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
@@ -208,12 +207,12 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 			}
 		}
 		// 软删除过滤（与非版本化分支对齐）
-		// BUG-069：解析改为复用 deletedCol，与 get/update 判定同源
-		if field, val, ok := s.deletedCol(); ok {
+		// BUG-069：解析改为复用 DeletedColumn，与 update 路径判定同源
+		if field, val, ok := s.DeletedColumn(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	} else {
-		if field, val, ok := s.deletedCol(); ok {
+		if field, val, ok := s.DeletedColumn(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	}
