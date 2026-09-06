@@ -39,6 +39,11 @@ func mapServiceError(err error) constants.BusinessCode {
 		return constants.CodeBadRequest
 	}
 
+	// 版本化实体误用 restore / 编辑已废弃版本（BUG-069 复核）
+	if errors.Is(err, errs.ErrUseActivateInstead) || errors.Is(err, errs.ErrUpdateDeprecatedVersion) {
+		return constants.CodeBadRequest
+	}
+
 	// 业务码错误（BUG-058）：钩子/业务校验返回 BizError 时透传自定义业务码。
 	// 置于哨兵错误之后，保证现有哨兵映射优先级不回归。
 	var bizErr *errs.BizError

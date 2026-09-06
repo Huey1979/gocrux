@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/Huey1979/gocrux/internal/model/entity"
 	"github.com/Huey1979/gocrux/repository"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	"github.com/sirupsen/logrus"
 )
 
 // ============================================================
@@ -290,10 +292,15 @@ func (s *GenericService[M]) IsSoftDeleted(m *M) bool {
 	}
 	goField := resolveColumnFromDB[M](col)
 	if goField == "" {
+		// fail-open 告警（BUG-069 复核 P3）：配了软删列却解析不到实体 Go 字段
+		// （典型成因：字段被挪进匿名嵌入 struct，而 resolveColumnFromDB 不递归展开），
+		// 此处若静默返回 false，写守卫会整体失效且零报错 —— 必须留下痕迹。
+		logrus.Warnf("[gocrux] 软删列 %q 解析不到实体字段，IsSoftDeleted 恒返回 false（已删记录将不被拦截）", col)
 		return false
 	}
 	cur := getFieldVal(*m, goField)
 	if cur == nil {
+		logrus.Warnf("[gocrux] 软删列 %q（字段 %s）取值为 nil，IsSoftDeleted 恒返回 false", col, goField)
 		return false
 	}
 	return !sameSoftDeleteValue(cur, liveVal)
@@ -529,10 +536,7 @@ func (s *GenericService[M]) BatchUpdateByIDs(ctx context.Context, ids []any, upd
 	ids = liveIDs
 
 	// 补充审计字段
-	updates["updated_at"] = time.Now()
-	if uid := GetUserULID(ctx); uid != "" {
-		updates["updated_by"] = uid
-	}
+	s.fillAuditUpdates(ctx, updates)
 
 	return s.repo.UpdateByIDs(ctx, ids, updates)
 }
@@ -564,20 +568,47 @@ func (s *GenericService[M]) Restore(ctx context.Context, ids []any) error {
 	if len(ids) == 0 {
 		return errs.ErrMissingParam("ids")
 	}
+	// 版本化实体的「删除」= 废弃（只写 is_current=0 / version_status=deprecated，
+	// 从不写 is_deleted），restore 对其恒为空操作却返回 200，极易被误用
+	// （BUG-069 复核 P2）。恢复当前版本应走 Activate。
+	if s.config.VersionMode {
+		return errs.ErrUseActivateInstead
+	}
 	field, liveVal, ok := s.DeletedColumn()
 	if !ok {
 		return errs.ErrSoftDeleteNotSupported
 	}
 
 	updates := map[string]any{field: liveVal}
+	s.fillAuditUpdates(ctx, updates)
+
+	// 直接走仓储层：**不能**用 service 的 BatchUpdateByIDs —— 它会剔除已删 id
+	// （BUG-069 写路径收口），用它恢复会把待恢复的记录自己过滤掉。
+	if err := s.repo.UpdateByIDs(ctx, ids, updates); err != nil {
+		return err
+	}
+
+	// 恢复是安全相关状态迁移，纳入操作日志（与 update / delete 对齐）
+	if s.config.EnableOpLog && s.opLogRepo != nil {
+		entries := make([]opLogEntry, 0, len(ids))
+		for _, id := range ids {
+			entries = append(entries, opLogEntry{EntityID: fmt.Sprint(id), Operation: "restore"})
+		}
+		s.batchWriteOpLog(ctx, entries)
+	}
+	return nil
+}
+
+// fillAuditUpdates 补全审计字段（updated_at / updated_by），供 Restore 与
+// BatchUpdateByIDs 共用，避免两处各写一份。
+//
+// 列名沿用框架约定（`updated_at` / `updated_by`，由 gentity 生成，
+// 与 SetUpdatedAt/SetUpdatedBy 维护的列一致）；自定义审计列名的实体需自行覆盖。
+func (s *GenericService[M]) fillAuditUpdates(ctx context.Context, updates map[string]any) {
 	updates["updated_at"] = time.Now()
 	if uid := GetUserULID(ctx); uid != "" {
 		updates["updated_by"] = uid
 	}
-
-	// 直接走仓储层：**不能**用 service 的 BatchUpdateByIDs —— 它会剔除已删 id
-	// （BUG-069 写路径收口），用它恢复会把待恢复的记录自己过滤掉。
-	return s.repo.UpdateByIDs(ctx, ids, updates)
 }
 
 // Get 按主键查询单条记录（不含展开，仅数据库查询）。

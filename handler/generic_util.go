@@ -90,8 +90,9 @@ func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
 	r.POST(p+"/update", h.Update)
 	r.POST(p+"/batch-update", h.BatchUpdate)
 	r.POST(p+"/delete", h.Delete)
-	// BUG-069：仅支持软删的实体注册恢复路由（物理删实体无恢复语义）
-	if supportsSoftDelete[M]() {
+	// BUG-069：仅「支持软删 + 非版本化」的实体注册恢复路由 ——
+	// 物理删实体无恢复语义；版本化实体删除=废弃，恢复走 /activate
+	if supportsSoftDelete[M]() && !h.svc.SupportsVersion() {
 		r.POST(p+"/restore", h.Restore)
 	}
 	if h.svc.SupportsVersion() {

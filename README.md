@@ -406,8 +406,13 @@ type Record interface {
 仓储层按主键的读写（`GetByID` / `Save` / `UpdateByIDs`）不追加软删条件，且实体用自维护的 `is_deleted` 列而非 `gorm.DeletedAt`，GORM 不会自动过滤。服务层按「**读不管、写收口**」处理：
 
 - **写路径收口**（`update` / `batch-update`）：目标是已软删记录 → `ErrRecordNotFound`（404）。非版本化不会被 `Save` 全行覆盖改写，版本化不会以已删旧行为底派生 `is_current=1` 的新版本行（避免「复活」）。`batch-update` 自动剔除已删 id，全部已删则无操作返回成功（与 BUG-052 空 ids 语义一致）。
+- **版本化实体的另一条守卫**：更新 `is_current=0` 的**已废弃版本行**会被拒绝（`ErrUpdateDeprecatedVersion`，400）。该操作会以废弃行为底派生 `is_current=1` 新行，等于「复活 + 改写 + 凭空造新版本号」一步完成，且绕过 `Before/AfterActivate` 钩子与 `activate` 操作日志；正确路径是**先 `/activate` 再编辑**。草稿行 `is_current=1` 不受影响。
 - **读路径不过滤**（`get`）：已删记录照常返回（携带 `is_deleted` 标记）。是否允许调用方查看已删数据属**业务权限语义**，由应用端在 `AfterGet` 钩子中用 `IsSoftDeleted()` 自行判定（无权则 403 / 置空字段）；框架不在主流程拦截 —— 否则回收站查看、恢复等场景会被彻底堵死。
-- **恢复接口**：`POST /{prefix}/restore`，body `{"ids":[...]}`。仅支持软删的实体自动注册该路由。**只把软删字段置回「未删值」，不改动任何业务字段**（恢复 ≠ 修改）；需要修改已删记录时**先 `restore` 再 `update`**。物理删实体（`SetDelete()` 返回 `false`）不注册该路由，服务层调用返回 `ErrSoftDeleteNotSupported`（400）。当前不做级联恢复，子表恢复可由应用端在 `DoRestore` 钩子中扩展。
+- **恢复接口**：`POST /{prefix}/restore`，body `{"ids":[...]}`。**只把软删字段置回「未删值」，不改动任何业务字段**（恢复 ≠ 修改）；需要修改已删记录时**先 `restore` 再 `update`**。
+  - 注册条件：**支持软删 + 非版本化**。物理删实体（`SetDelete()` 返回 `false`）无恢复语义，服务层调用返回 `ErrSoftDeleteNotSupported`（400）；版本化实体的删除 = 废弃（只写 `is_current=0` / `version_status=deprecated`，从不写 `is_deleted`），restore 对其恒为空操作，故不注册路由、服务层调用返回 `ErrUseActivateInstead`（400）——恢复当前版本请走 `/activate`。
+  - ⚠️ **权限注意**：`Restore` 直连仓储层，**不经过** `BeforeUpdate` / `BeforeBatchUpdate` 钩子链，业务级权限与校验**必须挂在 `BeforeRestore`**（唯一拦截点），挂在 update 钩子上对 restore 无效。
+  - `EnableOpLog` 时写 `operation="restore"` 操作日志；`ids` 含不存在主键时不报错（无操作成功，与 BUG-052 语义一致）；对未删记录调用为幂等空操作。
+  - 当前**不做级联恢复**，子表如需同步恢复，由应用端在 `DoRestore` 钩子中扩展。
 - 不支持软删的实体不判定、不产生额外查询，行为完全不变。
 
 判定由导出方法 `DeletedColumn()`（复用 `DeletedField` / `DeletedValue` 配置）与 `IsSoftDeleted(*M)` 完成，值比较跨类型归一（`int8` / `int` / `bool` / `string`），避免实体字段类型与配置默认 `int8(0)` 不一致时误判。

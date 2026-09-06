@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	errs "github.com/Huey1979/gocrux/errors"
+	"github.com/Huey1979/gocrux/internal/model/entity"
 	"github.com/Huey1979/gocrux/repository"
 )
 
@@ -469,6 +470,244 @@ func TestBug069RestoreUnsupportedEntityIntegration(t *testing.T) {
 	svc := NewGenericService[*bug069NoDelDoc](repository.NewCRUDWithDB[*bug069NoDelDoc](db), Config[*bug069NoDelDoc]{})
 	if err := svc.Restore(context.Background(), []any{"x"}); !goerrors.Is(err, errs.ErrSoftDeleteNotSupported) {
 		t.Errorf("Restore on physical-delete entity = %v, want ErrSoftDeleteNotSupported", err)
+	}
+}
+
+// TestBug069RestoreIdempotentOnLiveRecord 对**未删除**记录调 Restore：
+// 幂等成功，软删标记与业务字段均不变（heims 复核补充）。
+func TestBug069RestoreIdempotentOnLiveRecord(t *testing.T) {
+	db := openBug069DB(t, &bug069Doc{})
+	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{})
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069Doc]{
+		&bug069Req[*bug069Doc]{data: map[string]any{"name": "live"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := (*created[0]).ULID
+
+	if err := svc.Restore(ctx, []any{id}); err != nil {
+		t.Fatalf("Restore on live record must be idempotent success: %v", err)
+	}
+	var row bug069Doc
+	if err := db.Where("ulid = ?", id).First(&row).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if row.IsDeleted != 0 || row.Name != "live" {
+		t.Errorf("live record must stay untouched, is_deleted=%d name=%q", row.IsDeleted, row.Name)
+	}
+}
+
+// TestBug069RestoreMixedIDs ids 混合已删与未删：只恢复已删部分，不误伤未删记录。
+func TestBug069RestoreMixedIDs(t *testing.T) {
+	db := openBug069DB(t, &bug069Doc{})
+	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{})
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069Doc]{
+		&bug069Req[*bug069Doc]{data: map[string]any{"name": "deleted-one"}},
+		&bug069Req[*bug069Doc]{data: map[string]any{"name": "live-one"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	delID, liveID := (*created[0]).ULID, (*created[1]).ULID
+	if err := svc.Delete(ctx, []any{delID}, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if err := svc.Restore(ctx, []any{delID, liveID}); err != nil {
+		t.Fatalf("Restore mixed ids: %v", err)
+	}
+	var delRow, liveRow bug069Doc
+	if err := db.Where("ulid = ?", delID).First(&delRow).Error; err != nil {
+		t.Fatalf("query deleted row: %v", err)
+	}
+	if err := db.Where("ulid = ?", liveID).First(&liveRow).Error; err != nil {
+		t.Fatalf("query live row: %v", err)
+	}
+	if delRow.IsDeleted != 0 {
+		t.Errorf("deleted row must be restored, is_deleted = %d", delRow.IsDeleted)
+	}
+	if liveRow.IsDeleted != 0 || liveRow.Name != "live-one" {
+		t.Errorf("live row must stay untouched, is_deleted=%d name=%q", liveRow.IsDeleted, liveRow.Name)
+	}
+}
+
+// TestBug069RestoreUnknownIDNoOp ids 含不存在主键：无操作成功
+// （与 BUG-052「空 ids 静默成功」语义对齐：SQL WHERE pk IN (...) 无命中）。
+func TestBug069RestoreUnknownIDNoOp(t *testing.T) {
+	db := openBug069DB(t, &bug069Doc{})
+	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{})
+	if err := svc.Restore(context.Background(), []any{"no-such-ulid"}); err != nil {
+		t.Errorf("Restore with unknown id must be no-op success, got %v", err)
+	}
+}
+
+// TestBug069RestoreVersionedEntityRejected 版本化实体：删除=废弃（不写 is_deleted），
+// restore 对其恒为空操作 → 必须显式报错，避免调用方误以为恢复成功（复核 P2）。
+func TestBug069RestoreVersionedEntityRejected(t *testing.T) {
+	db := openBug069DB(t, &bug069VerDoc{})
+	svc := NewGenericService[*bug069VerDoc](repository.NewCRUDWithDB[*bug069VerDoc](db), Config[*bug069VerDoc]{
+		VersionMode: true,
+		VersionFields: &VersionFieldMapping{
+			ULIDField: "ULID", CodeField: "Code", VersionField: "VersionCode",
+			CurrentField: "IsCurrent", StatusField: "VersionStatus", ParentField: "ParentULID",
+		},
+	})
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069VerDoc]{
+		&bug069Req[*bug069VerDoc]{data: map[string]any{"name": "v1"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := (*created[0]).ULID
+
+	// 版本化删除 = 废弃（is_current=0 / deprecated），is_deleted 仍为 0
+	if err := svc.Delete(ctx, []any{id}, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := svc.Restore(ctx, []any{id}); !goerrors.Is(err, errs.ErrUseActivateInstead) {
+		t.Errorf("Restore on versioned entity = %v, want ErrUseActivateInstead", err)
+	}
+	var row bug069VerDoc
+	if err := db.Where("ulid = ?", id).First(&row).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if row.IsCurrent != 0 {
+		t.Errorf("restored-must-not-happen: is_current = %d, want 0 (still deprecated)", row.IsCurrent)
+	}
+}
+
+// TestBug069UpdateDeprecatedVersionRejected 版本化实体：更新已废弃版本行
+// （is_current=0）是绕过 activate 的复活通道 → 必须拒绝（复核 P3）。
+func TestBug069UpdateDeprecatedVersionRejected(t *testing.T) {
+	db := openBug069DB(t, &bug069VerDoc{})
+	svc := NewGenericService[*bug069VerDoc](repository.NewCRUDWithDB[*bug069VerDoc](db), Config[*bug069VerDoc]{
+		VersionMode: true,
+		VersionFields: &VersionFieldMapping{
+			ULIDField: "ULID", CodeField: "Code", VersionField: "VersionCode",
+			CurrentField: "IsCurrent", StatusField: "VersionStatus", ParentField: "ParentULID",
+		},
+	})
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069VerDoc]{
+		&bug069Req[*bug069VerDoc]{data: map[string]any{"name": "v1"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id, code := (*created[0]).ULID, (*created[0]).Code
+
+	// 版本化删除 → is_current=0（废弃态），is_deleted 保持 0
+	if err := svc.Delete(ctx, []any{id}, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	var deprecated bug069VerDoc
+	if err := db.Where("ulid = ?", id).First(&deprecated).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if deprecated.IsCurrent != 0 || deprecated.IsDeleted != 0 {
+		t.Fatalf("versioned delete must deprecate (is_current=0) without is_deleted, got current=%d deleted=%d",
+			deprecated.IsCurrent, deprecated.IsDeleted)
+	}
+
+	if _, err := svc.Update(ctx, id, &bug069Req[*bug069VerDoc]{
+		data: map[string]any{"name": "revived"},
+	}); !goerrors.Is(err, errs.ErrUpdateDeprecatedVersion) {
+		t.Fatalf("update deprecated version = %v, want ErrUpdateDeprecatedVersion", err)
+	}
+	var cnt int64
+	if err := db.Model(&bug069VerDoc{}).Where("code = ?", code).Count(&cnt).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if cnt != 1 {
+		t.Errorf("no new version row must be derived, rows = %d want 1", cnt)
+	}
+}
+
+// TestBug069UpdateCurrentVersionAllowed 不回归：版本化实体更新**当前**版本行
+// （is_current=1，含草稿）仍可正常派生新版本。
+func TestBug069UpdateCurrentVersionAllowed(t *testing.T) {
+	db := openBug069DB(t, &bug069VerDoc{})
+	svc := NewGenericService[*bug069VerDoc](repository.NewCRUDWithDB[*bug069VerDoc](db), Config[*bug069VerDoc]{
+		VersionMode: true,
+		VersionFields: &VersionFieldMapping{
+			ULIDField: "ULID", CodeField: "Code", VersionField: "VersionCode",
+			CurrentField: "IsCurrent", StatusField: "VersionStatus", ParentField: "ParentULID",
+		},
+	})
+	ctx := context.Background()
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069VerDoc]{
+		&bug069Req[*bug069VerDoc]{data: map[string]any{"name": "v1"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id, code := (*created[0]).ULID, (*created[0]).Code
+	if (*created[0]).IsCurrent != 1 {
+		t.Fatalf("created version must be current, is_current = %d", (*created[0]).IsCurrent)
+	}
+
+	updated, err := svc.Update(ctx, id, &bug069Req[*bug069VerDoc]{data: map[string]any{"name": "v2"}})
+	if err != nil {
+		t.Fatalf("update current version must be allowed: %v", err)
+	}
+	if (*updated).Name != "v2" {
+		t.Errorf("name = %q, want v2", (*updated).Name)
+	}
+	var cnt int64
+	if err := db.Model(&bug069VerDoc{}).Where("code = ?", code).Count(&cnt).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if cnt != 2 {
+		t.Errorf("versioned update must derive a new version row, rows = %d want 2", cnt)
+	}
+}
+
+// TestBug069RestoreWritesOpLog 恢复是安全相关状态迁移：EnableOpLog 时
+// 必须写 operation="restore"（与 update / delete 对齐，复核建议）。
+func TestBug069RestoreWritesOpLog(t *testing.T) {
+	db := openBug069DB(t, &bug069Doc{}, &entity.SysOperationLog{})
+	svc := NewGenericService[*bug069Doc](repository.NewCRUDWithDB[*bug069Doc](db), Config[*bug069Doc]{
+		EnableOpLog: true,
+		EntityName:  "bug069_doc",
+	})
+	svc.SetOpLogRepo(repository.NewCRUDWithDB[entity.SysOperationLog](db))
+	ctx := context.WithValue(context.Background(), CtxKeyUserULID, "operator-ulid")
+
+	created, err := svc.Create(ctx, []CrudRequest[*bug069Doc]{
+		&bug069Req[*bug069Doc]{data: map[string]any{"name": "x"}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := (*created[0]).ULID
+	if err := svc.Delete(ctx, []any{id}, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := svc.Restore(ctx, []any{id}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	var logs []entity.SysOperationLog
+	if err := db.Where("entity_id = ? AND operation = ?", id, "restore").Find(&logs).Error; err != nil {
+		t.Fatalf("query op log: %v", err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("BUG-069: restore must write an op-log entry with operation=restore")
+	}
+	if logs[0].OperatorULID != "operator-ulid" {
+		t.Errorf("op-log operator = %q, want operator-ulid", logs[0].OperatorULID)
+	}
+	if logs[0].EntityType != "bug069_doc" {
+		t.Errorf("op-log entity_type = %q, want bug069_doc", logs[0].EntityType)
 	}
 }
 

@@ -513,6 +513,17 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 		return nil, nil, errs.ErrRecordNotFound
 	}
 
+	// BUG-069 复核 P3：版本化实体更新「已废弃版本行」（is_current=0）同样是一条
+	// 复活通道 —— _beforeUpdateVersioned 会以该行为底派生 is_current=1 的新行，
+	// 等于「复活 + 改写 + 凭空造新版本号」一步完成，且绕过 Before/AfterActivate
+	// 钩子与 activate 操作日志。要求先 Activate 再编辑。
+	// 草稿行 is_current=1（_beforeCreate 设定）不受影响。
+	if s.config.VersionMode && s.config.VersionFields != nil {
+		if cur, ok := scalarToFloat(getFieldVal(old, s.config.VersionFields.CurrentField)); ok && cur == 0 {
+			return nil, nil, errs.ErrUpdateDeprecatedVersion
+		}
+	}
+
 	// 2. 版本模式：深拷贝 + 合并请求到新行 + 填写版本字段
 	if s.config.VersionMode {
 		vf := s.config.VersionFields

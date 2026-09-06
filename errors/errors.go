@@ -37,6 +37,17 @@ var (
 	// ErrSoftDeleteNotSupported 实体不支持软删除（SetDelete() 返回 false，
 	// 删除走物理删 + 备份日志），因此没有"恢复"语义（BUG-069）。
 	ErrSoftDeleteNotSupported = errors.New("实体不支持软删除，无法恢复")
+
+	// ErrUseActivateInstead 版本化实体调用 restore（BUG-069 复核 P2）。
+	// 版本化的「删除」= 废弃（只写 is_current=0 / version_status=deprecated，
+	// 从不写 is_deleted），因此 restore 对其是静默空操作；
+	// 恢复当前版本应走 activate 接口。
+	ErrUseActivateInstead = errors.New("版本化实体不支持 restore：删除即废弃，请使用 activate 恢复")
+
+	// ErrUpdateDeprecatedVersion 更新已废弃（is_current=0）的版本行（BUG-069 复核 P3）。
+	// 版本化 update 会以该行为底派生 is_current=1 的新行，等于绕过 activate
+	// 的钩子与审计直接"复活 + 改写 + 造新版本号"。应先 activate 再编辑。
+	ErrUpdateDeprecatedVersion = errors.New("该版本已废弃，请先 activate 激活后再编辑")
 )
 
 // ============================================================
