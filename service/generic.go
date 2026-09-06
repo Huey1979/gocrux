@@ -222,6 +222,96 @@ func (s *GenericService[M]) IsVersionMode() bool {
 	return s.config.VersionMode
 }
 
+// ============================================================
+// 软删除判定（BUG-069）
+//
+// 仓储层按主键的读写（GetByID / UpdateByID / Save …）不追加软删条件，
+// 且 heims 实体用自维护的 IsDeleted 列而非 gorm.DeletedAt，GORM 不会自动过滤。
+// 因此服务层收口：按主键取到记录后在此判定是否已删，get/update 一律按
+// 「记录不存在」处理，与 _doList / _doGetByCode 的软删过滤对齐。
+// ============================================================
+
+// deletedCol 返回软删判定配置：(DB 列名, 未删除时的值, 是否启用软删)。
+// 实体 SetDelete() 返回 false（无软删列）时 ok=false —— 调用方不得拼接过滤条件，
+// 否则无该列的表会报未知列。
+func (s *GenericService[M]) deletedCol() (field string, liveVal any, ok bool) {
+	m := newRecord[M]()
+	if !m.SetDelete() {
+		return "", nil, false
+	}
+	field = s.config.DeletedField
+	if field == "" {
+		field = "is_deleted"
+	}
+	liveVal = s.config.DeletedValue
+	if liveVal == nil {
+		liveVal = int8(0)
+	}
+	return field, liveVal, true
+}
+
+// softDeleteFilter 构造「未删除」过滤条件，供 ListByFilters 类查询复用。
+func (s *GenericService[M]) softDeleteFilter() (repository.Filter, bool) {
+	field, val, ok := s.deletedCol()
+	if !ok {
+		return repository.Filter{}, false
+	}
+	return repository.Filter{Field: field, Op: repository.OpEQ, Value: val}, true
+}
+
+// isSoftDeleted 判定记录是否已被软删除。
+// 取不到软删字段（实体无该列）时一律返回 false，避免误伤不支持软删的实体。
+func (s *GenericService[M]) isSoftDeleted(m *M) bool {
+	if m == nil {
+		return false
+	}
+	col, liveVal, ok := s.deletedCol()
+	if !ok {
+		return false
+	}
+	goField := resolveColumnFromDB[M](col)
+	if goField == "" {
+		return false
+	}
+	cur := getFieldVal(*m, goField)
+	if cur == nil {
+		return false
+	}
+	return !sameSoftDeleteValue(cur, liveVal)
+}
+
+// filterLiveIDs 从 id 列表中剔除已软删记录的 id；未启用软删时原样返回、不产生额外查询。
+// 用于按 id 集合的批量写路径（BatchUpdateByIDs），避免已删记录被静默改写。
+func (s *GenericService[M]) filterLiveIDs(ctx context.Context, ids []any) ([]any, error) {
+	f, ok := s.softDeleteFilter()
+	if !ok {
+		return ids, nil
+	}
+	pkCol := s.repo.PKField()
+	pkGo := resolveColumnFromDB[M](pkCol)
+	if pkGo == "" {
+		return ids, nil // 反查不到主键字段 → 不擅自过滤
+	}
+	live, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters: []repository.Filter{
+			{Field: pkCol, Op: repository.OpIn, Value: ids},
+			f,
+		},
+		Page:     1,
+		PageSize: 0, // 全量（不分页），与 ListFilters 契约一致
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(live))
+	for i := range live {
+		if v := getFieldVal(&live[i], pkGo); v != nil {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
 // SetHooks 注入钩子族（通常由子 Service 在构造时调用）
 func (s *GenericService[M]) SetHooks(h Hooks[M]) {
 	s.hooks = h
@@ -406,6 +496,18 @@ func (s *GenericService[M]) BatchUpdateByIDs(ctx context.Context, ids []any, upd
 	if len(updates) == 0 {
 		return errs.ErrMissingParam("updates")
 	}
+
+	// BUG-069：剔除已软删记录的 id —— 按主键的批量写无软删过滤时，
+	// 已删记录会被静默改写（与单条 update 的收口保持一致）。
+	liveIDs, err := s.filterLiveIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	if len(liveIDs) == 0 {
+		// 全部已删 → 无操作成功（与 BUG-052 空 ids 静默成功语义一致）
+		return nil
+	}
+	ids = liveIDs
 
 	// 补充审计字段
 	updates["updated_at"] = time.Now()

@@ -28,6 +28,11 @@ func (s *GenericService[M]) _doGet(ctx context.Context, id any) (*M, error) {
 		}
 		return nil, err
 	}
+	// BUG-069：按主键读到的记录若已被软删，一律按「记录不存在」处理（404）。
+	// 与 _doList / _doGetByCode 的软删过滤对齐，避免已删记录被按 ULID 精确读回。
+	if s.isSoftDeleted(result) {
+		return nil, errs.ErrRecordNotFound
+	}
 	return result, nil
 }
 func (s *GenericService[M]) _afterGet(ctx context.Context, result *M) (*M, error) { return result, nil }
@@ -57,20 +62,16 @@ func (s *GenericService[M]) _doGetByCode(ctx context.Context, code string) (*M, 
 	currentCol := resolveColumn[M](vf.CurrentField)
 
 	// 查当前生效版本（is_current=1），不论是否 published
-	delField := s.config.DeletedField
-	if delField == "" {
-		delField = "is_deleted"
+	// BUG-069：软删条件复用 deletedCol（未启用软删时不再硬拼 is_deleted，避免未知列报错）
+	filters := []repository.Filter{
+		{Field: codeCol, Op: repository.OpEQ, Value: code},
+		{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
 	}
-	delVal := s.config.DeletedValue
-	if delVal == nil {
-		delVal = int8(0)
+	if delField, delVal, ok := s.deletedCol(); ok {
+		filters = append(filters, repository.Filter{Field: delField, Op: repository.OpEQ, Value: delVal})
 	}
 	results, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
-		Filters: []repository.Filter{
-			{Field: codeCol, Op: repository.OpEQ, Value: code},
-			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
-			{Field: delField, Op: repository.OpEQ, Value: delVal},
-		},
+		Filters:  filters,
 		Page:     1,
 		PageSize: 1,
 	})
@@ -207,29 +208,12 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 			}
 		}
 		// 软删除过滤（与非版本化分支对齐）
-		m := newRecord[M]()
-		if m.SetDelete() {
-			field := s.config.DeletedField
-			if field == "" {
-				field = "is_deleted"
-			}
-			val := s.config.DeletedValue
-			if val == nil {
-				val = int8(0)
-			}
+		// BUG-069：解析改为复用 deletedCol，与 get/update 判定同源
+		if field, val, ok := s.deletedCol(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	} else {
-		m := newRecord[M]()
-		if m.SetDelete() {
-			field := s.config.DeletedField
-			if field == "" {
-				field = "is_deleted"
-			}
-			val := s.config.DeletedValue
-			if val == nil {
-				val = int8(0)
-			}
+		if field, val, ok := s.deletedCol(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
 	}

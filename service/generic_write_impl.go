@@ -504,6 +504,13 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	if err != nil {
 		return nil, nil, errs.ErrQueryRecordFailed(err)
 	}
+	// BUG-069：已软删的记录不可更新，一律按「记录不存在」处理（404）。
+	// 此处是版本化与非版本化两条写路径的共同入口，单点收口即同时杜绝
+	// ① 非版本化 Save 全行覆盖改写已删记录；② 版本化以已删旧行为底插入
+	// is_current=1 新行（把已删实体复活成当前生效版本）。
+	if s.isSoftDeleted(old) {
+		return nil, nil, errs.ErrRecordNotFound
+	}
 
 	// 2. 版本模式：深拷贝 + 合并请求到新行 + 填写版本字段
 	if s.config.VersionMode {

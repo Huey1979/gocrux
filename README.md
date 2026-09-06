@@ -401,6 +401,15 @@ type Record interface {
 
 `_doList` 执行前会自动检查 `SetDelete()` 返回值：若为 `true` 则追加 `WHERE {DeletedField} = {DeletedValue}` 过滤器，确保列表查询不返回已软删除的记录。不支持软删的实体（`SetDelete()` 返回 `false`）不添加此过滤。
 
+**按主键的 get / update 同样收口（BUG-069）** — 仓储层按主键的读写（`GetByID` / `Save` / `UpdateByIDs`）不追加软删条件，且实体用自维护的 `is_deleted` 列而非 `gorm.DeletedAt`，GORM 不会自动过滤。因此服务层统一判定：
+
+- `/*/get?id=xxx`：取到已软删记录 → 返回 `ErrRecordNotFound`（404，与「记录不存在」同语义，不泄漏存在性）
+- `/*/update {id:xxx}`：目标是已软删记录 → 同步返回 404。非版本化路径不会被 `Save` 全行覆盖改写，版本化路径不会以已删旧行为底派生 `is_current=1` 的新版本行（避免「复活」）
+- `BatchUpdateByIDs`：自动剔除已删 id；全部已删则无操作返回成功（与 BUG-052 空 ids 语义一致）
+- 不支持软删的实体（`SetDelete()` 返回 `false`）不判定、不产生额外查询，行为完全不变
+
+判定由 `deletedCol()`（复用 `DeletedField` / `DeletedValue` 配置）+ `isSoftDeleted()` 完成，值比较跨类型归一（`int8` / `int` / `bool` / `string`），避免实体字段类型与配置默认 `int8(0)` 不一致时误判。
+
 ### SupportsDraft
 
 - 返回 `true` 时实体需提供 `VersionStatus` 字段（通过 `VersionFieldMapping` 映射）

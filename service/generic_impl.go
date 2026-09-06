@@ -311,6 +311,51 @@ func getFieldVal(_entity any, fieldName string) any {
 	return f.Interface()
 }
 
+// sameSoftDeleteValue 宽松比较软删字段值（BUG-069）：
+// 先精确比较，再退回数值 / 字符串归一化比较。
+// 实体字段类型（int8 / int / bool / string 等）与配置 DeletedValue（默认 int8(0)）
+// 可能不同，直接 != 比较会因类型不一致恒不等，把正常记录误判成已删除。
+func sameSoftDeleteValue(cur, live any) bool {
+	if cur == nil || live == nil {
+		return cur == nil && live == nil
+	}
+	if reflect.DeepEqual(cur, live) {
+		return true
+	}
+	if cf, ok := scalarToFloat(cur); ok {
+		if lf, ok2 := scalarToFloat(live); ok2 {
+			return cf == lf
+		}
+	}
+	return fmt.Sprint(cur) == fmt.Sprint(live)
+}
+
+// scalarToFloat 将标量归一为 float64 便于跨类型比较；bool 按 false=0 / true=1 归一
+// （软删列可能是 bool，而 DeletedValue 默认是 int8(0)）。
+func scalarToFloat(v any) (float64, bool) {
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return 0, false
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Bool:
+		if rv.Bool() {
+			return 1, true
+		}
+		return 0, true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(rv.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(rv.Uint()), true
+	case reflect.Float32, reflect.Float64:
+		return rv.Float(), true
+	}
+	return 0, false
+}
+
 // parseBsonKey 解析 bson tag，取逗号前段作为真正的 MongoDB 字段名。
 // bson:"xxx,omitempty" / bson:"xxx,omitempty,inline" 等带选项的 tag，
 // 原样使用会把 ",omitempty" 当成字段名，List 过滤永远匹配不到（BUG-061）。
