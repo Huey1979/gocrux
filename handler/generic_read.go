@@ -225,7 +225,8 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			if isVisited(refCtx, cr.HandlerName, "batch") {
 				continue
 			}
-			childRecords, err := refHandler.DoList(refCtx, pkField, strIDs, false)
+			// BUG-070：引用解析模式 —— 已软删/历史版本的目标仍作为锚点返回
+			childRecords, err := resolveRefs(refCtx, refHandler, pkField, strIDs)
 			if err != nil {
 				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
 			}
@@ -237,10 +238,14 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				}
 			}
 
+			// BUG-070：缺失项补占位，数组长度与原始 ID 列表对齐，
+			// 调用方能区分「引用为空」与「目标已删除/缺失」
 			resolved := make([]map[string]any, 0, len(ids))
 			for _, id := range ids {
 				if child, ok := childMap[fmt.Sprint(id)]; ok {
 					resolved = append(resolved, child)
+				} else {
+					resolved = append(resolved, missingRefPlaceholder(pkField, id))
 				}
 			}
 
@@ -331,6 +336,51 @@ func (h *GenericHandler[M]) DoList(ctx context.Context, fkField string, fkValue 
 	}
 	records, _, err := h.listPipeline(ctx, query, followPublished)
 	return records, err
+}
+
+// DoResolve 引用解析（BUG-070）：按主键集合解析引用锚点，返回 map 列表。
+//
+// 与 DoList 的区别：**不套用**「当前有效」语义（软删 / is_current / 版本可见性过滤）。
+// 引用（References / ChildRefs）指向的对象若被软删或是历史版本，仍应作为锚点返回，
+// 并保留 is_deleted / version_status 等状态字段供调用方判断；否则列表批量展开会
+// 静默丢锚点，与单条 get（DoGetByID 不过滤软删）语义不一致。
+//
+// 向下级联（Cascades：父表拥有的子集合，如 order → order_content）仍用 DoList，
+// 保持「当前有效」过滤 —— 删掉的子记录不应再出现在父记录详情里。
+//
+// 仍走 listPipeline，因此 Before/AfterList 等业务与权限钩子不被绕过。
+func (h *GenericHandler[M]) DoResolve(ctx context.Context, fkField string, fkValues []any) ([]map[string]any, error) {
+	query := repository.ListFilters{
+		Filters: []repository.Filter{
+			{Field: fkField, Op: repository.OpIn, Value: fkValues},
+		},
+		PageSize: 0, // 引用解析不分页，确保锚点完整返回
+	}
+	records, _, err := h.listPipeline(service.WithResolveMode(ctx), query, false)
+	return records, err
+}
+
+// refResolveHandler 引用解析能力（BUG-070，可选实现）。
+// GenericHandler 已实现 DoResolve；第三方 CascadeHandler 实现若未实现，
+// resolveRefs 自动回退到 DoList（保持旧行为，不破坏既有接口兼容性）。
+type refResolveHandler interface {
+	DoResolve(ctx context.Context, fkField string, fkValues []any) ([]map[string]any, error)
+}
+
+// resolveRefs 引用展开统一入口（BUG-070）：优先走引用解析模式（不过滤软删/历史版本），
+// Handler 未实现 DoResolve 时回退 DoList。
+func resolveRefs(ctx context.Context, rh CascadeHandler, pkField string, ids []any) ([]map[string]any, error) {
+	if r, ok := rh.(refResolveHandler); ok {
+		return r.DoResolve(ctx, pkField, ids)
+	}
+	return rh.DoList(ctx, pkField, ids, false)
+}
+
+// missingRefPlaceholder 缺失引用的占位对象（BUG-070）。
+// 只保留引用键与缺失标记，不泄露其它字段，让调用方能区分
+// 「引用为空」与「引用目标已删除 / 缺失 / 不可见」。
+func missingRefPlaceholder(pkField string, id any) map[string]any {
+	return map[string]any{pkField: id, "missing": true}
 }
 
 // List 列表查询

@@ -86,6 +86,28 @@ func GetUserULID(ctx context.Context) string {
 // repo.InsertBatch / tx.Create().Select(...)，使显式零值字段（0/false/""）真实落库。
 const CtxKeyExplicitColumns ctxKey = "explicit_columns"
 
+// CtxKeyResolveMode context key — 引用解析模式（BUG-070）。
+//
+// 由 Handler 层在 References / ChildRefs 展开（DoResolve）时注入：
+// 该模式按主键集合解析「引用锚点」，_doList **不追加**「当前有效」默认过滤
+// （软删 / is_current / 版本可见性），使已软删或历史版本的引用目标仍能被解析出来，
+// 并保留 is_deleted / version_status 等状态字段供调用方判断。
+//
+// 向下级联（Cascades，父表拥有的子集合）**不注入**此标记，继续按当前有效过滤 ——
+// 订单删掉一条明细后不应再出现在订单详情里，这是期望行为。
+const CtxKeyResolveMode ctxKey = "resolve_mode"
+
+// WithResolveMode 注入引用解析模式标记。
+func WithResolveMode(ctx context.Context) context.Context {
+	return context.WithValue(ctx, CtxKeyResolveMode, true)
+}
+
+// resolveModeFrom 判断当前是否处于引用解析模式。
+func resolveModeFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(CtxKeyResolveMode).(bool)
+	return v
+}
+
 // withExplicitColumns 将显式字段列名白名单写入 ctx。
 func withExplicitColumns(ctx context.Context, cols []string) context.Context {
 	return context.WithValue(ctx, CtxKeyExplicitColumns, cols)

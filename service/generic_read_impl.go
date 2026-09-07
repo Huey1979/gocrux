@@ -177,8 +177,14 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		})
 	}
 
+	// BUG-070：引用解析模式（References / ChildRefs 展开）不追加「当前有效」过滤 ——
+	// 引用锚点必须能解析到已软删 / 历史版本的目标，否则列表批量展开会静默丢锚点，
+	// 与单条 get（DoGetByID，不做软删过滤）语义不一致。
+	// 向下级联（Cascades）不注入该标记，维持当前有效语义。
+	resolveMode := resolveModeFrom(ctx)
+
 	// 默认过滤：版本化 → 仅当前版本 + 草稿可见性 + 软删除过滤
-	if s.config.VersionMode && s.config.VersionFields != nil {
+	if !resolveMode && s.config.VersionMode && s.config.VersionFields != nil {
 		vf := s.config.VersionFields
 		f.Filters = append(f.Filters, repository.Filter{
 			Field: resolveColumn[M](vf.CurrentField), Op: repository.OpEQ, Value: int8(1),
@@ -211,7 +217,8 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		if field, val, ok := s.DeletedColumn(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}
-	} else {
+	} else if !resolveMode {
+		// 非版本化：仅追加软删过滤（引用解析模式下同样跳过，见上）
 		if field, val, ok := s.DeletedColumn(); ok {
 			f.Filters = append(f.Filters, repository.Filter{Field: field, Op: repository.OpEQ, Value: val})
 		}

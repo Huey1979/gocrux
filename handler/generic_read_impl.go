@@ -179,9 +179,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 
-			// 批量查（DoList + slice → OpIn）
+			// 批量查（BUG-070：引用解析模式，已软删/历史版本目标仍作为锚点返回）
 			pkField := refHandler.PKField()
-			parentRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
+			parentRecords, err := resolveRefs(refCtx, refHandler, pkField, fkList)
 			if err != nil {
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
 			}
@@ -198,6 +198,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				if fkVal, fkOk := getByPath(m, ref.Field); fkOk && fkVal != nil {
 					if parent, ok := parentMap[fmt.Sprint(fkVal)]; ok {
 						m[resultKey] = parent
+					} else {
+						// BUG-070：引用目标不可见/已删除 → 显式占位，不再静默丢弃
+						m[resultKey] = missingRefPlaceholder(pkField, fkVal)
 					}
 				}
 			}
@@ -243,8 +246,9 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				continue
 			}
 
+			// BUG-070：引用解析模式（已软删/历史版本目标仍作为锚点返回）
 			pkField := refHandler.PKField()
-			childRecords, err := refHandler.DoList(refCtx, pkField, fkList, false)
+			childRecords, err := resolveRefs(refCtx, refHandler, pkField, fkList)
 			if err != nil {
 				return nil, 0, errs.ErrChildRefBatchResolve(cr.HandlerName, err)
 			}
@@ -258,10 +262,13 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 
 			for _, m := range result {
 				ids := toAnySlice(m[cr.FKListField])
+				// BUG-070：缺失项补占位，数组与原始 ID 列表对齐（区分空引用与目标缺失）
 				resolved := make([]map[string]any, 0, len(ids))
 				for _, id := range ids {
 					if child, ok := childMap[fmt.Sprint(id)]; ok {
 						resolved = append(resolved, child)
+					} else {
+						resolved = append(resolved, missingRefPlaceholder(pkField, id))
 					}
 				}
 				if len(resolved) > 0 {
