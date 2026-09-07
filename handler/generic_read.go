@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/repository"
 	"github.com/Huey1979/gocrux/service"
@@ -231,10 +232,12 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
 			}
 
+			// BUG-070 复核：索引与占位统一用输出字段名（json tag），与正常记录 shape 一致
+			outKey := pkOutputKey[M](pkField)
 			childMap := make(map[string]map[string]any, len(childRecords))
 			for _, child := range childRecords {
-				if idVal, ok := child[pkField]; ok {
-					childMap[fmt.Sprint(idVal)] = child
+				if k, ok := refAnchorKey(child, outKey, pkField); ok {
+					childMap[k] = child
 				}
 			}
 
@@ -245,7 +248,7 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				if child, ok := childMap[fmt.Sprint(id)]; ok {
 					resolved = append(resolved, child)
 				} else {
-					resolved = append(resolved, missingRefPlaceholder(pkField, id))
+					resolved = append(resolved, missingRefPlaceholder(outKey, id))
 				}
 			}
 
@@ -379,8 +382,69 @@ func resolveRefs(ctx context.Context, rh CascadeHandler, pkField string, ids []a
 // missingRefPlaceholder 缺失引用的占位对象（BUG-070）。
 // 只保留引用键与缺失标记，不泄露其它字段，让调用方能区分
 // 「引用为空」与「引用目标已删除 / 缺失 / 不可见」。
-func missingRefPlaceholder(pkField string, id any) map[string]any {
-	return map[string]any{pkField: id, "missing": true}
+//
+// key 必须传 pkOutputKey() 得到的**输出字段名**（JSON tag 名），
+// 而不是数据库列名 —— 否则同一展开数组里正常对象与占位对象的 shape 不一致。
+func missingRefPlaceholder(outKey string, id any) map[string]any {
+	return map[string]any{outKey: id, "missing": true}
+}
+
+// pkOutputKey 返回实体主键在展开结果（marshalToMap → JSON 往返）中的字段名。
+//
+// marshalToMap 输出的是 **json tag 名**，可能与数据库列名不同
+// （如列 `field_ulid` vs JSON `ulid`）。索引与缺失占位都必须用这个 key，
+// 否则同一展开数组里正常对象与占位对象 shape 不一致（BUG-070 复核）。
+func pkOutputKey[M service.Record](dbColumn string) string {
+	var m M
+	t := reflect.TypeOf(m)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return dbColumn
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		col := ""
+		if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c != "" {
+			col = c
+		} else if b := f.Tag.Get("bson"); b != "" && b != "-" {
+			if idx := strings.IndexByte(b, ','); idx >= 0 {
+				b = b[:idx]
+			}
+			col = b
+		} else {
+			col = common.ToSnakeCase(f.Name)
+		}
+		if col != dbColumn {
+			continue
+		}
+		if jt := f.Tag.Get("json"); jt != "" && jt != "-" {
+			if name, _, _ := strings.Cut(jt, ","); name != "" {
+				return name
+			}
+		}
+		return common.ToSnakeCase(f.Name)
+	}
+	return dbColumn
+}
+
+// refAnchorKey 取记录在展开结果中的锚点键：优先输出字段名（json tag），
+// 回退数据库列名（兼容二者一致的实体）。
+func refAnchorKey(rec map[string]any, outKey, dbCol string) (string, bool) {
+	if v, ok := rec[outKey]; ok && v != nil {
+		if s := fmt.Sprint(v); s != "" {
+			return s, true
+		}
+	}
+	if outKey != dbCol {
+		if v, ok := rec[dbCol]; ok && v != nil {
+			if s := fmt.Sprint(v); s != "" {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 // List 列表查询

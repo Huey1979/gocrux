@@ -106,6 +106,63 @@ func TestBug070DoResolveKeepsDeletedAnchor(t *testing.T) {
 	}
 }
 
+// bug070ShapeDoc 主键**列名与 JSON 名不一致**的实体（列 field_ulid vs JSON "ulid"）。
+// heims 真实实体正是这种形态，用于验证占位对象与正常记录输出结构一致（BUG-070 复核）。
+type bug070ShapeDoc struct {
+	ULID string `gorm:"column:field_ulid;primaryKey;size:26" json:"ulid"`
+	Name string `gorm:"column:name;size:100" json:"name"`
+}
+
+func (d *bug070ShapeDoc) SetDefaults()             {}
+func (d *bug070ShapeDoc) SetCreatedAt(_ time.Time) {}
+func (d *bug070ShapeDoc) SetCreatedBy(string)      {}
+func (d *bug070ShapeDoc) SetUpdatedAt(_ time.Time) {}
+func (d *bug070ShapeDoc) SetUpdatedBy(string)      {}
+func (d *bug070ShapeDoc) SupportsDraft() bool      { return false }
+func (d *bug070ShapeDoc) SetDelete() bool          { return false }
+func (d *bug070ShapeDoc) PKField() string          { return "field_ulid" }
+func (d *bug070ShapeDoc) SelfFKField() string      { return "" }
+
+// TestBug070PlaceholderKeyMatchesOutputShape BUG-070 复核：
+// 占位对象的字段名必须与正常记录的输出结构一致（json tag 名），
+// 不能用数据库列名 —— 否则同一展开数组里两种对象 shape 不一致，前端难以处理。
+func TestBug070PlaceholderKeyMatchesOutputShape(t *testing.T) {
+	// 1. pkOutputKey 解析为 json tag 名（列 field_ulid → "ulid"）
+	if got := pkOutputKey[*bug070ShapeDoc]("field_ulid"); got != "ulid" {
+		t.Errorf("pkOutputKey(field_ulid) = %q, want %q (json tag)", got, "ulid")
+	}
+	// 列名与 json 名一致时原样返回
+	if got := pkOutputKey[*bug070Doc]("ulid"); got != "ulid" {
+		t.Errorf("pkOutputKey(ulid) = %q, want ulid", got)
+	}
+
+	// 2. 正常记录序列化后的 key 就是 json tag 名
+	rec, err := marshalToMap(&bug070ShapeDoc{ULID: "01ANCHOR", Name: "n"})
+	if err != nil {
+		t.Fatalf("marshalToMap: %v", err)
+	}
+	if _, ok := rec["ulid"]; !ok {
+		t.Errorf("marshaled record must expose json key ulid, got keys %v", rec)
+	}
+	if _, ok := rec["field_ulid"]; ok {
+		t.Errorf("marshaled record must NOT expose db column name, got keys %v", rec)
+	}
+
+	// 3. 占位对象使用同一个 key
+	ph := missingRefPlaceholder(pkOutputKey[*bug070ShapeDoc]("field_ulid"), "01ANCHOR")
+	if _, ok := ph["ulid"]; !ok {
+		t.Errorf("placeholder must use output key ulid, got %v", ph)
+	}
+	if ph["ulid"] != "01ANCHOR" || ph["missing"] != true || len(ph) != 2 {
+		t.Errorf("placeholder = %v, want {ulid: 01ANCHOR, missing: true}", ph)
+	}
+
+	// 4. 索引取值：列名不同时仍能按输出 key 命中
+	if k, ok := refAnchorKey(rec, "ulid", "field_ulid"); !ok || k != "01ANCHOR" {
+		t.Errorf("refAnchorKey = (%q, %v), want (01ANCHOR, true)", k, ok)
+	}
+}
+
 // TestBug070MissingRefPlaceholder 缺失引用的占位对象只含引用键与 missing 标记。
 func TestBug070MissingRefPlaceholder(t *testing.T) {
 	ph := missingRefPlaceholder("product_ulid", "01PRODUCT")

@@ -186,11 +186,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				return nil, 0, errs.ErrRefBatchResolve(ref.HandlerName, err)
 			}
 
-			// 按 PK 建索引
+			// 按 PK 建索引（BUG-070 复核：key 用输出字段名，与占位 shape 一致）
+			outKey := pkOutputKey[M](pkField)
 			parentMap := make(map[string]map[string]any)
 			for _, pr := range parentRecords {
-				if idVal, ok := pr[pkField]; ok {
-					parentMap[fmt.Sprint(idVal)] = pr
+				if k, ok := refAnchorKey(pr, outKey, pkField); ok {
+					parentMap[k] = pr
 				}
 			}
 
@@ -200,7 +201,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 						m[resultKey] = parent
 					} else {
 						// BUG-070：引用目标不可见/已删除 → 显式占位，不再静默丢弃
-						m[resultKey] = missingRefPlaceholder(pkField, fkVal)
+						m[resultKey] = missingRefPlaceholder(outKey, fkVal)
 					}
 				}
 			}
@@ -253,10 +254,12 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 				return nil, 0, errs.ErrChildRefBatchResolve(cr.HandlerName, err)
 			}
 
+			// BUG-070 复核：索引与占位统一用输出字段名（json tag）
+			outKey := pkOutputKey[M](pkField)
 			childMap := make(map[string]map[string]any)
 			for _, child := range childRecords {
-				if idVal, ok := child[pkField]; ok {
-					childMap[fmt.Sprint(idVal)] = child
+				if k, ok := refAnchorKey(child, outKey, pkField); ok {
+					childMap[k] = child
 				}
 			}
 
@@ -268,7 +271,7 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 					if child, ok := childMap[fmt.Sprint(id)]; ok {
 						resolved = append(resolved, child)
 					} else {
-						resolved = append(resolved, missingRefPlaceholder(pkField, id))
+						resolved = append(resolved, missingRefPlaceholder(outKey, id))
 					}
 				}
 				if len(resolved) > 0 {

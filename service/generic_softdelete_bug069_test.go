@@ -87,12 +87,13 @@ type bug069VerDoc struct {
 	VersionStatus string `gorm:"column:version_status;size:20" json:"version_status"`
 	IsCurrent     int8   `gorm:"column:is_current;default:0" json:"is_current"`
 	ParentULID    string `gorm:"column:parent_ulid;size:26" json:"parent_ulid"`
+	CreatedBy     string `gorm:"column:created_by;size:26" json:"created_by"` // 草稿可见性判定用
 	IsDeleted     int8   `gorm:"column:is_deleted;default:0" json:"-"`
 }
 
 func (d *bug069VerDoc) SetDefaults()             {}
 func (d *bug069VerDoc) SetCreatedAt(_ time.Time) {}
-func (d *bug069VerDoc) SetCreatedBy(string)      {}
+func (d *bug069VerDoc) SetCreatedBy(uid string)  { d.CreatedBy = uid }
 func (d *bug069VerDoc) SetUpdatedAt(_ time.Time) {}
 func (d *bug069VerDoc) SetUpdatedBy(string)      {}
 func (d *bug069VerDoc) SupportsDraft() bool      { return false }

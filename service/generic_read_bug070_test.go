@@ -156,10 +156,14 @@ func TestBug070ResolveModeKeepsHistoryVersion(t *testing.T) {
 	}
 }
 
-// TestBug070ResolveModeSkipsDraftVisibility 版本化 + 未登录：
-// 引用解析模式也跳过「仅 published 可见」过滤，草稿锚点同样可解析
-// （可见性交由调用方按 version_status 判断）。
-func TestBug070ResolveModeSkipsDraftVisibility(t *testing.T) {
+// TestBug070ResolveModeStillGuardsDraft BUG-070 复核（安全点）：
+// 引用解析模式放开软删 / is_current / published 过滤，但**不放开草稿可见性** ——
+// 未发布草稿不能因为被某条记录引用就对外暴露。
+//
+//   - 未登录：草稿锚点不可解析（但 deprecated 历史版本必须仍可解析，见 TestBug070ResolveModeKeepsHistoryVersion）
+//   - 创建者本人登录：草稿锚点可解析
+//   - 其他登录用户：草稿锚点不可解析
+func TestBug070ResolveModeStillGuardsDraft(t *testing.T) {
 	db := openBug069DB(t, &bug069VerDoc{})
 	svc := NewGenericService[*bug069VerDoc](repository.NewCRUDWithDB[*bug069VerDoc](db), Config[*bug069VerDoc]{
 		VersionMode: true,
@@ -168,43 +172,63 @@ func TestBug070ResolveModeSkipsDraftVisibility(t *testing.T) {
 			CurrentField: "IsCurrent", StatusField: "VersionStatus", ParentField: "ParentULID",
 		},
 	})
-	ctx := context.Background() // 未登录（无 user_ulid）
 
-	created, err := svc.Create(ctx, []CrudRequest[*bug069VerDoc]{
+	authorCtx := context.WithValue(context.Background(), CtxKeyUserULID, "author-ulid")
+	created, err := svc.Create(authorCtx, []CrudRequest[*bug069VerDoc]{
 		&bug069Req[*bug069VerDoc]{data: map[string]any{"name": "draft-row"}},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	row := created[0]
-	// 手工置为草稿态（Create 默认 published）
-	if err := db.Model(&bug069VerDoc{}).Where("ulid = ?", (*row).ULID).
+	draftID := (*created[0]).ULID
+	// Create 默认 published → 手工置为草稿态
+	if err := db.Model(&bug069VerDoc{}).Where("ulid = ?", draftID).
 		Update("version_status", string(VersionStatusDraft)).Error; err != nil {
 		t.Fatalf("set draft: %v", err)
 	}
 
-	q := repository.ListFilters{
-		Filters:  []repository.Filter{{Field: "ulid", Op: repository.OpIn, Value: []any{(*row).ULID}}},
-		Page:     1,
-		PageSize: 0,
+	q := func() repository.ListFilters {
+		return repository.ListFilters{
+			Filters:  []repository.Filter{{Field: "ulid", Op: repository.OpIn, Value: []any{draftID}}},
+			Page:     1,
+			PageSize: 0,
+		}
 	}
 
-	// 未登录普通列表：草稿不可见（不回归）
-	normal, _, err := svc.List(ctx, q)
+	// 1) 未登录：草稿不可见
+	anon := context.Background()
+	normal, _, err := svc.List(anon, q())
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("List(anon): %v", err)
 	}
 	if len(normal) != 0 {
 		t.Fatalf("anonymous list must hide draft, got %d records", len(normal))
 	}
-
-	// 引用解析模式：草稿锚点可解析（状态字段保留，由调用方决定如何展示）
-	resolved, _, err := svc.List(WithResolveMode(ctx), q)
+	resolved, _, err := svc.List(WithResolveMode(anon), q())
 	if err != nil {
-		t.Fatalf("List(resolve mode): %v", err)
+		t.Fatalf("List(resolve, anon): %v", err)
+	}
+	if len(resolved) != 0 {
+		t.Errorf("BUG-070 复核：resolve mode must NOT expose draft to anonymous caller, got %d", len(resolved))
+	}
+
+	// 2) 其他登录用户：草稿不可见
+	otherCtx := context.WithValue(context.Background(), CtxKeyUserULID, "other-ulid")
+	resolved, _, err = svc.List(WithResolveMode(otherCtx), q())
+	if err != nil {
+		t.Fatalf("List(resolve, other): %v", err)
+	}
+	if len(resolved) != 0 {
+		t.Errorf("BUG-070 复核：resolve mode must NOT expose others' draft, got %d", len(resolved))
+	}
+
+	// 3) 创建者本人：草稿锚点可解析，且状态字段保留
+	resolved, _, err = svc.List(WithResolveMode(authorCtx), q())
+	if err != nil {
+		t.Fatalf("List(resolve, author): %v", err)
 	}
 	if len(resolved) != 1 {
-		t.Fatalf("BUG-070: resolve mode must resolve draft anchor, got %d", len(resolved))
+		t.Fatalf("author must resolve own draft anchor, got %d", len(resolved))
 	}
 	if (*resolved[0]).VersionStatus != string(VersionStatusDraft) {
 		t.Errorf("draft anchor must carry version_status=draft, got %q", (*resolved[0]).VersionStatus)

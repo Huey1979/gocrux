@@ -224,6 +224,32 @@ func (s *GenericService[M]) _doList(ctx context.Context, query any) ([]M, int64,
 		}
 	}
 
+	// BUG-070 复核：引用解析模式虽然放开「当前有效」过滤（软删 / is_current / published），
+	// 但**不放开草稿可见性** —— 未发布草稿属于私有内容，不能因为被某条记录引用就对外暴露。
+	// 这里只拦 status=draft：
+	//   - 未登录：草稿一律不可见（published / deprecated 历史版本等仍可见，锚点语义保留）
+	//   - 已登录：published/deprecated 等可见，或草稿的创建者本人可见
+	// 注意用 status != draft 而非 status == published，否则历史版本（deprecated）会被连带过滤。
+	if resolveMode && s.config.VersionMode && s.config.VersionFields != nil && s.config.VersionFields.StatusField != "" {
+		vf := s.config.VersionFields
+		statusCol := resolveColumn[M](vf.StatusField)
+		userID := GetUserULID(ctx)
+		if userID == "" {
+			f.Filters = append(f.Filters, repository.Filter{
+				Field: statusCol, Op: repository.OpNEQ, Value: string(VersionStatusDraft),
+			})
+		} else {
+			createdByCol := resolveColumn[M]("CreatedBy")
+			f.Filters = append(f.Filters, repository.Filter{
+				Op: "or_group",
+				Value: []repository.Filter{
+					{Field: statusCol, Op: repository.OpNEQ, Value: string(VersionStatusDraft)},
+					{Field: createdByCol, Op: repository.OpEQ, Value: userID},
+				},
+			})
+		}
+	}
+
 	return s.repo.ListByFilters(ctx, f)
 }
 
