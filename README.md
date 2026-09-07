@@ -971,6 +971,28 @@ handlerReg.Register("site", siteHandler)
 siteHandler.RegisterRoutes(api.Group("/api/v1/sites"))
 ```
 
+### 路由级禁用（DisabledRoutes，BUG-071）
+
+`RegisterRoutes` 默认全量注册。若某个实体只是业务流程的**落库载体**、不允许外部直写，用 `DisabledRoutes` 关闭对应入口：
+
+```go
+handler.HandlerConfig[*entity.ShareRecord]{
+    PathPrefix:     "/api/v1/share-record",
+    DisabledRoutes: []string{"POST /create", "POST /delete"},
+}
+```
+
+语义要点：
+
+- **不注册**命中的路由 —— 请求表现为「路由不存在」（404），**不是 403**。403 的含义是「入口存在但你不被允许」，会暴露端点存在性并误导调用方去查权限配置。
+- **只作用于 HTTP 层**：handler 结构体与 `Create` / `Delete` 等方法全部保留，`DoCreate` / `DoList` / `DoGetByID` 等供级联、钩子、内部后处理调用的入口行为完全不变；`Cascades` / `References` / `ChildRefs` 展开与其它路由上的钩子也不受影响。
+- 路径可写**短路径**（相对 `PathPrefix`，推荐）或**全路径**，两种都接受：`"POST /create"` ≡ `"POST /api/v1/share-record/create"`。
+- 可禁用任意标准路由（含 `/restore`、`/activate`、`/versions` 等）：method 仅支持 `GET` / `POST`。
+- **配置写错直接 panic**（fail-fast）：未知 method（`"POSTT /create"`）或未知路径（`"POST /nope"`）会在构造 Handler 时报错，避免「以为禁了其实没禁」。
+- 默认 `nil` = 全量注册，向后兼容。
+
+> 不要用 `BeforeCreate` 返回 `403` 来替代：钩子在进入业务函数之后才拦截，请求已走完鉴权、参数解析与 `checkPerm`，探测者能借此确认端点存在与字段名。
+
 ---
 
 ## 钩子系统

@@ -26,11 +26,12 @@ type bug070Doc struct {
 	ULID      string    `gorm:"column:ulid;primaryKey;size:26" json:"ulid"`
 	Name      string    `gorm:"column:name;size:100" json:"name"`
 	IsDeleted int8      `gorm:"column:is_deleted;default:0" json:"is_deleted"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"` // List 默认排序字段
 	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (d *bug070Doc) SetDefaults()             {}
-func (d *bug070Doc) SetCreatedAt(_ time.Time) {}
+func (d *bug070Doc) SetCreatedAt(t time.Time) { d.CreatedAt = t }
 func (d *bug070Doc) SetCreatedBy(string)      {}
 func (d *bug070Doc) SetUpdatedAt(t time.Time) { d.UpdatedAt = t }
 func (d *bug070Doc) SetUpdatedBy(string)      {}

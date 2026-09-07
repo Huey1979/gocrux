@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+
 	"github.com/Huey1979/gocrux/repository"
 	"github.com/Huey1979/gocrux/service"
 )
@@ -47,7 +49,27 @@ type HandlerConfig[M service.Record] struct {
 	//   POST /{prefix}/activate      → Activate（发布/回滚统一入口）
 	//   GET  /{prefix}/versions      → ListVersions
 	//   POST /{prefix}/edit-version  → EditVersion
+	// 另：支持软删的非版本化实体额外注册 POST /{prefix}/restore。
 	PathPrefix string
+
+	// DisabledRoutes 路由级禁用清单（BUG-071，可选）。
+	//
+	// 语义：**不注册**指定的 HTTP 路由（表现为「路由不存在」），而不是禁用 handler、
+	// 也不是禁用 handler 方法 —— handler 结构体与 Create/Delete 等方法继续存在并可调用，
+	// 内部调用、级联（Cascades/References/ChildRefs）、钩子后处理完全不受影响。
+	//
+	// 元素格式：`"<METHOD> <path>"`，path 可写短路径（相对 PathPrefix）或全路径：
+	//
+	//	DisabledRoutes: []string{"POST /create", "POST /delete"}            // 短路径（推荐）
+	//	DisabledRoutes: []string{"POST /share-record/create"}                // 全路径亦可
+	//
+	// 适用场景：某实体是业务流程的落库载体，只允许内部逻辑写入（如 heims 的 share_record
+	// 必须走 /share/create 做完整业务校验），对外直写口子应「不存在」而非返回 403 ——
+	// 403 会误导调用方以为是权限配置问题，且暴露端点存在性。
+	//
+	// method / path 无法识别时构造期即 panic（fail-fast），避免「以为禁了其实没禁」。
+	// 默认 nil = 全量注册，向后兼容。
+	DisabledRoutes []string
 
 	// Cascades 级联关系声明（可选，向下级联：父→子）。
 	// 配置后，Create / Delete / Get / List 自动处理子表联动（List 中批量展开子记录）。
@@ -218,6 +240,10 @@ type GenericHandler[M service.Record] struct {
 	handlerReg *HandlerRegistry // 子 Handler 注册表（级联时用于查找子 Handler）
 	txCoord    *TxCoordinator   // 事务编排器（级联时用于保证事务一致性）
 
+	// disabledRoutes 路由级禁用集合（BUG-071，由 DisabledRoutes 预解析而来）。
+	// 仅作用于 RegisterRoutes（HTTP 层），不影响 handler 方法与级联能力。
+	disabledRoutes map[RouteKey]bool
+
 	// 合并后的校验规则（自动推导 + 用户配置）
 	validateRules struct {
 		Create EndpointRules
@@ -262,8 +288,18 @@ func NewGenericHandlerWithSvc[M service.Record](
 	return h
 }
 
-// initValidation 构建合并后的校验规则。
+// initValidation 构建合并后的校验规则，并预解析 DisabledRoutes（BUG-071）。
+//
+// DisabledRoutes 配置非法（method/路径无法识别）时直接 panic —— 这是 fail-fast：
+// 「以为禁用了其实没禁」比启动失败危险得多。
 func (h *GenericHandler[M]) initValidation() {
+	if len(h.config.DisabledRoutes) > 0 {
+		set, err := NormalizeDisabledRoutes(h.config.PathPrefix, h.config.DisabledRoutes)
+		if err != nil {
+			panic(fmt.Sprintf("[gocrux] handler %q 配置错误: %v", h.svcName, err))
+		}
+		h.disabledRoutes = set
+	}
 	if h.config.SkipAutoValidate {
 		// 动态 schema 实体：跳过自动字段校验，完全交由钩子处理
 		h.validateRules.Create = make(EndpointRules)

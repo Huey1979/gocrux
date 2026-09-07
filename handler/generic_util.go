@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,26 +82,115 @@ func (h *GenericHandler[M]) newListRequest(raw map[string]any) any {
 // 4. RegisterRoutes — 路由注册
 // ============================================================
 
+// knownRouteSubs 框架可注册的路由短路径（按 HTTP method 归类）。
+// 用于校验 DisabledRoutes 配置：写错路径（如 "POST /nope"）必须在构造期暴露，
+// 而不是静默忽略 —— 「以为禁了其实没禁」是安全问题里最糟的一类（BUG-071）。
+var knownRouteSubs = map[string]map[string]bool{
+	http.MethodPost: {
+		"/create": true, "/update": true, "/batch-update": true, "/delete": true,
+		"/restore": true, "/activate": true, "/edit-version": true,
+	},
+	http.MethodGet: {
+		"/list": true, "/get": true, "/versions": true, "/versions-archived": true,
+	},
+}
+
+// RouteKey 路由标识：HTTP method + 完整路径（如 "POST /api/v1/share-record/create"）。
+type RouteKey struct {
+	Method string
+	Path   string
+}
+
+// NormalizeDisabledRoutes 解析并校验 DisabledRoutes 配置，返回禁用路由集合。
+//
+// path 支持两种写法（内部统一归一化为完整路径）：
+//   - 短路径："POST /create"        → POST {PathPrefix}/create
+//   - 全路径："POST /share-record/create"（PathPrefix 为 /api/v1/share-record 时等价于上者）
+//
+// 校验（fail-fast）：method 必须是框架用到的 GET/POST；path 必须是已知的路由短路径，
+// 或 PathPrefix + 已知短路径。任一不合法返回 error，构造期会 panic，避免静默失效。
+func NormalizeDisabledRoutes(prefix string, routes []string) (map[RouteKey]bool, error) {
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	out := make(map[RouteKey]bool, len(routes))
+	for _, raw := range routes {
+		method, path, ok := strings.Cut(strings.TrimSpace(raw), " ")
+		if !ok {
+			return nil, fmt.Errorf("DisabledRoutes 元素格式必须为 \"<METHOD> <path>\"，实际=%q", raw)
+		}
+		method = strings.ToUpper(strings.TrimSpace(method))
+		path = strings.TrimSpace(path)
+		subs, ok := knownRouteSubs[method]
+		if !ok {
+			return nil, fmt.Errorf("DisabledRoutes 无法识别的 method=%q（仅支持 GET/POST），实际=%q", method, raw)
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		// 全路径写法：去掉 PathPrefix 还原为短路径
+		sub := path
+		if prefix != "" && strings.HasPrefix(path, prefix+"/") {
+			sub = strings.TrimPrefix(path, prefix)
+		}
+		if !subs[sub] {
+			return nil, fmt.Errorf("DisabledRoutes 无法识别的路由 %s %s（已知短路径：%v）",
+				method, path, knownRouteKeys(method))
+		}
+		out[RouteKey{Method: method, Path: prefix + sub}] = true
+	}
+	return out, nil
+}
+
+// knownRouteKeys 返回指定 method 的已知短路径列表（用于错误信息）。
+func knownRouteKeys(method string) []string {
+	subs := knownRouteSubs[method]
+	keys := make([]string, 0, len(subs))
+	for k := range subs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// isRouteDisabled 判断某条路由是否被禁用（BUG-071）。
+func (h *GenericHandler[M]) isRouteDisabled(method, sub string) bool {
+	return h.disabledRoutes[RouteKey{Method: method, Path: h.config.PathPrefix + sub}]
+}
+
 // RegisterRoutes 注册标准 CRUD + 版本管理路由到指定 RouterGroup。
 // 版本相关的路由（Activate / ListVersions / EditVersion）仅在 Service 启用了 VersionMode 时注册。
+// BUG-071：DisabledRoutes 命中的路由**不注册**（对外表现为路由不存在，而非 403）；
+// handler 的 Create/Delete 等方法仍然保留，内部调用与级联不受影响。
 func (h *GenericHandler[M]) RegisterRoutes(r gin.IRoutes) {
 	p := h.config.PathPrefix
-	r.POST(p+"/create", h.Create)
-	r.GET(p+"/list", h.List)
-	r.GET(p+"/get", h.Get)
-	r.POST(p+"/update", h.Update)
-	r.POST(p+"/batch-update", h.BatchUpdate)
-	r.POST(p+"/delete", h.Delete)
+	reg := func(method, sub string, fn gin.HandlerFunc) {
+		if h.isRouteDisabled(method, sub) {
+			return
+		}
+		switch method {
+		case http.MethodPost:
+			r.POST(p+sub, fn)
+		case http.MethodGet:
+			r.GET(p+sub, fn)
+		}
+	}
+	reg(http.MethodPost, "/create", h.Create)
+	reg(http.MethodGet, "/list", h.List)
+	reg(http.MethodGet, "/get", h.Get)
+	reg(http.MethodPost, "/update", h.Update)
+	reg(http.MethodPost, "/batch-update", h.BatchUpdate)
+	reg(http.MethodPost, "/delete", h.Delete)
 	// BUG-069：仅「支持软删 + 非版本化」的实体注册恢复路由 ——
 	// 物理删实体无恢复语义；版本化实体删除=废弃，恢复走 /activate
 	if supportsSoftDelete[M]() && !h.svc.SupportsVersion() {
-		r.POST(p+"/restore", h.Restore)
+		reg(http.MethodPost, "/restore", h.Restore)
 	}
 	if h.svc.SupportsVersion() {
-		r.POST(p+"/activate", h.Activate)
-		r.GET(p+"/versions", h.ListVersions)
-		r.POST(p+"/edit-version", h.EditVersion)
-		r.GET(p+"/versions-archived", h.ListArchivedVersions)
+		reg(http.MethodPost, "/activate", h.Activate)
+		reg(http.MethodGet, "/versions", h.ListVersions)
+		reg(http.MethodPost, "/edit-version", h.EditVersion)
+		reg(http.MethodGet, "/versions-archived", h.ListArchivedVersions)
 	}
 }
 
