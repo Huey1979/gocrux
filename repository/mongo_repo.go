@@ -552,6 +552,61 @@ func likeToRegex(pattern string) string {
 	return b.String()
 }
 
+// splitRangeValue 把 OpRange 的区间值拆成 (lo, hi) 上下界（BUG-073）。
+//
+// 接受形态：
+//   - []any{lo, hi} / []string{lo, hi} → 两个界
+//   - 逗号分隔字符串 "lo,hi"            → 两个界
+//   - "lo," / ",hi"                     → 单侧界（另一侧为 nil，不生成该条件）
+//
+// 单值（无法确定上下界）返回 (nil, nil)，由调用方生成明确不匹配的条件。
+// 注意：值本身的类型归一（string → time.Time / int64）由 service 层
+// `normalizeFilterValue` 统一完成（BUG-078），本函数只负责拆分。
+func splitRangeValue(v any) (lo, hi any) {
+	switch items := v.(type) {
+	case []any:
+		switch len(items) {
+		case 0:
+			return nil, nil
+		case 1:
+			return rangeBoundOrNil(items[0]), nil
+		default:
+			return rangeBoundOrNil(items[0]), rangeBoundOrNil(items[1])
+		}
+	case []string:
+		switch len(items) {
+		case 0:
+			return nil, nil
+		case 1:
+			return rangeBoundOrNil(items[0]), nil
+		default:
+			return rangeBoundOrNil(items[0]), rangeBoundOrNil(items[1])
+		}
+	}
+
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts) < 2 {
+		// 单值：无法判断是上界还是下界
+		return nil, nil
+	}
+	return rangeBoundOrNil(parts[0]), rangeBoundOrNil(parts[1])
+}
+
+// rangeBoundOrNil 空串/空白视为「该侧不限制」→ nil。
+func rangeBoundOrNil(v any) any {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return v
+}
+
 // filterToBson 将单个 Filter 转为 MongoDB bson 查询条件。
 func filterToBson(f Filter) bson.M {
 	switch f.Op {
@@ -573,7 +628,26 @@ func filterToBson(f Filter) bson.M {
 	case OpIn:
 		return bson.M{f.Field: bson.M{"$in": f.Value}}
 	case OpRange:
-		return bson.M{f.Field: bson.M{"$gte": f.Value, "$lte": f.Value}}
+		// BUG-073：原实现把整个区间数组同时塞给 $gte 与 $lte
+		// （`bson.M{"$gte": f.Value, "$lte": f.Value}`，f.Value 是 []any{lo,hi}），
+		// 生成「字段 ≥ 数组 且 字段 ≤ 同一数组」。按 BSON type ordering，
+		// Date 恒小于 Array ⇒ 条件恒假 ⇒ 时间区间筛选静默返回空集。
+		// 正确语义是把上下界拆开；只给一侧时生成单条件（支持 between=a, / between=,b）。
+		lo, hi := splitRangeValue(f.Value)
+		cond := bson.M{}
+		if lo != nil {
+			cond["$gte"] = lo
+		}
+		if hi != nil {
+			cond["$lte"] = hi
+		}
+		if len(cond) == 0 {
+			// 形态非法（空值 / 无法解析的单值）：返回一个**永不匹配**但结构合法的
+			// 条件，而不是静默退化成「不过滤返回全量」。用 $expr + 不存在的字段名
+			// 比较保证恒假，调用方从「结果为空」即可当场发现参数写错。
+			return bson.M{"$expr": bson.M{"$eq": []any{"$__invalid_range_filter__", true}}}
+		}
+		return bson.M{f.Field: cond}
 	case "or_group":
 		// OR 组：子 filter 之间用 $or 连接
 		subs, _ := f.Value.([]Filter)

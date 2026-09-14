@@ -1858,9 +1858,29 @@ type Filter struct {
 | 小于 | `OpLT` | `field < ?` | 数字/时间 |
 | 小于等于 | `OpLTE` | `field <= ?` | 数字/时间 |
 | IN | `OpIn` | `field IN (?,?)` | 切片 |
-| BETWEEN | `OpRange` | `field BETWEEN ? AND ?` | 长度为 2 的切片 |
+| BETWEEN | `OpRange` | `field BETWEEN ? AND ?` | 长度为 2 的切片（`[]any{lo,hi}`） |
 | 原生 SQL | `OpRaw` | 直接拼接 SQL 片段 | `(string, []any)` 或仅 `string` |
 | OR 组合 | `or_group` | 子条件 OR 连接，整体 AND 嵌入 | `[]Filter` 切片 |
+
+**双引擎语义一致性（BUG-073）**
+
+- `OpRange` 在 **MySQL 与 Mongo 语义相同**：都是闭区间 `[lo, hi]`，
+  只给一侧时退化为单边条件（`$gte` 或 `$lte` / SQL 侧单边比较）。
+  入参形态完全无法解释（空值 / 纯单值字符串）时，Mongo 侧返回**恒不匹配**的条件，
+  而不是静默退化成「不过滤返回全量」。
+- **通过 HTTP List 接口传入的过滤值由框架自动做类型归一**（`service/filter_value.go`）：
+  按目标列的 Go 字段类型把 URL 字符串转成 `time.Time` / `int64` / `float64` / `bool`。
+  因此时间与数值字段**直接传字符串即可**，无需调用方自己构造 `time.Time`：
+  ```
+  GET /api/v1/publish-history/list?published_at:between=2026-01-01 00:00:00,2026-12-31 23:59:59
+  GET /api/v1/auto-task-log/list?start_time:gt=2020-01-01T00:00:00Z
+  GET /api/v1/auto-task-log/list?duration_ms:gt=0
+  ```
+  支持的时间格式：RFC3339 / RFC3339Nano（含时区偏移）、`2006-01-02 15:04:05`、
+  `2006-01-02 15:04`、`2006-01-02`、`2006/01/02`。解析失败时保持原样
+  （与 MySQL 侧「匹配不到」一致，不报错）。
+- 直接调用 `repo.ListByFilters`（不经 service）时**不会**自动归一，
+  此时请自行传入正确类型的 `Value`。
 
 ### 使用示例
 
