@@ -1900,6 +1900,31 @@ type Filter struct {
   （与 MySQL 侧「匹配不到」一致，不报错）。
 - 直接调用 `repo.ListByFilters`（不经 service）时**不会**自动归一，
   此时请自行传入正确类型的 `Value`。
+- 比较条件的取值会经 `bsonSafeValue` 归一（无序 `map[string]any` 统一按有序编码，
+  避免与库中原有序文档比较时结果不稳定）；标量类型走快路径直接透传。
+
+### List 过滤的可用列（白名单，BUG-078）
+
+HTTP List 接口只接受**属于该实体的列**作为过滤参数，其余 key 一律静默忽略
+（如前端附加的 `_t`、`callback`）。白名单的来源：
+
+- 具名字段的 `gorm column` → `bson` tag（取逗号前段）→ `json` tag；
+- **匿名嵌入结构体的字段会被递归展开**（限深 3 层防环）。
+
+第二条是 BUG-078 的修复点：审计字段（`AuditFields` / `MongoAuditFields`：`created_by`、
+`created_at`、`updated_by`、`updated_at`）一律匿名嵌入，此前**一个都不在白名单里**，
+于是 `?created_at:lte=2026-01-01` 这类条件被整条丢弃并返回全量数据、不报错。现在它们可用：
+
+```http
+GET /api/v1/xxx/list?created_at:lte=2026-01-01
+GET /api/v1/xxx/list?updated_at:between=2026-01-01 00:00:00,2026-12-31 23:59:59
+GET /api/v1/xxx/list?created_by=01M2AHQ...
+```
+
+> ⚠️ 升级提示：此前「传了也不生效」的审计列过滤现在会**真正生效**。
+> 若调用方曾依赖该空操作（把返回全量当成正常结果），升级后会看到结果变少。
+>
+> 陌生字段的处理**未变**：仍静默忽略并返回全量（不做 400）。
 
 ### 使用示例
 

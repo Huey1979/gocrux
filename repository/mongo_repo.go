@@ -607,26 +607,56 @@ func rangeBoundOrNil(v any) any {
 	return v
 }
 
+// bsonSafeValue 确保值可被 Mongo 驱动正确编码（BUG-078）。
+//
+// 背景：比较条件（$eq/$ne/$gt/$gte/$lt/$lte/$in）的值若传入无序 map
+// （如 map[string]any 或已解码的 bson.M），驱动会按**无序 map** 编码，
+// 与库中原本有序编码的文档/子文档做比较时得不到稳定结果。
+// 这里统一走一次 bson.Marshal 归一化；失败（含 nil、不可编码类型）时原样返回，
+// 交由驱动与引擎自行判定，不把可诊断信息吞掉。
+func bsonSafeValue(v any) any {
+	if v == nil {
+		return v
+	}
+	switch v.(type) {
+	case string, bool, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, time.Time, primitive.DateTime, primitive.ObjectID:
+		return v // 标量类型直接透传，省一次编码
+	}
+	b, err := bson.Marshal(bson.M{"v": v})
+	if err != nil {
+		return v
+	}
+	var probe struct {
+		V any `bson:"v"`
+	}
+	if err := bson.Unmarshal(b, &probe); err != nil {
+		return v
+	}
+	return probe.V
+}
+
 // filterToBson 将单个 Filter 转为 MongoDB bson 查询条件。
 func filterToBson(f Filter) bson.M {
 	switch f.Op {
 	case OpEQ:
-		return bson.M{f.Field: f.Value}
+		return bson.M{f.Field: bsonSafeValue(f.Value)}
 	case OpNEQ:
-		return bson.M{f.Field: bson.M{"$ne": f.Value}}
+		return bson.M{f.Field: bson.M{"$ne": bsonSafeValue(f.Value)}}
 	case OpLike:
 		// Mongo 不认 SQL LIKE 的 % _ 通配符，需先转成 regex 模式（BUG-041 修复）
 		return bson.M{f.Field: bson.M{"$regex": likeToRegex(fmt.Sprint(f.Value)), "$options": "i"}}
 	case OpGT:
-		return bson.M{f.Field: bson.M{"$gt": f.Value}}
+		return bson.M{f.Field: bson.M{"$gt": bsonSafeValue(f.Value)}}
 	case OpGTE:
-		return bson.M{f.Field: bson.M{"$gte": f.Value}}
+		return bson.M{f.Field: bson.M{"$gte": bsonSafeValue(f.Value)}}
 	case OpLT:
-		return bson.M{f.Field: bson.M{"$lt": f.Value}}
+		return bson.M{f.Field: bson.M{"$lt": bsonSafeValue(f.Value)}}
 	case OpLTE:
-		return bson.M{f.Field: bson.M{"$lte": f.Value}}
+		return bson.M{f.Field: bson.M{"$lte": bsonSafeValue(f.Value)}}
 	case OpIn:
-		return bson.M{f.Field: bson.M{"$in": f.Value}}
+		return bson.M{f.Field: bson.M{"$in": bsonSafeValue(f.Value)}}
 	case OpRange:
 		// BUG-073：原实现把整个区间数组同时塞给 $gte 与 $lte
 		// （`bson.M{"$gte": f.Value, "$lte": f.Value}`，f.Value 是 []any{lo,hi}），

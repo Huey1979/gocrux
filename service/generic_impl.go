@@ -483,23 +483,75 @@ func popStrParam(m map[string]any, key string) string {
 
 // knownColumns[M] 返回 entity 所有已知列名集合（gorm column / bson / json tag）。
 // 用于 List 过滤时跳过不属于本实体的陌生参数（如 _t、callback 等）。
+//
+// BUG-078：必须**递归展开匿名（嵌入）结构体**。审计字段
+// （AuditFields / MongoAuditFields：created_by / created_at / updated_by / updated_at）
+// 一律是匿名嵌入，嵌入字段自身没有 gorm/json 标签、bson 标签是 ",inline"
+// （parseBsonKey 取逗号前段为空串），因此原实现（只遍历顶层）的白名单里
+// **一个审计列都没有** —— 于是 `created_at:lte=...` 这类条件被整条静默丢弃并
+// 返回全量数据、不报错，文档示例 `?created_at:lte=2026-01-01` 在所有实体上
+// 都是空操作。
+//
+// 递归限深 maxKnownColumnsDepth 防环（自引用/互引用结构体）。
 func knownColumns[M Record]() map[string]bool {
+	cols := make(map[string]bool)
 	var m M
 	t := reflect.TypeOf(m)
-	if t.Kind() == reflect.Ptr {
+	if t == nil {
+		return cols
+	}
+	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+	collectKnownColumns(t, cols, 0)
+	// 框架字段（可能无结构体标签映射）
+	cols["id"] = true
+	return cols
+}
 
-	cols := make(map[string]bool)
+// maxKnownColumnsDepth 嵌入结构体递归展开的最大深度（防自引用导致的死循环）。
+const maxKnownColumnsDepth = 3
+
+// collectKnownColumns 递归收集 t 的列名。匿名嵌入 struct 时向下展开，
+// 具名字段按标签解析（与 gormColumn / parseBsonKey 规则一致）。
+func collectKnownColumns(t reflect.Type, cols map[string]bool, depth int) {
+	if t == nil || depth > maxKnownColumnsDepth {
+		return
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		// 匿名嵌入 struct：其自身无 DB 列名，子字段由 GORM/Mongo 展开（BUG-048 同源），
+		// 这里递归取叶子列名（BUG-078）。**必须在 PkgPath 检查之前**处理：
+		// 匿名嵌入未导出类型时 PkgPath 非空，但字段本身仍会被 GORM/Mongo 展开。
+		if f.Anonymous {
+			ft := f.Type
+			for ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				collectKnownColumns(ft, cols, depth+1)
+				continue
+			}
+		}
+		// 未导出字段不可作为列
+		if f.PkgPath != "" {
+			continue
+		}
 		// gorm column
 		if col := common.ExtractGormColumn(f.Tag.Get("gorm")); col != "" {
 			cols[col] = true
 		}
 		// bson tag（取逗号前段，避免 `bson:"xxx,omitempty"` 产生错误键，BUG-061）
 		if bsonTag := f.Tag.Get("bson"); bsonTag != "" && bsonTag != "-" {
-			cols[parseBsonKey(bsonTag)] = true
+			if key := parseBsonKey(bsonTag); key != "" {
+				cols[key] = true
+			}
 		}
 		// json tag (fallback)
 		if jsonTag := f.Tag.Get("json"); jsonTag != "" && jsonTag != "-" {
@@ -509,7 +561,4 @@ func knownColumns[M Record]() map[string]bool {
 			}
 		}
 	}
-	// 框架字段（可能无结构体标签映射）
-	cols["id"] = true
-	return cols
 }
