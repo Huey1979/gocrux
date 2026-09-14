@@ -837,11 +837,239 @@ func (s *GenericService[M]) _doDelete(ctx context.Context, id, data any) error {
 		}
 	}
 
-	// 版本化：废弃当前版本
+	// 版本化：废弃当前版本（并在必要时把 is_current 交还给族内的线上版本）
 	if s.config.VersionMode && s.config.VersionFields != nil {
-		return s.repo.BatchDeprecateVersions(ctx, ids)
+		return s._deprecateVersionsWithCurrentHandback(ctx, ids)
 	}
 	return s._deleteByPK(ctx, ids)
+}
+
+// _deprecateVersionsWithCurrentHandback 版本化「删除」动作（BUG-076）。
+//
+// 背景：版本化实体的「删除」= 废弃（is_current=0 + version_status=deprecated），
+// 从不写 is_deleted。而框架所有配置态读路径（list / get?code= / versions）都以
+// `is_current=1` 作为「当前版本」判据。
+//
+// 缺陷：删除**非 published 的当前版本**（典型场景：发布后编辑存草稿，再删掉草稿）时，
+// 被改写的只有被点的那一行自己。而同 code 族里真正在线的 published 行早在
+// 派生草稿时就被 `deprecateByCode` 让位成 `is_current=0`（保留 published），
+// 于是删完草稿后全族 `is_current` 之和为 0 ——
+// 列表 0 行、`get?code=` 404、版本历史也捞不出来，
+// 而运行时仍按 `version_status='published'` 跑着那条看不见的版本（幽灵态）。
+//
+// 修复（报告方案 A）：同一族内删除后若已无 is_current=1，且族内存在
+// `version_status='published' AND is_deleted=0` 的行，则把其中最新的一条
+// **只改 is_current=1**（不动 version_status），把「当前版本」交还给线上版本。
+// 语义上等价于「删草稿 = 丢弃草稿、把配置态交还线上」，与直觉一致。
+//
+// 删 published 当前版本的行为**不变**（整族干净下线），因为此时族内没有其他
+// published 行可交还（残留的 deprecated 行不算）。
+func (s *GenericService[M]) _deprecateVersionsWithCurrentHandback(ctx context.Context, ids []any) error {
+	vf := s.config.VersionFields
+
+	// 1. 记录受影响记录所属的 code 族（去重）。
+	//    查失败不阻断删除本身 —— 交还仅是「体验修复」，删除语义优先。
+	codes := s.collectAffectedCodes(ctx, ids)
+
+	// 2. 执行原有的废弃写入。
+	if err := s.repo.BatchDeprecateVersions(ctx, ids); err != nil {
+		return err
+	}
+
+	// 3. 逐族回填 is_current。
+	for _, code := range codes {
+		s.handbackCurrentVersion(ctx, vf, code)
+	}
+	return nil
+}
+
+// collectAffectedCodesByField 收集「按字段删除」场景下受影响的 code 族集合（BUG-076）。
+func (s *GenericService[M]) collectAffectedCodesByField(ctx context.Context, field string, values []any) []string {
+	vf := s.config.VersionFields
+	if vf == nil || vf.CodeField == "" || field == "" || len(values) == 0 {
+		return nil
+	}
+	rows, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters:  []repository.Filter{{Field: field, Op: repository.OpIn, Value: values}},
+		Page:     1,
+		PageSize: 0,
+	})
+	if err != nil {
+		logrus.Warnf("gocrux: BUG-076 查询待废弃版本所属 code 失败（entity_type=%s field=%s）: %v",
+			s.config.EntityName, field, err)
+		return nil
+	}
+	seen := map[string]struct{}{}
+	codes := make([]string, 0, len(rows))
+	for i := range rows {
+		if c := getStrField(&rows[i], vf.CodeField); c != "" {
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			codes = append(codes, c)
+		}
+	}
+	return codes
+}
+
+// collectAffectedCodes 收集 ids 对应的 code 族集合（去重，跳过空 code）。
+func (s *GenericService[M]) collectAffectedCodes(ctx context.Context, ids []any) []string {
+	vf := s.config.VersionFields
+	if vf == nil || vf.CodeField == "" || len(ids) == 0 {
+		return nil
+	}
+	// 按主键查（ids 是主键），再取出它们的 code —— 不能用 code IN ids。
+	pkCol := s.repo.PKField()
+	rows, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters:  []repository.Filter{{Field: pkCol, Op: repository.OpIn, Value: ids}},
+		Page:     1,
+		PageSize: 0, // 全量，不受分页截断（BUG-063 契约）
+	})
+	if err != nil {
+		logrus.Warnf("gocrux: BUG-076 查询待废弃版本所属 code 失败（entity_type=%s）: %v",
+			s.config.EntityName, err)
+		return nil
+	}
+	seen := map[string]struct{}{}
+	codes := make([]string, 0, len(rows))
+	for i := range rows {
+		if c := getStrField(&rows[i], vf.CodeField); c != "" {
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			codes = append(codes, c)
+		}
+	}
+	return codes
+}
+
+// handbackCurrentVersion 若 code 族内已无 is_current=1，则把其中
+// `version_status=published`（未软删）的最新一条置回 is_current=1（BUG-076）。
+func (s *GenericService[M]) handbackCurrentVersion(ctx context.Context, vf *VersionFieldMapping, code string) {
+	if vf == nil || code == "" {
+		return
+	}
+	if vf.CurrentField == "" || vf.StatusField == "" {
+		return
+	}
+	codeCol := resolveColumn[M](vf.CodeField)
+	currentCol := resolveColumn[M](vf.CurrentField)
+	statusCol := resolveColumn[M](vf.StatusField)
+
+	// 3.1 族内是否已有 is_current=1？有则无需交还。
+	curRows, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters: []repository.Filter{
+			{Field: codeCol, Op: repository.OpEQ, Value: code},
+			{Field: currentCol, Op: repository.OpEQ, Value: int8(1)},
+		},
+		Page:     1,
+		PageSize: 0,
+	})
+	if err != nil {
+		logrus.Warnf("gocrux: BUG-076 查询 code=%s 的当前版本失败: %v", code, err)
+		return
+	}
+	if len(curRows) > 0 {
+		return // 族内已有当前版本，无需交还
+	}
+
+	// 3.2 找族内未软删的 published 行。
+	filters := []repository.Filter{
+		{Field: codeCol, Op: repository.OpEQ, Value: code},
+		{Field: statusCol, Op: repository.OpEQ, Value: string(VersionStatusPublished)},
+	}
+	if delCol, liveVal, ok := s.DeletedColumn(); ok {
+		filters = append(filters, repository.Filter{Field: delCol, Op: repository.OpEQ, Value: liveVal})
+	}
+	pubRows, _, err := s.repo.ListByFilters(ctx, repository.ListFilters{
+		Filters:  filters,
+		Page:     1,
+		PageSize: 0,
+	})
+	if err != nil {
+		logrus.Warnf("gocrux: BUG-076 查询 code=%s 的线上版本失败: %v", code, err)
+		return
+	}
+	if len(pubRows) == 0 {
+		// 族内没有可交还的线上版本 → 维持「整族下线」语义（删的就是 published 当前版本）
+		return
+	}
+
+	// 3.3 取最新一条（按 published_at 降序，缺失则按主键序）。
+	targetIdx := s.pickLatestPublished(pubRows, vf)
+	targetID := getFieldVal(&pubRows[targetIdx], s.repo.PKField())
+	if targetID == nil {
+		if goField := resolveColumnFromDB[M](s.repo.PKField()); goField != "" {
+			targetID = getFieldVal(&pubRows[targetIdx], goField)
+		}
+	}
+	if targetID == nil {
+		return
+	}
+
+	// 3.4 只改 is_current，不动 version_status（保留 published 供运行时继续使用）。
+	if err := s.repo.UpdateByID(ctx, targetID, map[string]any{currentCol: int8(1)}); err != nil {
+		logrus.Warnf("gocrux: BUG-076 交还当前版本失败（code=%s id=%v）: %v", code, targetID, err)
+		return
+	}
+	logrus.Infof("gocrux: BUG-076 删除草稿后已将 is_current 交还线上的 published 版本（entity_type=%s code=%s id=%v）",
+		s.config.EntityName, code, targetID)
+}
+
+// pickLatestPublished 在 published 行中选出「最新」的一条，返回下标。
+// 优先按 PublishedAtField 降序；该字段缺失或全零时回退为最后一条
+// （ListByFilters 默认按 created_at desc，末条即最早，故取首条更稳）。
+func (s *GenericService[M]) pickLatestPublished(rows []M, vf *VersionFieldMapping) int {
+	if vf != nil && vf.PublishedAtField != "" {
+		best := -1
+		var bestT time.Time
+		for i := range rows {
+			t, ok := getTimeField(&rows[i], vf.PublishedAtField)
+			if !ok {
+				continue
+			}
+			if best == -1 || t.After(bestT) {
+				best, bestT = i, t
+			}
+		}
+		if best >= 0 {
+			return best
+		}
+	}
+	return 0
+}
+
+// getTimeField 反射读取实体的 time.Time / *time.Time 字段。
+func getTimeField[M any](m *M, goField string) (time.Time, bool) {
+	if goField == "" || m == nil {
+		return time.Time{}, false
+	}
+	v := reflect.ValueOf(m)
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return time.Time{}, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return time.Time{}, false
+	}
+	f := v.FieldByName(goField)
+	if !f.IsValid() {
+		return time.Time{}, false
+	}
+	switch t := f.Interface().(type) {
+	case time.Time:
+		return t, true
+	case *time.Time:
+		if t == nil {
+			return time.Time{}, false
+		}
+		return *t, true
+	}
+	return time.Time{}, false
 }
 
 // _deleteByPK 按主键批量删除（非版本化）：软删除或物理删+备份。
@@ -869,7 +1097,15 @@ func (s *GenericService[M]) _deleteByPK(ctx context.Context, ids []any) error {
 // opTag: 备份日志中的操作标记。
 func (s *GenericService[M]) _deleteByField(ctx context.Context, field string, values []any, supportsVersion bool, opTag string) error {
 	if supportsVersion && s.config.VersionMode && s.config.VersionFields != nil {
-		return s.repo.BatchDeprecateVersionsByFK(ctx, field, values)
+		// BUG-076：按 code 删除同样要在废弃后回填 is_current。
+		codes := s.collectAffectedCodesByField(ctx, field, values)
+		if err := s.repo.BatchDeprecateVersionsByFK(ctx, field, values); err != nil {
+			return err
+		}
+		for _, code := range codes {
+			s.handbackCurrentVersion(ctx, s.config.VersionFields, code)
+		}
+		return nil
 	}
 
 	m := newRecord[M]()

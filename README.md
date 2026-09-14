@@ -1550,6 +1550,25 @@ GET /api/v1/sites/get?code=S001     # 按 code 查当前生效版本（is_curren
 
 这确保前端列表接口默认不暴露他人的草稿数据。Service 层通过 `GetUserULID(ctx)` 获取当前用户，若 ctx 中无用户信息则按未登录处理。过滤在 SQL 层执行（而非 `_afterList` 内存过滤），保证分页准确性。
 
+### 版本化删除：`is_current` 交还（BUG-076）
+
+版本化实体的「删除」= **废弃**（写 `is_current=0` + `version_status=deprecated`，从不写 `is_deleted`）。
+框架中所有「配置态当前版本」读路径（`list` / `get?code=` / `versions`）都以 `is_current=1` 为判据，
+因此删除后会做一次**当前版本交还**，避免出现「全族 `is_current` 之和为 0」的幽灵态：
+
+| 删除对象 | 结果 |
+|---|---|
+| **非 published 的当前版本**（典型：发布后编辑存草稿，再删掉草稿） | 丢弃草稿，并把 `is_current=1` **交还给族内最新的未软删 published 行**（只改 `is_current`，**不动** `version_status`）→ 配置列表恢复可见 |
+| **published 的当前版本** | 整族干净下线（族内无其他 published 可交还），行为与修复前一致 |
+| 族内从未发布过（只有草稿） | 无 published 可交还，维持废弃结果 |
+
+交还只在「族内已无 `is_current=1`」且「存在 `version_status='published'` 且未软删的行」时发生；
+多条 published 时取 `published_at` 最新的一条。该逻辑对 `delete`（按主键）与按 code 删除同样生效，
+MySQL 与 MongoDB 一致。
+
+> 排查提示：交还成功会打印一条 `Info` 日志
+> （`BUG-076 删除草稿后已将 is_current 交还线上的 published 版本（entity_type=… code=… id=…）`）。
+
 ---
 
 ## 身份认证与授权
