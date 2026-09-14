@@ -338,6 +338,17 @@ func parseGormSize(tag string) int {
 }
 
 // goKindToRuleType 将 reflect.Type 映射为规则类型名。
+//
+// BUG-075：struct / slice / array / map 这类**目标列本身就是结构化类型**的字段
+// 返回 "any"（不约束、不做转换），而不是兜底成 "string"。
+//
+// 原因：兜底成 "string" 会让 coerceToString 把客户端提交的原生 JSON 对象/数组
+// 序列化成字符串，随后 mergeByJSON 再 unmarshal 回结构化字段必然失败
+// （`json: cannot unmarshal string into Go struct field ...`），
+// 实体只要没有自定义解析钩子就落不了库 —— 等于框架在 handler 层改写了写入契约。
+//
+// coerceValue 对 "any" 走默认分支原样透传（无类型转换、无长度/范围校验），
+// 因此这些字段的行为变成「交给 encoding/json 自己解码」，与实体契约一致。
 func goKindToRuleType(t reflect.Type) string {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -352,11 +363,18 @@ func goKindToRuleType(t reflect.Type) string {
 		return "bool"
 	case reflect.String:
 		return "string"
+	case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
+		// BUG-075：结构化字段不做字符串化，交给 json.Unmarshal 按目标类型解码。
+		// 注意 time.Time / *time.Time 也落在 struct 分支：其入站线值本来就是
+		// RFC3339 字符串，透传后由 encoding/json 正确解析，比强制转 string 更准确。
+		return "any"
+	case reflect.Interface:
+		// any / interface{} 字段：无从约束，原样透传。
+		// （BUG-075 顺带修复：原判断写作 `t == reflect.TypeOf(interface{}(any(nil)))`，
+		//  该表达式恒为 nil，分支永远不成立 —— any 字段此前也被兜底成 "string"。）
+		return "any"
 	default:
-		if t == reflect.TypeOf(interface{}(any(nil))) {
-			return "any"
-		}
-		return "string" // 兜底
+		return "string" // 兜底：channel / func / 指针环等确实无法表达，保留原样
 	}
 }
 
