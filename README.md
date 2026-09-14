@@ -466,11 +466,37 @@ UniqueFields: [][]string{
 }
 ```
 
-**`EnableOpLog`** — 启用后，Create/Update/Delete/Activate 完成时自动向 `sys_operation_log` 表写入操作日志。需注入 `opLogRepo`：
+**`EnableOpLog`** — 启用后，Create/Update/Delete/Activate/Restore 完成时自动写入操作日志。
+
+> ⚠️ **开关与写入方必须同时具备**（BUG-077）。`EnableOpLog: true` 但未注入写入方时，
+> 构造期会打印一条 `Warn` 告警，且不写任何记录（而不是静默假装成功）。
+
+三种注入口任选其一（均可在模块外编译）：
 
 ```go
+// ① 落内置 sys_operation_log 表（最省事）
+svc.SetOpLogDB(db) // db *gorm.DB
+
+// ② 自定义落库（Mongo / 文件 / MQ），可拿到前后快照
+svc.SetOpLogWriter(myWriter) // 实现 service.OpLogWriter
+
+// ③ 兼容旧写法（仅模块内可用，参数类型在 internal/）
 svc.SetOpLogRepo(repository.NewCRUDRepository[entity.SysOperationLog]())
 ```
+
+自定义写入方接口：
+
+```go
+type OpLogWriter interface {
+    WriteOpLogs(ctx context.Context, records []OpLogRecord) error
+}
+
+// OpLogRecord 字段：
+//   EntityType / EntityID / Operation / OperatorULID / RequestID / OperatedAt
+//   RecordBefore / RecordAfter  json.RawMessage（可选前后快照，update/delete/activate 填充）
+```
+
+写入失败只记 `Error` 日志，不会让主业务失败（审计是尽力而为，但**绝不静默**）。
 
 **`EntityName`** — 日志中 `EntityType` 字段的值，建议使用英文表名（如 `"site"`, `"role"`）。
 
@@ -1637,12 +1663,17 @@ HTTP 请求中传入 `idempotency_key` 字段即可：
 启用 `EnableOpLog` 后自动写入 `sys_operation_log` 表：
 
 ```go
-svc.SetOpLogRepo(repository.NewCRUDRepository[entity.SysOperationLog]())
+svc.SetOpLogDB(db) // 或 SetOpLogWriter / SetOpLogRepo，见上文「配置项详解」
 ```
 
 日志字段：`log_ulid`、`entity_type`、`entity_id`、`operation`、`operator_ulid`、`request_id`、`operated_at`。
 
-### 备份写入器
+支持的 `operation` 取值：`create`、`update`、`delete`、`activate`、`updateVersion`、`restore`。
+
+> **注意（BUG-077）**：只设 `EnableOpLog: true` 而不注入写入方等于没开启 —— 构造期会打告警，
+> 也不会写任何记录。`gentity` 生成的模板默认 **不再** 打开该开关。
+
+### 备份写入器（与操作日志相互独立）
 
 非版本化 Update 时旧数据会被覆盖丢失，可通过 `BakWriter` 在更新前写备份日志文件：
 
@@ -1652,6 +1683,27 @@ svc.SetBakWriter(func(ctx context.Context, tableName string, recordID any, opera
     return nil
 })
 ```
+
+调用时机：非版本化 `update`（旧值会被覆盖）、物理 `delete`（按主键 / 按字段）、`activate`、`updateVersion`。
+
+> **注意（BUG-077 §8.2）**：备份写入的唯一门控是「是否注册了 `bakWriter`」，
+> **与 `EnableOpLog` 无关**。修复前非版本化 update 的备份被误锁在 `EnableOpLog && opLogRepo != nil` 之下，
+> 未开审计的下游应用一条备份都写不出来。备份失败只记 `Error` 日志，不阻塞主流程。
+
+### 在钩子中取旧值（BUG-077 §8.3）
+
+`UpdatePair` 已导出，应用可在 `AfterUpdate` 钩子里直接断言取旧值，无需反射：
+
+```go
+func (s *XxxSvc) AfterUpdate(ctx context.Context, id any, result *Entity, pdata any) (*Entity, error) {
+    if pair, ok := service.AsUpdatePair[*Entity](pdata); ok && pair.Old != nil {
+        backup(pair.Old) // 旧值快照（非版本化时为被覆盖前的内容）
+    }
+    return result, nil
+}
+```
+
+> 覆盖 `Hooks.AfterUpdate` 会**接管**默认行为（内置 opLog / bakWriter 不再执行）。
 
 ---
 

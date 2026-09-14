@@ -10,6 +10,7 @@ import (
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/repository"
 
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
@@ -106,18 +107,22 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 }
 
 func (s *GenericService[M]) _afterActivate(ctx context.Context, id any) error {
-	if !s.config.EnableOpLog || s.opLogRepo == nil {
-		return nil
-	}
 	_entity, ok := id.(*M)
 	if !ok {
 		return nil
 	}
-	s.writeOpLog(ctx, extractEntityID(_entity), "activate")
+	if s.opLogReady() {
+		rec := s.makeOpLogRecord(ctx, extractEntityID(_entity), "activate")
+		rec.RecordAfter = snapshotJSON(_entity)
+		s.writeOpLogRecords(ctx, []OpLogRecord{rec})
+	}
 
-	// 备份日志文件
+	// 备份日志文件（门控只看 bakWriter，与 opLog 解耦 —— BUG-077 §7/§8.2）
 	if s.bakWriter != nil {
-		_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(_entity), "activate", _entity, GetRequestID(ctx))
+		if err := s.bakWriter(ctx, s.config.EntityName, extractEntityID(_entity), "activate", _entity, GetRequestID(ctx)); err != nil {
+			logrus.Errorf("gocrux: 写备份日志失败（entity_type=%s operation=activate id=%v）: %v",
+				s.config.EntityName, extractEntityID(_entity), err)
+		}
 	}
 	return nil
 }
@@ -272,13 +277,21 @@ func (s *GenericService[M]) _doEditVersion(ctx context.Context, id any, pdata an
 }
 
 func (s *GenericService[M]) _afterEditVersion(ctx context.Context, id any, result *M, pdata any) (*M, error) {
-	if s.config.EnableOpLog && s.opLogRepo != nil {
-		s.writeOpLog(ctx, fmt.Sprintf("%v", id), "updateVersion")
+	if s.opLogReady() {
+		rec := s.makeOpLogRecord(ctx, fmt.Sprintf("%v", id), "updateVersion")
+		if eCtx, ok := pdata.(*editVersionCtx[M]); ok && eCtx.Old != nil {
+			rec.RecordBefore = snapshotJSON(eCtx.Old)
+		}
+		rec.RecordAfter = snapshotJSON(result)
+		s.writeOpLogRecords(ctx, []OpLogRecord{rec})
+	}
 
-		// 写备份日志文件（旧值快照）
-		if s.bakWriter != nil {
-			if eCtx, ok := pdata.(*editVersionCtx[M]); ok && eCtx.Old != nil {
-				_ = s.bakWriter(ctx, s.config.EntityName, id, "updateVersion", eCtx.Old, GetRequestID(ctx))
+	// 写备份日志文件（旧值快照）；门控只看 bakWriter（BUG-077 §8.2）
+	if s.bakWriter != nil {
+		if eCtx, ok := pdata.(*editVersionCtx[M]); ok && eCtx.Old != nil {
+			if err := s.bakWriter(ctx, s.config.EntityName, id, "updateVersion", eCtx.Old, GetRequestID(ctx)); err != nil {
+				logrus.Errorf("gocrux: 写备份日志失败（entity_type=%s operation=updateVersion id=%v）: %v",
+					s.config.EntityName, id, err)
 			}
 		}
 	}

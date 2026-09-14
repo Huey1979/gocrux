@@ -194,11 +194,33 @@ type Config[M Record] struct {
 	DeletedValue any
 }
 
-// updatePair 版本化更新时，在 _beforeUpdate 与 _doUpdate 之间传递新旧实体。
-// Old 为退位旧行，New 为待插入新行。
-type updatePair[M Record] struct {
+// UpdatePair 在两处传递「更新前后的实体」：
+//
+//  1. 服务内部：_beforeUpdate 与 _doUpdate 之间的 pdata（版本化与非版本化 Update 皆用）；
+//
+//  2. 对外（BUG-077 §8.3）：应用在 AfterUpdate 钩子里通过本类型取旧值写备份，
+//     无需再靠反射掏框架内部结构：
+//
+//     func (s *XxxSvc) AfterUpdate(ctx context.Context, id any, result *Entity, pdata any) (*Entity, error) {
+//     if pair, ok := service.AsUpdatePair[*Entity](pdata); ok && pair.Old != nil {
+//     backup(pair.Old) // 旧值快照
+//     }
+//     return result, nil
+//     }
+//
+// Old 为退位旧行（非版本化更新时即被覆盖前的旧值），New 为待落库的新行。
+type UpdatePair[M Record] struct {
 	Old *M
 	New *M
+}
+
+// AsUpdatePair 从钩子 pdata 中安全取出 *UpdatePair[M]（BUG-077 §8.3）。
+//
+// 取不到（pdata 是别的形态，如 editVersion 上下文）时 ok=false，
+// 应用无需再对框架内部类型做反射探测。
+func AsUpdatePair[M Record](pdata any) (*UpdatePair[M], bool) {
+	p, ok := pdata.(*UpdatePair[M])
+	return p, ok
 }
 
 // editVersionCtx 版本元数据修改时，在 before/do/after 之间传递上下文。
@@ -214,12 +236,13 @@ type editVersionCtx[M Record] struct {
 // ============================================================
 
 type GenericService[M Record] struct {
-	hooks     Hooks[M]
-	repo      repository.Repo[M]
-	config    Config[M]
-	opLogRepo *repository.CRUDRepository[entity.SysOperationLog]
-	bakWriter BackupWriteFunc      // 备份日志写入器（非版本化 Update 写旧数据到文件）
-	idemStore *IdempotencyStore[M] // 幂等缓存（可选，nil 时不启用幂等）
+	hooks       Hooks[M]
+	repo        repository.Repo[M]
+	config      Config[M]
+	opLogRepo   *repository.CRUDRepository[entity.SysOperationLog] // 内置 MySQL 写入方（兼容旧注入口）
+	opLogWriter OpLogWriter                                        // BUG-077：公开写入方抽象（优先于 opLogRepo）
+	bakWriter   BackupWriteFunc                                    // 备份日志写入器（非版本化 Update 写旧数据到文件）
+	idemStore   *IdempotencyStore[M]                               // 幂等缓存（可选，nil 时不启用幂等）
 }
 
 // BackupWriteFunc 备份日志写入函数签名
@@ -227,18 +250,24 @@ type BackupWriteFunc func(ctx context.Context, tableName string, recordID any, o
 
 // NewGenericService 创建服务实例（向后兼容，接受 *CRUDRepository[M]）。
 func NewGenericService[M Record](repo *repository.CRUDRepository[M], cfg Config[M]) *GenericService[M] {
-	return &GenericService[M]{
+	s := &GenericService[M]{
 		repo:   repo,
 		config: cfg,
 	}
+	// BUG-077：EnableOpLog=true 但未注入写入方时给出一次性告警，避免永久静默空转。
+	s.warnOpLogMisconfigured()
+	return s
 }
 
 // NewGenericServiceWithRepo 使用任意 Repo[M] 实现创建服务（用于 MongoDB 等）。
 func NewGenericServiceWithRepo[M Record](repo repository.Repo[M], cfg Config[M]) *GenericService[M] {
-	return &GenericService[M]{
+	s := &GenericService[M]{
 		repo:   repo,
 		config: cfg,
 	}
+	// BUG-077：EnableOpLog=true 但未注入写入方时给出一次性告警，避免永久静默空转。
+	s.warnOpLogMisconfigured()
+	return s
 }
 
 // IsVersionMode 返回是否启用版本化模式。
@@ -365,9 +394,21 @@ func (s *GenericService[M]) SetHooks(h Hooks[M]) {
 	s.hooks = h
 }
 
-// SetOpLogRepo 注入操作日志仓储（_afterXxx 自动写日志）
+// SetOpLogRepo 注入操作日志仓储（_afterXxx 自动写日志）。
+//
+// Deprecated（BUG-077）：参数类型 `entity.SysOperationLog` 位于 `internal/`，
+// **模块外无法命名**，因此该方法对下游应用实际不可调用（只能在本模块内使用）。
+// 请改用公开注入口：
+//
+//	svc.SetOpLogDB(db)              // 落内置 sys_operation_log 表
+//	svc.SetOpLogWriter(w)           // 自定义落库（Mongo / 文件 / MQ）
+//
+// 保留此方法以兼容既有模块内调用（heims 若仍在用可平滑迁移）。
 func (s *GenericService[M]) SetOpLogRepo(repo *repository.CRUDRepository[entity.SysOperationLog]) {
 	s.opLogRepo = repo
+	if repo != nil {
+		s.opLogWriter = &dbOpLogWriter{db: repo.DB(context.Background())}
+	}
 }
 
 // SetBakWriter 注入备份日志写入器（_afterUpdate 对非版本化实体写旧数据到文件）
@@ -611,7 +652,7 @@ func (s *GenericService[M]) Restore(ctx context.Context, ids []any) error {
 	}
 
 	// 恢复是安全相关状态迁移，纳入操作日志（与 update / delete 对齐）
-	if s.config.EnableOpLog && s.opLogRepo != nil {
+	if s.opLogReady() {
 		entries := make([]opLogEntry, 0, len(ids))
 		for _, id := range ids {
 			entries = append(entries, opLogEntry{EntityID: fmt.Sprint(id), Operation: "restore"})

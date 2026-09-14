@@ -9,9 +9,9 @@ import (
 
 	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
-	"github.com/Huey1979/gocrux/internal/model/entity"
 	"github.com/Huey1979/gocrux/repository"
 
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
@@ -32,6 +32,44 @@ func (s *GenericService[M]) checkUnique(ctx context.Context, entities []*M, excl
 		}
 	}
 	return nil
+}
+
+// derefStructValue 解 M 层指针，返回底层 struct 的 reflect.Value（可寻址）。
+// M = *T 时返回 T 的值；M = T 时直接返回。
+func derefStructValue[M Record](m *M) (reflect.Value, bool) {
+	rv := reflect.ValueOf(m)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return reflect.Value{}, false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	return rv, true
+}
+
+// cloneM 复制 M 指向的记录，返回**与入参无共享存储**的新 *M。
+//
+// 背景（BUG-077 §8.1 连带缺陷）：非版本化 update 的「旧值快照」此前用 `oldCopy := *old`
+// 取得。当 M = *T（heims 全部实体都是这个形态）时，`*old` 依然是 `*T`，
+// 这个浅拷贝只是复制了一个指针 —— oldCopy 与 old 共享同一份后端存储，
+// 随后 `req.MergeTo(old)` 就地改写会把「旧值快照」一起改成新值，
+// 导致备份日志与 opLog 快照里记的都是新数据（旧值静默丢失）。
+func cloneM[M Record](m *M) *M {
+	if m == nil {
+		return nil
+	}
+	rv, ok := derefStructValue(m)
+	if !ok {
+		// 非 struct 形态，退化为直接返回原值
+		return m
+	}
+	clone := reflect.New(rv.Type())
+	clone.Elem().Set(rv)
+	out, _ := clone.Interface().(M)
+	return &out
 }
 
 // derefStruct 解指针直到 struct，返回其 reflect.Type 与可反射读取的 reflect.Value。
@@ -429,12 +467,13 @@ func (s *GenericService[M]) deprecateByCode(tx *gorm.DB, code string) error {
 }
 
 func (s *GenericService[M]) _afterCreate(ctx context.Context, result []*M) ([]*M, error) {
-	if s.config.EnableOpLog && s.opLogRepo != nil && len(result) > 0 {
-		entries := make([]opLogEntry, len(result))
+	if s.opLogReady() && len(result) > 0 {
+		records := make([]OpLogRecord, len(result))
 		for i, ent := range result {
-			entries[i] = opLogEntry{EntityID: extractEntityID(ent), Operation: "create"}
+			records[i] = s.makeOpLogRecord(ctx, extractEntityID(ent), "create")
+			records[i].RecordAfter = snapshotJSON(ent)
 		}
-		s.batchWriteOpLog(ctx, entries)
+		s.writeOpLogRecords(ctx, records)
 	}
 	return result, nil
 }
@@ -442,38 +481,24 @@ func (s *GenericService[M]) _afterCreate(ctx context.Context, result []*M) ([]*M
 // writeOpLog 向日志表写入一条操作记录（仅元数据，不含数据快照）
 // entityID：非版本化为单条 ULID；版本化删除时为涉及的所有 ULID（逗号分隔）
 func (s *GenericService[M]) writeOpLog(ctx context.Context, entityID, operation string) {
-	_ = s.opLogRepo.Insert(ctx, &entity.SysOperationLog{
-		LogULID:      common.NewULID(),
-		EntityType:   s.config.EntityName,
-		EntityID:     entityID,
-		Operation:    operation,
-		OperatorULID: GetUserULID(ctx),
-		RequestID:    GetRequestID(ctx),
-		OperatedAt:   time.Now(),
-	})
+	s.writeOpLogRecord(ctx, s.makeOpLogRecord(ctx, entityID, operation))
 }
 
-// batchWriteOpLog 批量写入操作日志（一次 InsertBatch，避免 N+1）
+// writeOpLogRecord 写入单条操作日志并统一处理失败日志（BUG-077）。
+func (s *GenericService[M]) writeOpLogRecord(ctx context.Context, rec OpLogRecord) {
+	s.writeOpLogRecords(ctx, []OpLogRecord{rec})
+}
+
+// batchWriteOpLog 批量写入操作日志（保持既有调用点语义，等价于 writeOpLogRecords）
 func (s *GenericService[M]) batchWriteOpLog(ctx context.Context, entries []opLogEntry) {
 	if len(entries) == 0 {
 		return
 	}
-	logs := make([]*entity.SysOperationLog, len(entries))
-	now := time.Now()
-	userID := GetUserULID(ctx)
-	requestID := GetRequestID(ctx)
-	for i, e := range entries {
-		logs[i] = &entity.SysOperationLog{
-			LogULID:      common.NewULID(),
-			EntityType:   s.config.EntityName,
-			EntityID:     e.EntityID,
-			Operation:    e.Operation,
-			OperatorULID: userID,
-			RequestID:    requestID,
-			OperatedAt:   now,
-		}
+	records := make([]OpLogRecord, 0, len(entries))
+	for _, e := range entries {
+		records = append(records, s.makeOpLogRecord(ctx, e.EntityID, e.Operation))
 	}
-	_ = s.opLogRepo.InsertBatch(ctx, logs)
+	s.writeOpLogRecords(ctx, records)
 }
 
 // extractEntityID 提取实体的 ULID（尝试 GetULID 接口，失败则用反射查找以 ULID 结尾的字段）
@@ -538,17 +563,28 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	if !ok {
 		return nil, nil, errs.ErrUpdateDataNotRequest
 	}
-	// 合并前保存旧值快照，供 _afterUpdate 写日志
-	oldCopy := *old
+	// 合并前保存旧值快照，供 _afterUpdate 写 opLog 快照 / 备份日志。
+	//
+	// BUG-077：必须用 cloneM 做真正的结构复制。原实现 `oldCopy := *old` 在
+	// M = *T（heims 全部实体形态）时只是复制了一个指针，oldCopy 与 old 共享
+	// 同一份后端存储，随后 req.MergeTo(old) 就地改写会把「旧值快照」一并
+	// 改成新值 —— 备份日志与 opLog 快照里记的都是新数据，旧值静默丢失。
+	oldCopy := cloneM(old)
 	if err := req.MergeTo(old); err != nil {
 		return nil, nil, err
 	}
 	// Code 不可篡改：非版本化表若配置了 CodeField，恢复旧值
 	if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
-		common.SetFieldValue(old, s.config.VersionFields.CodeField, getStrField(&oldCopy, s.config.VersionFields.CodeField))
+		common.SetFieldValue(old, s.config.VersionFields.CodeField, getStrField(oldCopy, s.config.VersionFields.CodeField))
 	}
 
-	// 4. 审计字段
+	// 4. 审计字段。
+	//
+	// 注意：这里刻意保持 ent 与 old 的**别名关系**（原实现 `ent := *old`）。
+	// handler 层级联更新依赖 `_doUpdate` 返回的 result 携带更新后的主键与
+	// 外键状态（extractPKFromResult / 子表 FK 注入），换成独立的深拷贝会让
+	// 这条链路拿不到值（BUG-060 回归测试 TestDoUpdate_CascadeNonVersioned-
+	// BackfillKeepsChildULID 即为此约束的守卫）。
 	ent := *old
 	ent.SetUpdatedAt(time.Now())
 	ent.SetUpdatedBy(GetUserULID(ctx))
@@ -560,8 +596,8 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 		return nil, nil, err
 	}
 
-	// 6. 用 updatePair 同时携带旧值和新值
-	return id, &updatePair[M]{Old: &oldCopy, New: &ent}, nil
+	// 6. 用 UpdatePair 同时携带旧值和新值
+	return id, &UpdatePair[M]{Old: oldCopy, New: &ent}, nil
 }
 
 // _beforeUpdateVersioned 版本化更新的 before 处理
@@ -641,13 +677,13 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 		return nil, nil, err
 	}
 
-	return id, &updatePair[M]{Old: old, New: &newEntity}, nil
+	return id, &UpdatePair[M]{Old: old, New: &newEntity}, nil
 }
 
 func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, error) {
 	// 版本模式：事务中旧行退位 + 新行插入
 	if s.config.VersionMode {
-		pair, ok := data.(*updatePair[M])
+		pair, ok := data.(*UpdatePair[M])
 		if !ok {
 			return nil, errs.ErrUpdatePairTypeMismatch
 		}
@@ -679,19 +715,19 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 						}
 					}
 				}
-			// BUG-045：请求显式字段列名白名单 → 新版本行显式零值真实落库
-			cols := createColumnWhitelist([]*M{pair.New}, explicitColumnsFrom(ctx))
-			if len(cols) > 0 {
-				// 方案 B（default 只允许 0 值/无）后恢复 struct+Select：
-				// 无非零 default tag，GORM create 回调不再用默认值覆盖零值字段，
-				// 显式 0 原样落库，map 绕过不再必要（BUG-047 方案 A 回退）
-				return tx.Model(new(M)).Select(cols).Create(pair.New).Error
+				// BUG-045：请求显式字段列名白名单 → 新版本行显式零值真实落库
+				cols := createColumnWhitelist([]*M{pair.New}, explicitColumnsFrom(ctx))
+				if len(cols) > 0 {
+					// 方案 B（default 只允许 0 值/无）后恢复 struct+Select：
+					// 无非零 default tag，GORM create 回调不再用默认值覆盖零值字段，
+					// 显式 0 原样落库，map 绕过不再必要（BUG-047 方案 A 回退）
+					return tx.Model(new(M)).Select(cols).Create(pair.New).Error
+				}
+				return tx.Create(pair.New).Error
+			})
+			if txErr != nil {
+				return nil, txErr
 			}
-			return tx.Create(pair.New).Error
-		})
-		if txErr != nil {
-			return nil, txErr
-		}
 		} else {
 			// MongoDB：逐条退位 + 插入新版本（repo 层方法）
 			if err := s.repo.BatchDeprecateVersionsByFK(ctx, codeCol, []any{code}); err != nil {
@@ -704,9 +740,9 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 		return pair.New, nil
 	}
 
-	// 非版本模式：解包 updatePair 后直接保存
+	// 非版本模式：解包 UpdatePair 后直接保存
 	var _entity *M
-	if pair, ok := data.(*updatePair[M]); ok {
+	if pair, ok := data.(*UpdatePair[M]); ok {
 		_entity = pair.New
 	} else {
 		_entity, ok = data.(*M)
@@ -720,21 +756,31 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 	return _entity, nil
 }
 func (s *GenericService[M]) _afterUpdate(ctx context.Context, id any, result *M, pdata any) (*M, error) {
-	if s.config.EnableOpLog && s.opLogRepo != nil {
-		// 1. 日志表：只记元数据（谁、何时、对谁、做了什么），不存数据快照
-		s.writeOpLog(ctx, extractEntityID(result), "update")
+	pair, _ := AsUpdatePair[M](pdata)
 
-		// 2. 非版本化：旧数据会被覆盖丢失，写备份日志文件
-		if !s.config.VersionMode && s.bakWriter != nil {
-			if pair, ok := pdata.(*updatePair[M]); ok && pair.Old != nil {
-				_ = s.bakWriter(ctx, s.config.EntityName, id, "update", pair.Old, GetRequestID(ctx))
-			}
+	// 1. 日志表：只记元数据（谁、何时、对谁、做了什么）；带旧值快照供自定义写入方使用
+	//    （BUG-077 §8.1：与下面的备份写入彻底解耦，各自独立开关）
+	if s.opLogReady() {
+		rec := s.makeOpLogRecord(ctx, extractEntityID(result), "update")
+		if pair != nil && pair.Old != nil {
+			rec.RecordBefore = snapshotJSON(pair.Old)
+		}
+		rec.RecordAfter = snapshotJSON(result)
+		s.writeOpLogRecords(ctx, []OpLogRecord{rec})
+	}
+
+	// 2. 非版本化：旧数据会被覆盖丢失，写备份日志文件。
+	//    BUG-077 §8.1/§8.2：门控只看 bakWriter 是否注册，**不再**依赖
+	//    EnableOpLog / opLogRepo（那是两个正交关注点，"数据可回滚"不应以
+	//    "是否往 sys_operation_log 打一行"为前提）。
+	if !s.config.VersionMode && s.bakWriter != nil && pair != nil && pair.Old != nil {
+		if err := s.bakWriter(ctx, s.config.EntityName, id, "update", pair.Old, GetRequestID(ctx)); err != nil {
+			logrus.Errorf("gocrux: 写备份日志失败（entity_type=%s operation=update id=%v）: %v",
+				s.config.EntityName, id, err)
 		}
 	}
 	return result, nil
 }
-
-// -------- Delete --------
 func (s *GenericService[M]) _beforeDelete(ctx context.Context, ids, codes any) (any, any, error) {
 	// ids 归一化为 []any
 	var idList []any
@@ -798,10 +844,15 @@ func (s *GenericService[M]) _deleteByPK(ctx context.Context, ids []any) error {
 	if m.SetDelete() {
 		return s.repo.BatchSoftDelete(ctx, ids)
 	}
-	if s.config.EnableOpLog && s.bakWriter != nil {
+	// BUG-077 §8.2：备份写入的口径统一为「注册了 bakWriter 就写」（与版本激活路径一致），
+	// 不再叠加 EnableOpLog 这个无关开关。
+	if s.bakWriter != nil {
 		records, _ := s.repo.BatchFindByPK(ctx, ids)
 		for i := range records {
-			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete", &records[i], GetRequestID(ctx))
+			if err := s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), "delete", &records[i], GetRequestID(ctx)); err != nil {
+				logrus.Errorf("gocrux: 写备份日志失败（entity_type=%s operation=delete id=%v）: %v",
+					s.config.EntityName, extractEntityID(&records[i]), err)
+			}
 		}
 	}
 	return s.repo.BatchHardDelete(ctx, ids)
@@ -820,10 +871,14 @@ func (s *GenericService[M]) _deleteByField(ctx context.Context, field string, va
 		return s.repo.BatchSoftDeleteByFK(ctx, field, values)
 	}
 
-	if s.config.EnableOpLog && s.bakWriter != nil {
+	// BUG-077 §8.2：同 _deleteByPK，备份门控只看 bakWriter。
+	if s.bakWriter != nil {
 		records, _ := s.repo.BatchFindByFK(ctx, field, values)
 		for i := range records {
-			_ = s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), opTag, &records[i], GetRequestID(ctx))
+			if err := s.bakWriter(ctx, s.config.EntityName, extractEntityID(&records[i]), opTag, &records[i], GetRequestID(ctx)); err != nil {
+				logrus.Errorf("gocrux: 写备份日志失败（entity_type=%s operation=%s id=%v）: %v",
+					s.config.EntityName, opTag, extractEntityID(&records[i]), err)
+			}
 		}
 	}
 	return s.repo.BatchHardDeleteByFK(ctx, field, values)
@@ -839,7 +894,7 @@ func (s *GenericService[M]) DeleteByFK(ctx context.Context, fkField string, fkVa
 }
 
 func (s *GenericService[M]) _afterDelete(ctx context.Context, id, data any) error {
-	if !s.config.EnableOpLog || s.opLogRepo == nil {
+	if !s.opLogReady() {
 		return nil
 	}
 	ids, ok := id.([]any)

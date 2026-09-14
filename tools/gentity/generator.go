@@ -428,7 +428,12 @@ func (b *Blueprints) Register%s(r *gin.RouterGroup) {
 	svc := service.NewGenericService(repo, service.Config[entity.%s]{
 		EntityName:             "%s",
 		EnableUniqueValidation: true,
-		EnableOpLog:            true,
+		// EnableOpLog: 审计日志默认关闭（BUG-077）。
+		// 需要时显式打开，并注入写入方，二者缺一不可：
+		//   EnableOpLog: true,
+		//   svc.SetOpLogDB(db)               // 落内置 sys_operation_log 表
+		//   svc.SetOpLogWriter(w)            // 或自定义落库（Mongo / 文件 / MQ）
+		// 只打开开关而不注入写入方时，启动会打印告警且不写任何记录。
 	})
 
 	b.ServiceReg.Register("%s", svc)
