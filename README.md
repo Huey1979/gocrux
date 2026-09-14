@@ -588,6 +588,26 @@ ReqFactory: &handler.RequestFactory[entity.Site]{
 - `MergeTo()` 通过 JSON 序列化/反序列化完成 map→struct 映射
 - `Validate()` 始终通过（无 schema 校验）
 
+#### 空串语义：Create 保护默认值，Update 允许清空（BUG-072）
+
+`MapRequest` 提供两个合并方法，区别只在「请求中显式提交的空串」如何处理：
+
+| 方法 | 使用场景 | 显式传 `""` 的效果 | 未提交的字段 |
+|---|---|---|---|
+| `MergeTo` | Create（默认） | **不覆盖** target 上的非空值（保护 `SetDefaults()`） | 保持原值 |
+| `MergeToExisting` | Update | **原样写入**（可把字符串清空） | 保持原值 |
+
+框架内部已自动分派：`_beforeCreate` 走 `MergeTo`，`_beforeUpdate` / `_beforeUpdateVersioned` 走
+`MergeToExisting`。自定义 `Request` 类型若也想支持「清空」，实现可选接口即可：
+
+```go
+type MergeableExisting[M Record] interface {
+    MergeToExisting(target *M) error
+}
+```
+
+**未实现该接口时框架自动回退 `MergeTo`**，行为与升级前完全一致（向后兼容，老接入方零改动）。
+
 ### References（向上引用）
 
 配置当前实体中指向父实体的逻辑外键字段，Get/List 时自动解析。

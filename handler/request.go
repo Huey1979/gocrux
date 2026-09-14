@@ -82,11 +82,27 @@ func (r *MapRequest[M]) GetIdempotencyKey() string {
 	return r.idempotencyKey
 }
 
-// MergeTo 将 map 中的数据合并到目标实体。
+// MergeTo 将 map 中的数据合并到目标实体（Create 语义）。
+//
 // 通过 JSON 序列化/反序列化实现字典→结构体的自动映射，
 // 利用结构体的 json tag 自动处理 snake_case ↔ PascalCase 转换。
+//
+// **空串保护**：本方法下「显式提交空串」不会覆盖 target 上的非空值，
+// 用于保护 Create 路径中 SetDefaults() 写入的默认值（BUG-072 有意保留的语义）。
+// 需要「允许用空串清空字段」的更新场景请改用 MergeToExisting。
 func (r *MapRequest[M]) MergeTo(target *M) error {
-	return mergeByJSON(r.data, target)
+	return mergeByJSON(r.data, target, false)
+}
+
+// MergeToExisting 以「更新已有记录」的语义合并数据（BUG-072）。
+//
+// 与 MergeTo 的唯一差别：请求中**显式提交的空串会原样写入**，
+// target 上的旧值被清空 —— 这是客户端的明确意图（把文本字段清空），
+// 框架不应静默丢弃。未提交的字段依旧保持 target 原值（局部更新语义不变）。
+//
+// 使用位置：`_beforeUpdate` / `_beforeUpdateVersioned` 两条更新路径。
+func (r *MapRequest[M]) MergeToExisting(target *M) error {
+	return mergeByJSON(r.data, target, true)
 }
 
 // Validate MapRequest 无法校验 schema，始终通过。
@@ -110,7 +126,13 @@ func (r *MapRequest[M]) SetData(d map[string]any) { r.data = d }
 
 // mergeByJSON 将 map 合并到 struct，不存在的字段保留原值。
 // 先读取 target 完整 JSON → 用 map 覆盖 → 反序列化回 target。
-func mergeByJSON[M any](m map[string]any, target *M) error {
+//
+// allowClearEmpty 控制「显式提交的空串」的处理方式（BUG-072）：
+//   - false（Create 语义）：空串不覆盖 target 上的非空值，保护 SetDefaults；
+//   - true（Update 语义）：空串原样写入，允许把字符串字段清空。
+//
+// 两种模式下「未提交的字段」都保持 target 原值（局部更新语义始终不变）。
+func mergeByJSON[M any](m map[string]any, target *M, allowClearEmpty bool) error {
 	// 1. 序列化当前实体
 	current, err := json.Marshal(target)
 	if err != nil {
@@ -126,12 +148,16 @@ func mergeByJSON[M any](m map[string]any, target *M) error {
 		currentMap = make(map[string]any)
 	}
 
-	// 3. 用请求 map 覆盖（空字符串不覆盖 target 已有非空值，保护 SetDefaults）
+	// 3. 用请求 map 覆盖
 	for k, v := range m {
-		if strVal, ok := v.(string); ok && strVal == "" {
-			if existing, exists := currentMap[k]; exists {
-				if existStr, ok := existing.(string); ok && existStr != "" {
-					continue
+		// BUG-072：仅 Create 语义下丢弃「显式空串」（保护 SetDefaults）。
+		// m 的 key 存在即代表客户端显式提交了该字段，Update 语义下必须尊重其清空意图。
+		if !allowClearEmpty {
+			if strVal, ok := v.(string); ok && strVal == "" {
+				if existing, exists := currentMap[k]; exists {
+					if existStr, ok := existing.(string); ok && existStr != "" {
+						continue
+					}
 				}
 			}
 		}

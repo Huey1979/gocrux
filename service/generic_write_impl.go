@@ -570,7 +570,9 @@ func (s *GenericService[M]) _beforeUpdate(ctx context.Context, id, data any) (an
 	// 同一份后端存储，随后 req.MergeTo(old) 就地改写会把「旧值快照」一并
 	// 改成新值 —— 备份日志与 opLog 快照里记的都是新数据，旧值静默丢失。
 	oldCopy := cloneM(old)
-	if err := req.MergeTo(old); err != nil {
+	// BUG-072：更新路径用 MergeToExisting 语义 —— 显式提交的空串必须能清空字段。
+	// 未实现该可选接口的自定义 Request 自动回退 MergeTo（行为不变）。
+	if err := mergeRequestTo[M](req, old, true); err != nil {
 		return nil, nil, err
 	}
 	// Code 不可篡改：非版本化表若配置了 CodeField，恢复旧值
@@ -615,9 +617,10 @@ func (s *GenericService[M]) _beforeUpdateVersioned(ctx context.Context, id, data
 	newEntity.SetDefaults()
 
 	// 2. 合并请求字段到新行
+	// BUG-072：版本化更新同样是「更新已有记录」语义，显式空串须能清空字段。
 	if data != nil {
 		if req, ok := data.(CrudRequest[M]); ok {
-			if err := req.MergeTo(&newEntity); err != nil {
+			if err := mergeRequestTo[M](req, &newEntity, true); err != nil {
 				return nil, nil, err
 			}
 		}
