@@ -433,7 +433,10 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 				return nil, err
 			}
 			if total > 0 {
-				return nil, fmt.Errorf("%w: %s", errs.ErrDuplicateCode, code)
+				// BUG-074：文案优先取实体专属覆写，未配置则用中性哨兵
+				// （原实现写死「form_code / 表单」，被 8 个版本化实体共用，
+				// 在通知模板页会误导用户）。
+				return nil, duplicateCodeError(vf, code)
 			}
 		}
 	}

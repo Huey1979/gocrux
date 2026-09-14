@@ -11,7 +11,15 @@ import (
 var (
 	ErrUniqueValidationFailed = errors.New("unique validation failed")
 	ErrInvalidParam           = errors.New("参数无效")
-	ErrDuplicateCode          = errors.New("编码已存在，请更换 form_code 或使用 Update 更新现有表单")
+
+	// ErrDuplicateCode 版本化实体 Create 时业务编码重复（BUG-042 判定逻辑）。
+	//
+	// 文案刻意保持**中性**：该哨兵被全部版本化实体共用（form / flow /
+	// notification_template / container / bi_chart / site / site_menu / role …），
+	// 不能写死某个实体的字段名（BUG-074：原文案写死「form_code / 表单」，
+	// 在通知模板页弹出会让用户以为串到了表单模块）。
+	// 需要实体专属措辞时，用 VersionFieldMapping.DuplicateCodeMsg 覆写。
+	ErrDuplicateCode = errors.New("编码已存在，请更换编码，或改用更新接口修改现有记录")
 )
 
 // errFieldValidationSentinel 字段校验哨兵（不导出，通过 IsFieldValidation 检查）。

@@ -156,6 +156,28 @@ type VersionFieldMapping struct {
 	RemarkField      string // 版本说明字段（如 "VersionRemark"）
 	PublishedAtField string // 发布时间字段（如 "PublishedAt"）
 	PublishedByField string // 发布人字段（如 "PublishedBy"）
+
+	// DuplicateCodeMsg 实体专属的「编码重复」提示文案（BUG-074，可选）。
+	//
+	// 框架通用哨兵 errs.ErrDuplicateCode 的文案是**中性**的（不能写死
+	// form_code / 表单 —— 它被 8 个版本化实体共用）。若某实体希望提示
+	// 更贴合业务措辞（如「模板编码已存在，请更换 template_code」），
+	// 在此覆写即可；留空则沿用中性文案。
+	//
+	// 注意：heims 前端会截掉后端 msg 中第一个 `:` 之后的内容，
+	// 因此用户必须看到的完整信息要放在冒号之前。
+	DuplicateCodeMsg string
+}
+
+// duplicateCodeError 构造编码重复错误：优先用实体专属文案，未配置则用中性哨兵（BUG-074）。
+//
+// 两种形态下 errors.Is(err, errs.ErrDuplicateCode) 均成立，
+// 现有依赖哨兵判定的单测/集成测不受影响。
+func duplicateCodeError(vf *VersionFieldMapping, code string) error {
+	if vf != nil && vf.DuplicateCodeMsg != "" {
+		return fmt.Errorf("%s: %w", vf.DuplicateCodeMsg, errs.ErrDuplicateCode)
+	}
+	return fmt.Errorf("%w: %s", errs.ErrDuplicateCode, code)
 }
 
 // ============================================================
