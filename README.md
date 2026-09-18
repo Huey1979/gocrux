@@ -624,11 +624,16 @@ References: []handler.ReferenceRelation{
 
 Get 场景：单次查父实体；List 场景：收集所有 FK 值 → 批量展开。
 
-**引用解析语义（BUG-070）**：引用展开走 `DoResolve`（引用解析模式），**不套用**「当前有效」过滤（软删 `is_deleted=0` / `is_current=1` / 必须 published）——引用的是外部对象，即使目标被软删或是历史版本，也应保留锚点，并保留 `is_deleted`、`version_status` 等状态字段供调用方判断。由此单条 `get` 与列表批量展开语义一致（此前批量展开复用普通 List 语义，会静默丢锚点，与单条 get 结果不一致）。
+**引用解析语义（BUG-070 / BUG-080）**：引用展开走 `DoResolve`（引用解析模式），**不套用**「当前有效」过滤（软删 `is_deleted=0` / `is_current=1` / 必须 published）——引用的是外部对象，即使目标被软删或是历史版本，也应保留锚点，并保留 `is_deleted`、`version_status` 等状态字段供调用方判断。**单条 `get` 与列表批量展开走同一入口**（`resolveRefs`），语义完全一致。
+
+> **BUG-080**：References 分支此前漏改（4 个引用展开调用点只改了 3 个），单条 `get` 仍用 `DoGetByID` 单查 + 出错即中断，导致「被引用的父记录缺失」被经 `%w` 穿透后统一映射成 **404「本条记录不存在」**——同一主键 `get` 返回 404、`list` 却照常返回该行。现已统一：缺失落 `missing` 占位，坏引用**不再中断同一次展开**的 ChildRefs / Cascades，只有真错误（DB 故障、权限失败等）才上抛。
 
 > **例外：草稿（未发布）不被放开。** 引用解析模式仍拦截 `version_status=draft`：未登录一律不可见，登录后仅创建者本人可见。未发布草稿不因被某条记录引用而对外暴露。历史版本（`deprecated`）与已发布版本不受影响。
 
-引用目标缺失时返回占位对象 `{<主键输出名>: <id>, "missing": true}` —— **输出名即 JSON 字段名**（如 `ulid`，而非数据库列名 `field_ulid`），与同一数组中正常记录的结构一致；只含引用键与 `missing`，不泄露其它字段。
+引用目标缺失时返回占位对象 `{<主键输出名>: <id>, "missing": true}` —— **输出名即 JSON 字段名**（如 `ulid`，而非数据库列名 `field_ulid`），与同一数组中正常记录的结构一致；只含引用键与 `missing`，不泄露其它字段。输出名取自**引用目标 Handler 自身**的实体（`refOutputKey`，可选接口 `pkOutputKeyer`，第三方 `CascadeHandler` 未实现时回退其 `PKField()`）。
+
+**引用解析失败不映射为 404（BUG-080）**：`ErrRefResolve` / `ErrRefBatchResolve` / `ErrChildRefResolve` / `ErrChildRefBatchResolve` 包装的错误统一映射为 **500**，即使其 cause 链上含 `ErrRecordNotFound`（`mapServiceError` 经 `errs.IsRefResolveError` 先行拦截）。响应消息带 handler 名（如「向上级联解析 notification_channel 失败」），调用方足以区分「我没这条」与「我这条的引用坏了」。普通 not-found 仍是 404。
+
 
 对比：向下级联 `Cascades`（父表拥有的子集合）仍走 `DoList` 并按当前有效过滤 —— 删掉的订单明细不应再出现在订单详情里，这是期望行为。
 
@@ -648,7 +653,7 @@ ChildRefs: []handler.ChildRefRelation{
 
 **注意**：ChildRefs 仅关联已有实体，不参与级联创建/删除/更新。
 
-**引用解析语义（BUG-070）**：与 References 一致 —— 展开走 `DoResolve`（引用解析模式），不做软删 / 当前版本 / 必须 published 的过滤，被软删或历史版本的目标仍作为锚点返回并保留状态字段；未发布草稿仍受可见性保护（见上一节）。目标缺失时以 `{<主键输出名>: <id>, "missing": true}` 占位（输出名 = JSON 字段名，与正常记录结构一致），**数组长度与原始 ID 列表对齐**，让调用方能区分「引用为空」与「目标已删除/缺失」。
+**引用解析语义（BUG-070）**：与 References 一致 —— 展开走 `DoResolve`（引用解析模式），不做软删 / 当前版本 / 必须 published 的过滤，被软删或历史版本的目标仍作为锚点返回并保留状态字段；未发布草稿仍受可见性保护（见上一节）。目标缺失时以 `{<主键输出名>: <id>, "missing": true}` 占位（输出名 = JSON 字段名，取自目标 Handler 自身，见上一节 `refOutputKey`），**数组长度与原始 ID 列表对齐**，让调用方能区分「引用为空」与「目标已删除/缺失」。
 
 ### 展开深度控制
 

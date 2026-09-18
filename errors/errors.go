@@ -28,19 +28,35 @@ var errFieldValidationSentinel = errors.New("field validation failed")
 // errMissingParamSentinel 缺失参数哨兵（不导出，通过 IsMissingParam 检查）。
 var errMissingParamSentinel = errors.New("missing required parameter")
 
+// errRefResolveSentinel 引用/级联解析失败哨兵（不导出，通过 IsRefResolveError 检查）。
+//
+// 存在的意义是**区分报错宾语**：ErrRefResolve / ErrRefBatchResolve /
+// ErrChildRefResolve / ErrChildRefBatchResolve 都用 %w 保留原始错误链，
+// 若引用目标恰好是 ErrRecordNotFound，整条错误会同时满足
+// errors.Is(err, ErrRecordNotFound)，被 handler 映射成 404「本条记录不存在」——
+// 而实际上是「本条记录的引用坏了」（BUG-080）。
+// mapServiceError 用本哨兵先行拦截，避免引用解析失败被升格为主记录不存在。
+var errRefResolveSentinel = errors.New("reference resolve failed")
+
+// IsRefResolveError 检查是否为引用/级联解析失败错误（供 mapServiceError 等使用）。
+// 注意：该判定必须在 ErrRecordNotFound 之前，因为此类错误可能同时包装了后者。
+func IsRefResolveError(err error) bool {
+	return errors.Is(err, errRefResolveSentinel)
+}
+
 // ============================================================
 // 通用服务 (generic) — 框架内部使用
 // ============================================================
 var (
-	ErrUpdateDataNotRequest           = errors.New("Update data 必须实现 CrudRequest")
-	ErrDoUpdateTypeMismatch           = errors.New("_doUpdate: data 类型错误")
-	ErrVersionFieldsNotSet            = errors.New("版本字段映射未配置")
-	ErrVersionNotEnabled              = errors.New("未启用版本管理")
-	ErrUpdatePairTypeMismatch         = errors.New("_doUpdate: 版本模式下 data 必须为 updatePair")
-	ErrDeleteDataInvalid              = errors.New("_doDelete: data 类型错误")
-	ErrRecordNotFound                       = errors.New("记录不存在")
-	ErrInvalidVersionStatusTransition       = errors.New("不允许的版本状态迁移")
-	ErrBatchUpdateSimpleNotSupportVersion   = errors.New("简单批量更新不支持版本化管理表")
+	ErrUpdateDataNotRequest               = errors.New("Update data 必须实现 CrudRequest")
+	ErrDoUpdateTypeMismatch               = errors.New("_doUpdate: data 类型错误")
+	ErrVersionFieldsNotSet                = errors.New("版本字段映射未配置")
+	ErrVersionNotEnabled                  = errors.New("未启用版本管理")
+	ErrUpdatePairTypeMismatch             = errors.New("_doUpdate: 版本模式下 data 必须为 updatePair")
+	ErrDeleteDataInvalid                  = errors.New("_doDelete: data 类型错误")
+	ErrRecordNotFound                     = errors.New("记录不存在")
+	ErrInvalidVersionStatusTransition     = errors.New("不允许的版本状态迁移")
+	ErrBatchUpdateSimpleNotSupportVersion = errors.New("简单批量更新不支持版本化管理表")
 
 	// ErrSoftDeleteNotSupported 实体不支持软删除（SetDelete() 返回 false，
 	// 删除走物理删 + 备份日志），因此没有"恢复"语义（BUG-069）。
@@ -185,31 +201,36 @@ func ErrCascadeEditVer(handlerName string, cause error) error {
 
 // ============================================================
 // 引用/级联展开 — Handler 层
+//
+// 这四个构造函数都同时包装 errRefResolveSentinel（BUG-080）：
+// 目的是让 mapServiceError 能识别「引用目标解析失败」，即使 cause 链上
+// 含 ErrRecordNotFound 也不映射成 404（报错宾语是引用，不是主记录）。
+// 用多个 %w 同时保留哨兵与原始 cause，errors.Is 两者皆可命中。
 // ============================================================
 
 func ErrRefResolve(handlerName string, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return fmt.Errorf("向上级联解析 %s 失败: %w", handlerName, cause)
+	return fmt.Errorf("向上级联解析 %s 失败: %w: %w", handlerName, errRefResolveSentinel, cause)
 }
 func ErrRefBatchResolve(handlerName string, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return fmt.Errorf("向上级联批量解析 %s 失败: %w", handlerName, cause)
+	return fmt.Errorf("向上级联批量解析 %s 失败: %w: %w", handlerName, errRefResolveSentinel, cause)
 }
 func ErrChildRefResolve(handlerName string, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return fmt.Errorf("向下引用批量解析 %s 失败: %w", handlerName, cause)
+	return fmt.Errorf("向下引用批量解析 %s 失败: %w: %w", handlerName, errRefResolveSentinel, cause)
 }
 func ErrChildRefBatchResolve(handlerName string, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return fmt.Errorf("向下引用批量解析 %s 失败: %w", handlerName, cause)
+	return fmt.Errorf("向下引用批量解析 %s 失败: %w: %w", handlerName, errRefResolveSentinel, cause)
 }
 func ErrCascadeQuery(handlerName string, cause error) error {
 	if cause == nil {

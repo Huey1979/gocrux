@@ -9,6 +9,17 @@ import (
 
 // mapServiceError — Service 错误 → BusinessCode
 func mapServiceError(err error) constants.BusinessCode {
+	// 引用/级联解析失败（BUG-080）：必须**先于** ErrRecordNotFound 判定。
+	// 这类错误用 %w 保留原始错误链，引用目标不存在时链上就带 ErrRecordNotFound；
+	// 若不先行拦截，「被引用的父记录缺失」会被升格成「本次请求的主记录不存在」，
+	// 于是同一主键 get 返回 404 而 list 照常返回该行（自相矛盾）。
+	// 统一映射 500：引用解析失败属服务端数据完整性/基础设施问题，
+	// 响应消息里带有 handler 名（如「向上级联解析 notification_channel 失败」），
+	// 调用方可据此区分「我没这条」与「我这条的引用坏了」。
+	if errs.IsRefResolveError(err) {
+		return constants.CodeInternalError
+	}
+
 	// 通用
 	if errors.Is(err, errs.ErrRecordNotFound) {
 		return constants.CodeNotFound

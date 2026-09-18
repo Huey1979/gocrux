@@ -187,7 +187,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			}
 
 			// 按 PK 建索引（BUG-070 复核：key 用输出字段名，与占位 shape 一致）
-			outKey := pkOutputKey[M](pkField)
+			// BUG-080：输出名从**引用目标 Handler** 解析（refOutputKey），不再借用当前实体 M
+			outKey := refOutputKey(refHandler)
 			parentMap := make(map[string]map[string]any)
 			for _, pr := range parentRecords {
 				if k, ok := refAnchorKey(pr, outKey, pkField); ok {
@@ -255,7 +256,8 @@ func (h *GenericHandler[M]) _doList(ctx context.Context, query any, followPublis
 			}
 
 			// BUG-070 复核：索引与占位统一用输出字段名（json tag）
-			outKey := pkOutputKey[M](pkField)
+			// BUG-080：输出名从**引用目标 Handler** 解析（refOutputKey）
+			outKey := refOutputKey(refHandler)
 			childMap := make(map[string]map[string]any)
 			for _, child := range childRecords {
 				if k, ok := refAnchorKey(child, outKey, pkField); ok {

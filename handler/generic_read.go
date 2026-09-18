@@ -182,12 +182,33 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 			if isVisited(refCtx, ref.HandlerName, fmt.Sprint(fkVal)) {
 				continue
 			}
-			parentRecord, err := refHandler.DoGetByID(refCtx, fkVal)
+
+			// BUG-080：与 BUG-070 统一 —— 引用展开走 resolveRefs（引用解析模式），
+			// 不再用 DoGetByID 单查 + 出错即中断。原因：
+			//  1. 引用目标不存在时 DoGetByID 返回 ErrRecordNotFound，经 ErrRefResolve
+			//     包装后会被统一映射成 404「本条记录不存在」——B 行数据 get 404、
+			//     list 却照常返回，同一行两条读路径给出相反答案；
+			//  2. 一个坏引用会 return nil, err 中断整个 expandGet，后面的 ChildRefs
+			//     与 Cascades 全部不执行，爆炸半径扩大成整条详情接口。
+			// 修复后：缺失引用落 {<pk>: <id>, "missing": true} 占位（shape 与 list 侧
+			// 逐字一致），只有真错误（DB 故障、权限失败等）才继续上抛。
+			pkField := refHandler.PKField()
+			recs, err := resolveRefs(refCtx, refHandler, pkField, []any{fmt.Sprint(fkVal)})
 			if err != nil {
 				return nil, errs.ErrRefResolve(ref.HandlerName, err)
 			}
-
-			out[resultKey] = parentRecord
+			outKey := refOutputKey(refHandler)
+			if len(recs) == 0 {
+				out[resultKey] = missingRefPlaceholder(outKey, fkVal)
+				continue
+			}
+			// 单值引用：候选集只含该 FK 值，取首个匹配项
+			rec := recs[0]
+			if k, ok := refAnchorKey(rec, outKey, pkField); ok && k != fmt.Sprint(fkVal) {
+				out[resultKey] = missingRefPlaceholder(outKey, fkVal)
+				continue
+			}
+			out[resultKey] = rec
 		}
 	}
 
@@ -232,8 +253,10 @@ func (h *GenericHandler[M]) expandGet(ctx context.Context, result *M) (map[strin
 				return nil, errs.ErrChildRefResolve(cr.HandlerName, err)
 			}
 
-			// BUG-070 复核：索引与占位统一用输出字段名（json tag），与正常记录 shape 一致
-			outKey := pkOutputKey[M](pkField)
+			// BUG-070 复核：索引与占位统一用输出字段名（json tag），与正常记录 shape 一致。
+			// BUG-080：改为从**引用目标 Handler 自身**解析输出名（refOutputKey），
+			// 原 pkOutputKey[M] 用的是当前实体 M 的字段表，仅当二者主键列名恰好同名才正确。
+			outKey := refOutputKey(refHandler)
 			childMap := make(map[string]map[string]any, len(childRecords))
 			for _, child := range childRecords {
 				if k, ok := refAnchorKey(child, outKey, pkField); ok {
@@ -368,6 +391,37 @@ func (h *GenericHandler[M]) DoResolve(ctx context.Context, fkField string, fkVal
 // resolveRefs 自动回退到 DoList（保持旧行为，不破坏既有接口兼容性）。
 type refResolveHandler interface {
 	DoResolve(ctx context.Context, fkField string, fkValues []any) ([]map[string]any, error)
+}
+
+// pkOutputKeyer 主键输出名能力（BUG-080，可选实现）。
+// 由 GenericHandler 实现：返回自身实体主键在展开结果（marshalToMap → JSON 往返）
+// 中的字段名。引用展开需要它来保证「缺失占位对象」与「正常记录」的 shape 一致。
+type pkOutputKeyer interface {
+	PKOutputKey() string
+}
+
+// PKOutputKey 返回本 Handler 实体主键在展开结果中的输出字段名（JSON tag 名）。
+// 与 PKField()（数据库列名）成对：列名 field_ulid 对应输出名 ulid。
+func (h *GenericHandler[M]) PKOutputKey() string {
+	return pkOutputKey[M](h.PKField())
+}
+
+// refOutputKey 取**引用目标**主键在展开结果中的输出字段名（BUG-080）。
+//
+// 必须用目标 Handler 自身的实体类型解析，不能用当前实体 M：
+// 例如 heims 的 notify_contact 引用 notification_channel，父表主键列若是
+// channel_ulid，而子表恰好也有同名 FK 列但 JSON 名不同，用 M 解析会得到错误 key，
+// 使占位对象与正常记录 shape 不一致。
+//
+// 第三方 CascadeHandler 未实现 PKOutputKey 时回退其 PKField()（列名），
+// 与改造前的回退行为一致。
+func refOutputKey(rh CascadeHandler) string {
+	if k, ok := rh.(pkOutputKeyer); ok {
+		if out := k.PKOutputKey(); out != "" {
+			return out
+		}
+	}
+	return rh.PKField()
 }
 
 // resolveRefs 引用展开统一入口（BUG-070）：优先走引用解析模式（不过滤软删/历史版本），
