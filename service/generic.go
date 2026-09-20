@@ -202,6 +202,16 @@ type Config[M Record] struct {
 	VersionMode   bool
 	VersionFields *VersionFieldMapping
 
+	// OnPublished 统一的「版本已进入 published」回调（可选，见 publish_trace.go）。
+	//
+	// 框架内共有 4 条路径能让一个版本变成线上生效版本，本回调在**每条路径上各触发
+	// 恰好一次**，via 标识来源（create/update/activate/edit-version）。
+	// 应用只需挂这一处即可覆盖全部发布路径（写业务日志表、发通知…），
+	// 不必在每个模块各写一份 onXxxPublished。
+	//
+	// 回调同步执行；panic 由框架恢复，返回 error 只记日志，均不影响发布结果。
+	OnPublished func(ctx context.Context, id any, entity *M, via PublishVia) error
+
 	//后面还有其他配置，按照实际需要的业务场景添加。
 
 	// UniqueFields 需要唯一性检查的字段列表，注意联合唯一索引（如 [["mobile"],["dept_id", "role_id"]]表示mobile要唯一，dept_id+role_id也要唯一）。
@@ -258,13 +268,14 @@ type editVersionCtx[M Record] struct {
 // ============================================================
 
 type GenericService[M Record] struct {
-	hooks       Hooks[M]
-	repo        repository.Repo[M]
-	config      Config[M]
-	opLogRepo   *repository.CRUDRepository[entity.SysOperationLog] // 内置 MySQL 写入方（兼容旧注入口）
-	opLogWriter OpLogWriter                                        // BUG-077：公开写入方抽象（优先于 opLogRepo）
-	bakWriter   BackupWriteFunc                                    // 备份日志写入器（非版本化 Update 写旧数据到文件）
-	idemStore   *IdempotencyStore[M]                               // 幂等缓存（可选，nil 时不启用幂等）
+	hooks                Hooks[M]
+	repo                 repository.Repo[M]
+	config               Config[M]
+	opLogRepo            *repository.CRUDRepository[entity.SysOperationLog] // 内置 MySQL 写入方（兼容旧注入口）
+	opLogWriter          OpLogWriter                                        // BUG-077：公开写入方抽象（优先于 opLogRepo）
+	bakWriter            BackupWriteFunc                                    // 备份日志写入器（非版本化 Update 写旧数据到文件）
+	idemStore            *IdempotencyStore[M]                               // 幂等缓存（可选，nil 时不启用幂等）
+	publishHistoryWriter PublishHistoryWriter                               // 发布历史写入方（nil = 内置 MongoDB 实现）
 }
 
 // BackupWriteFunc 备份日志写入函数签名
@@ -546,6 +557,11 @@ func (s *GenericService[M]) Create(ctx context.Context, input []CrudRequest[M]) 
 
 	processed, err := s.beforeCreate(ctx, input)
 	if err != nil {
+		return nil, err
+	}
+	// 落库前钩子：主键 ULID 已生成、记录尚未 INSERT。
+	// 版本化级联引用重映射在此完成（见 handler/cascade_remap.go）。
+	if err := s.beforeCreatePersist(ctx, processed); err != nil {
 		return nil, err
 	}
 	result, err := s.doCreate(ctx, processed)

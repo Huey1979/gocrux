@@ -244,6 +244,9 @@ type GenericHandler[M service.Record] struct {
 	// 仅作用于 RegisterRoutes（HTTP 层），不影响 handler 方法与级联能力。
 	disabledRoutes map[RouteKey]bool
 
+	// remapHookInstalled 标记级联引用重映射的落库前钩子是否已安装（幂等保护）。
+	remapHookInstalled bool
+
 	// 合并后的校验规则（自动推导 + 用户配置）
 	validateRules struct {
 		Create EndpointRules

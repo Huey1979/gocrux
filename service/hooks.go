@@ -16,6 +16,17 @@ type Hooks[M Record] struct {
 	DoCreate     func(ctx context.Context, input []*M) ([]*M, error)
 	AfterCreate  func(ctx context.Context, result []*M) ([]*M, error)
 
+	// BeforeCreatePersist 落库前钩子（可选）：
+	// 在 `_beforeCreate` 完成（主键 ULID 已生成、审计列已填）之后、
+	// `_doCreate` 真正 INSERT 之前调用。
+	//
+	// 适用场景：修正实体之间的引用（版本化级联重建时的引用重映射）——
+	// 这是唯一能同时看到「新生成的主键」与「尚未落库」的时点，
+	// 落库后再修补会产生短暂可见的错误版本，也破坏事务一致性。
+	//
+	// 返回 error 会让本次 Create（含外层事务）整体失败。
+	BeforeCreatePersist func(ctx context.Context, entities []*M) error
+
 	// -------- Update --------
 	BeforeUpdate func(ctx context.Context, id, data any) (any, any, error)
 	DoUpdate     func(ctx context.Context, id, data any) (*M, error)
@@ -51,3 +62,13 @@ type Hooks[M Record] struct {
 	DoEditVersion     func(ctx context.Context, id any, patches map[string]any) (*M, error)
 	AfterEditVersion  func(ctx context.Context, id any, result *M) (*M, error)
 }
+
+// HooksSnapshot 返回当前 Service 层钩子的副本（值语义，可安全增改后经 SetHooks 写回）。
+//
+// 供 Handler 在不覆盖应用已注册钩子的前提下，追加需要「落库前」时点的能力
+// （如版本化级联引用重映射，见 handler/cascade_remap.go）：
+//
+//	h := svc.HooksSnapshot()
+//	h.BeforeCreatePersist = myHook
+//	svc.SetHooks(h)
+func (s *GenericService[M]) HooksSnapshot() Hooks[M] { return s.hooks }

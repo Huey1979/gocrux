@@ -26,6 +26,19 @@ type HandlerHooks[M service.Record] struct {
 	DoCreate     func(ctx context.Context, input []service.CrudRequest[M]) ([]*M, error)
 	AfterCreate  func(ctx context.Context, result []*M) ([]*M, error)
 
+	// BeforeCreatePersist 保存前钩子（级联引用重映射的挂载点，可选）。
+	//
+	// 调用时点：**主键 ULID 已生成、记录尚未落库** ——
+	// 这正是「构建旧 ULID → 新 ULID 映射并重写引用」的唯一正确时机
+	// （落库后再修补会产生短暂可见的错误版本，且破坏事务一致性）。
+	//
+	// 与 BeforeCreate 的差别：BeforeCreate 收到的是**请求对象**（尚未 MergeTo 成实体、
+	// 主键也未生成），拿不到新 ULID；本钩子收到的是**已生成主键的实体切片**，
+	// 因此可用于修正实体间引用。
+	//
+	// 返回 error 会让整个创建（含事务）失败。
+	BeforeCreatePersist func(ctx context.Context, entities []*M) error
+
 	// -------- Update --------
 	BeforeUpdate func(ctx context.Context, reqs []service.CrudRequest[M], parentVersioned bool) ([]service.CrudRequest[M], error)
 	DoUpdate     func(ctx context.Context, reqs []service.CrudRequest[M], parentVersioned bool) ([]*M, error)

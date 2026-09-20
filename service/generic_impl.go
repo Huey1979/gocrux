@@ -100,6 +100,15 @@ func (s *GenericService[M]) doCreate(ctx context.Context, input []*M) ([]*M, err
 	return s._doCreate(ctx, input)
 }
 
+// beforeCreatePersist 落库前钩子：_beforeCreate 之后（主键已生成）、_doCreate 之前。
+// 未设置钩子时为空操作（零开销）。
+func (s *GenericService[M]) beforeCreatePersist(ctx context.Context, entities []*M) error {
+	if s.hooks.BeforeCreatePersist == nil {
+		return nil
+	}
+	return s.hooks.BeforeCreatePersist(ctx, entities)
+}
+
 func (s *GenericService[M]) doUpdate(ctx context.Context, id, data any) (*M, error) {
 	if s.hooks.DoUpdate != nil {
 		return s.hooks.DoUpdate(ctx, id, data)

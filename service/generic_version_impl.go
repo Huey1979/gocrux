@@ -92,18 +92,28 @@ func (s *GenericService[M]) _doActivate(ctx context.Context, id any) error {
 	}
 
 	// 草稿 / 已废弃 → 正式发布
+	//
+	// 发布痕迹（REQ: publish trace）：基础列复用 applyPublishTraceFields，
+	// 统一处理「两个字段都没配置」的配置错误；随后 recordPublished 写发布历史
+	// 并触发 OnPublished 回调（via=activate）。
+	// 本路径不经 MySQL TxCoordinator 事务（Save 直连），故直接写、无回滚顾虑。
+	publishing := s.statusBecomesPublished(currentStatus, string(VersionStatusPublished))
 	if currentStatus == string(VersionStatusDraft) || currentStatus == string(VersionStatusDeprecated) {
 		common.SetFieldValue(_entity, vf.StatusField, string(VersionStatusPublished))
-		if vf.PublishedAtField != "" {
-			common.SetFieldValue(_entity, vf.PublishedAtField, &now)
-		}
-		if vf.PublishedByField != "" && userULID != "" {
-			common.SetFieldValue(_entity, vf.PublishedByField, userULID)
+		if err := s.applyPublishTraceFields(_entity, now, userULID); err != nil {
+			s.warnPublishTraceUnavailable(err)
 		}
 	}
 
 	// 4. 用 Save 持久化（兼容 MySQL GORM 与 MongoDB）
-	return s.repo.Save(ctx, _entity)
+	if err := s.repo.Save(ctx, _entity); err != nil {
+		return err
+	}
+
+	if publishing {
+		s.recordPublished(ctx, _entity, PublishViaActivate)
+	}
+	return nil
 }
 
 func (s *GenericService[M]) _afterActivate(ctx context.Context, id any) error {
@@ -253,13 +263,43 @@ func (s *GenericService[M]) _doEditVersion(ctx context.Context, id any, pdata an
 		return nil, errs.ErrVersionFieldsNotSet
 	}
 
+	now := time.Now()
+	userULID := GetUserULID(ctx)
+
+	// 判定本次是否「进入 published」（REQ: publish trace）。
+	// 判定输入在 _beforeEditVersion 已装进 eCtx（Old + Patches），此处直接用 ——
+	// 应用侧钩子拿不到旧值，因此这一步必须由框架完成，不能推给下游。
+	newStatus := s.patchedVersionStatus(eCtx.Old, eCtx.Patches)
+	oldStatus := ""
+	if eCtx.Old != nil && vf.StatusField != "" {
+		oldStatus = getStrField(eCtx.Old, vf.StatusField)
+	}
+	publishing := s.statusBecomesPublished(oldStatus, newStatus)
+
 	// 将 Go 字段名映射为 DB 列名
 	updates := make(map[string]any)
 	for goField, val := range eCtx.Patches {
 		col := resolveColumn[M](goField)
 		updates[col] = val
 	}
-	updates["updated_at"] = time.Now()
+	updates["updated_at"] = now
+
+	// 发布痕迹基础列（方案 A）：与 activate 同一套语义 ——
+	// 「复活一个已废弃版本」算一次需要留痕的新发布（REQ §五 口径）。
+	// 注意：终点非 published（published → deprecated 下线）时**不写** published_at，
+	// 也不产生发布历史（REQ §六·2）。
+	if publishing {
+		atCol, byCol := s.publishedAtColumn(), s.publishedByColumn()
+		if atCol == "" && byCol == "" {
+			s.warnPublishTraceUnavailable(errs.ErrPublishTraceNotSupported)
+		}
+		if atCol != "" {
+			updates[atCol] = &now
+		}
+		if byCol != "" && userULID != "" {
+			updates[byCol] = userULID
+		}
+	}
 
 	if err := s.repo.UpdateByID(ctx, id, updates); err != nil {
 		return nil, err
@@ -273,7 +313,36 @@ func (s *GenericService[M]) _doEditVersion(ctx context.Context, id any, pdata an
 		}
 		return nil, errs.ErrQueryRecordFailed(err)
 	}
+
+	// 发布历史 + OnPublished 回调（via=edit-version）。
+	// 本路径是「复活已废弃版本」—— 最高危的动作，此前完全不留痕。
+	if publishing {
+		s.recordPublished(ctx, result, PublishViaEditVersion)
+	}
 	return result, nil
+}
+
+// patchedVersionStatus 从 patches 中解析本次要写入的版本状态值。
+//
+// patches 的 key 可能是 Go 字段名（"VersionStatus"）或请求里的列名/别名，
+// 与 _beforeEditVersion 的状态迁移校验保持同一套匹配口径（resolveColumn 归一）。
+// 未涉及状态字段时返回空串（调用点据此判定为「不改变状态」）。
+func (s *GenericService[M]) patchedVersionStatus(old *M, patches map[string]any) string {
+	vf := s.config.VersionFields
+	if vf == nil || vf.StatusField == "" {
+		return ""
+	}
+	statusCol := resolveColumn[M](vf.StatusField)
+	for k, v := range patches {
+		if k == vf.StatusField || resolveColumn[M](k) == statusCol {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	// patches 未含状态字段：维持旧值（不算「进入 published」）
+	if old != nil {
+		return getStrField(old, vf.StatusField)
+	}
+	return ""
 }
 
 func (s *GenericService[M]) _afterEditVersion(ctx context.Context, id any, result *M, pdata any) (*M, error) {

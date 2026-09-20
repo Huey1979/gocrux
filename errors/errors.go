@@ -75,6 +75,17 @@ var (
 )
 
 // ============================================================
+// 发布痕迹 — Service 层（REQ edit-version publish trace）
+// ============================================================
+
+// ErrPublishTraceNotSupported 实体声明了发布痕迹（VersionFields.PublishedAtField /
+// PublishedByField）但两者都未配置，无法留痕。
+//
+// 出现即配置错误（fail-fast），仅在发布痕迹写入口触发，不阻塞主流程：
+// 调用方按「尽力而为」记 Error 日志并继续。
+var ErrPublishTraceNotSupported = errors.New("实体未配置发布痕迹字段（published_at / published_by）")
+
+// ============================================================
 // 格式化错误函数
 // ============================================================
 
@@ -198,6 +209,25 @@ func ErrCascadeEditVer(handlerName string, cause error) error {
 	}
 	return fmt.Errorf("级联编辑版本%s失败: %w", handlerName, cause)
 }
+
+// ============================================================
+// 版本化级联引用重映射 — Handler 层（cascade reference remap）
+// ============================================================
+
+var (
+	// ErrRemapUnresolved 版本重建后子记录的引用无法解析到本批次目标。
+	//
+	// 刻意让事务失败而非静默保留旧 ULID：静默会把「跨版本悬挂引用」落库，
+	// 表现为发布成功、运行时却关联旧字段/旧节点/旧分支。
+	ErrRemapUnresolved = errors.New("级联引用重映射失败：引用目标不在本批次内")
+
+	// ErrRemapInconsistent 引用的 ULID 与 code 同时存在但指向不同目标。
+	// 不静默取其一 —— 二者不一致本身说明数据有问题。
+	ErrRemapInconsistent = errors.New("级联引用重映射失败：ULID 与 code 指向不一致")
+
+	// ErrRemapInvalidConfig 重映射声明配置非法（未知形态、缺必填键等）。
+	ErrRemapInvalidConfig = errors.New("级联引用重映射配置错误")
+)
 
 // ============================================================
 // 引用/级联展开 — Handler 层

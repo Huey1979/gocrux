@@ -106,24 +106,34 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 					continue
 				}
 
-			childHandler := h.handlerReg.Get(rel.HandlerName)
-			if childHandler == nil {
-				continue
-			}
+				childHandler := h.handlerReg.Get(rel.HandlerName)
+				if childHandler == nil {
+					continue
+				}
 
-			// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
-			// 在级联创建前，将子数据中的代码字段解析为实际的 ULID 外键值。
-			if sfk := childHandler.SelfFKField(); sfk != "" {
-				resolveSelfFKCodeRefs(allChildData, childHandler.PKField(), sfk)
-			}
+				// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
+				// 在级联创建前，将子数据中的代码字段解析为实际的 ULID 外键值。
+				if sfk := childHandler.SelfFKField(); sfk != "" {
+					resolveSelfFKCodeRefs(allChildData, childHandler.PKField(), sfk)
+				}
 
-			// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
+				// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
 				resolveCrossRefs(allChildData, refMap)
 				// 收集本批的 _temp_ref 标记
 				tempRefs := collectTempRefsOrdered(allChildData, rel.HandlerName)
 
+				// 批次内横向引用重映射：子记录之间的 ULID 引用必须指向本批新记录。
+				// 位置约束（REQ §重映射时机）：此处新 ULID 尚未生成（由子 Handler 的
+				// _beforeCreate 生成），故只登记声明 + 旧 PK 快照；真正的重写由子
+				// Handler 在 createPipeline 中（ULID 已生成、尚未落库）执行。
+				childCtx := cascadeCtx
+				if len(rel.Remaps) > 0 {
+					childCtx = stageRemap(cascadeCtx, rel.HandlerName, rel.Remaps,
+						allChildData, childHandler.PKField())
+				}
+
 				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
-				pks, txErr := childHandler.DoCreate(cascadeCtx, allChildData)
+				pks, txErr := childHandler.DoCreate(childCtx, allChildData)
 				if txErr != nil {
 					return errs.ErrCascadeCreate(rel.HandlerName, txErr)
 				}
@@ -252,6 +262,15 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						if !passParentVersioned && hasChildren && oldPK != nil {
 							passToChild = true
 						}
+						// 级联引用重映射：必须在**清除旧 PK 之前**登记，才能拿到旧 ULID 快照
+						// （REQ §重映射时机：清除旧主键 → 新 ULID 生成 → 构建映射 → 重写引用 → 落库）。
+						// 真正的重写由子 Handler 在落库前执行（service BeforeCreatePersist 钩子）。
+						childCtx := cascadeCtx
+						if len(rel.Remaps) > 0 {
+							childCtx = stageRemap(cascadeCtx, rel.HandlerName, rel.Remaps,
+								childData, childHandler.PKField())
+						}
+
 						// 当 passToChild=true 时（版本化 or 非版本化全量替换），
 						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）。
 						// 版本化父表回填（未携带子表）同样进入：清除 PK 走 CREATE，
@@ -282,8 +301,9 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						if !hasChildren && oldPK != nil && !passParentVersioned {
 							passToChild = false
 						}
-						// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
-						if txErr = childHandler.DoUpdate(cascadeCtx, rel.FKField, newPK, childData, passToChild); txErr != nil {
+						// 传递含 visited + depth（以及重映射登记项）的 context，
+						// 子 Handler 可感知级联链状态并在落库前完成引用重写
+						if txErr = childHandler.DoUpdate(childCtx, rel.FKField, newPK, childData, passToChild); txErr != nil {
 							return errs.ErrCascadeUpdate(rel.HandlerName, txErr)
 						}
 					}

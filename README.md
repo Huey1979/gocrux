@@ -27,6 +27,7 @@ go get github.com/Huey1979/gocrux
 - [DateTimeFormat — 日期时间格式化](#datetimeformat--日期时间格式化)
 - [级联机制](#级联机制)
   - [级联创建跨实体引用](#级联创建跨实体引用)
+  - [版本重建时的子记录引用重映射](#版本重建时的子记录引用重映射cascaderelationremaps)
 - [版本管理](#版本管理)
   - [草稿可见性过滤](#草稿可见性过滤)
 - [身份认证与授权](#身份认证与授权)
@@ -1394,6 +1395,72 @@ Update 时级联行为与子数据存在性相关：
 | 无子数据 + 版本化 + 已有旧子记录 | 回填旧子数据 → **清除子行 PK 走 CREATE 复制重建**为新版本快照（新子行 PK/ULID，旧版本子表保持不变，BUG-059） |
 | 无子数据 + 无旧子记录 | 跳过 |
 
+### 版本重建时的子记录引用重映射（`CascadeRelation.Remaps`）
+
+版本化实体更新时框架会为父实体建新版本、并把子表**复制重建**为新 ULID。
+若子记录之间存在横向引用（`field_access.field_ulid → write_field.field_ulid`、
+`flow_branch.target_node_ulid → flow_node.node_ulid` 等），不重写就会让新版本
+指向**旧版本**子记录 —— 发布看起来成功，运行时却关联到旧字段/旧节点/旧分支。
+
+`Remaps` 声明式解决该问题，在「新 ULID 全部生成后、子记录落库前」统一重写：
+
+```go
+CascadeRelation{
+    HandlerName:   "form_write_field",
+    ChildrenField: "write_fields",
+    FKField:       "form_ulid",
+    OnCreate:      true,
+    OnUpdate:      true,
+    Remaps: []handler.ReferenceRemap{{
+        SourceCodeField: "field_code",     // 本批子记录的业务 code（用于兜底）
+        Bindings: []handler.ReferenceBinding{
+            // 标量 ULID：{"field_ulid": "01..."}
+            {Field: "ref_field_ulid", Mode: handler.RemapModeScalar},
+            // ULID 数组：{"source_node_ulids": ["01...", "02..."]}
+            {Field: "source_node_ulids", Mode: handler.RemapModeULIDArray},
+            // 对象数组：{"error_on": [{"field_ulid": "01...", "field_code": "amount"}]}
+            {Field: "error_on", Mode: handler.RemapModeObjectArray,
+                ULIDKey: "field_ulid", CodeKey: "field_code"},
+            // 嵌套 JSON（点号路径）：{"target": {"field_ulid": "01..."}}
+            {Field: "target.field_ulid", Mode: handler.RemapModeScalar},
+        },
+    }},
+}
+```
+
+**别忘了在子 Handler 上安装执行钩子**（父侧只是登记声明，子侧负责在落库前执行）：
+
+```go
+childH := handler.NewGenericHandlerWithSvc(childSvc, "form_write_field", childCfg)
+childH.InstallRemapHook()
+```
+
+各子实体引用形态与取值口径：
+
+| 形态 | `Mode` | 说明 |
+|:--|:--|:--|
+| 标量 ULID | `RemapModeScalar` | 单值字段；支持点号路径定位嵌套 JSON |
+| ULID 数组 | `RemapModeULIDArray` | 数组中每个 ULID 都重写 |
+| 对象数组 | `RemapModeObjectArray` | 按 `ULIDKey` / `CodeKey` 逐元素重写 |
+
+映射优先级（与 heims「ULID 为权威、code 为辅助」口径一致）：
+
+1. **旧 ULID → 新 ULID**（权威，优先）；
+2. 旧 ULID 匹配不上时，**code → 新 ULID** 兜底（老数据只有 code 时用）；
+3. ULID 与 code 同时存在且指向**不同**目标 → 报 `ErrRemapInconsistent`，不静默取其一；
+4. 引用在本批次找不到任何目标 → 报 `ErrRemapUnresolved`，**让事务失败**，
+   绝不静默保留旧 ULID（否则会落库一个「发布成功但引用悬空」的版本）。
+
+> **JSON 列双形态**：`type:json` 的 string 列在实体里是字符串，重写后会按原形态
+> 编码回去（不会把 JSON 字符串变成 Go 数组导致落库失败）。
+>
+> **旧快照不可变**：重写只作用于**本批次新建**的子记录，旧版本子行保持不变
+> （测试 `TestRemapUpdateRewritesScalarRefToNewVersion` 含此断言）。
+>
+> **业务自定义映射**：引用判定规则无法声明式表达时，让子实体实现
+> `handler.ReferenceRemapper`（`RemapReferences(ctx, childData) (map[string]string, error)`），
+> 返回值会并入 `oldToNew`（同键以业务侧为准）。
+
 ### ChildrenWrapKey
 
 当子数据不是完整对象而是标量数组时使用：
@@ -1526,10 +1593,70 @@ POST /api/v1/sites/edit-version
 ```
 
 状态迁移限制：
+- `deprecated` → `published`（**复活已废弃版本 = 一次新发布，会留发布痕迹**）
 - `draft` → `abolished`（直接废弃）
 - `deprecated` → `abolished`（归档）
 - `abolished` → `draft`（恢复为草稿）
 - `published` 禁止直接 abolished
+
+### 发布痕迹（publish trace）
+
+**「一个版本变成线上生效版本」共有 4 条路径，全部由框架统一留痕**，下游零改动：
+
+| 路径 | `via` | 说明 |
+|:--|:--|:--|
+| `create` 带 `version_status=published` | `create` | 保存并发布 |
+| `update` 带 `version_status=published` | `update` | 草稿 → 发布 |
+| `activate` | `activate` | 草稿 / 已废弃 → 发布、回滚 |
+| `edit-version` 改 `published` | `edit-version` | 复活已废弃版本 |
+
+每条路径的统一动作：
+
+1. **基础列**：写 `VersionFields.PublishedAtField` / `PublishedByField`
+   （操作人取 ctx 内登录身份，取不到时只写发布时间）；
+2. **发布历史**：一条含 `via` 来源标记的记录，默认落 MongoDB `publish_history` 集合；
+3. **统一回调**：`Config.OnPublished` 各触发**恰好一次**。
+
+```go
+svc := service.NewGenericService(repo, service.Config[entity.SysForm]{
+    EntityName: "form",
+    VersionMode: true,
+    VersionFields: &service.VersionFieldMapping{
+        /* ... */
+        PublishedAtField: "PublishedAt",
+        PublishedByField: "PublishedBy",
+    },
+    // 可选：四条发布路径各触发恰好一次；替代各模块各写一份 onXxxPublished
+    OnPublished: func(ctx context.Context, id any, e *entity.SysForm, via service.PublishVia) error {
+        return writePublishLog(ctx, id, via) // via: create/update/activate/edit-version
+    },
+})
+// 可选：换掉内置 MongoDB 发布历史写入方
+svc.SetPublishHistoryWriter(myWriter{})
+// 仅要基础列、不要发布历史：
+// svc.SetPublishHistoryWriter(service.NoopPublishHistoryWriter{})
+```
+
+> **口径**：`published → deprecated`（下线）**不算**发布 —— 不写 `published_at`、
+> 不产生发布历史、不触发回调。只有「终点是 published 且旧值不是 published」才留痕
+> （`statusBecomesPublished`），因此「复活已废弃版本」算，原地不改不算。
+
+> **事务一致性**：activate / 版本化 update 走 MySQL 事务，而事务不跨库到 MongoDB，
+> 因此发布历史挂到 gorm 事务的 after-commit 钩子上写 —— 主业务回滚不留
+> 「有发布记录但没有发布」的幽灵痕迹。`OnPublished` 是外部副作用、无法随事务撤回，
+> 回滚且回调已执行时会记一条 Error 明确提示。
+
+> **配置缺口**：`PublishedAtField` / `PublishedByField` 都没配置时，发布仍会写历史并
+> 触发回调（不让配置缺口吞掉业务事实），只打一条 Warn 提示补配置。
+
+查询发布历史（仅内置 MongoDB 集合）：
+
+```go
+records, err := service.ListPublishHistories(ctx, service.PublishHistoryFilter{
+    EntityType: "form", EntityID: formULID,
+})
+// records[i].Via / PublishedAt / OperatorULID / VersionCode / EntityCode ...
+```
 
 ### FollowPublished 机制
 

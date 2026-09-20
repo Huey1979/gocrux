@@ -461,6 +461,18 @@ type CascadeRelation struct {
 	// 配置后，前端可直接传 "tags": [1, 2, 3]，系统自动转为 [{"tag_id": 1}, {"tag_id": 2}, {"tag_id": 3}]。
 	// 不配置（空字符串）时保持原逻辑不变。
 	ChildrenWrapKey string
+
+	// Remaps 本批子数据内部的引用重映射声明（版本化级联重建场景，可选）。
+	//
+	// 版本化更新会为父实体建新版本并把子表复制重建为新 ULID，但子记录之间的
+	// 横向引用（field_access.field_ulid → write_field.field_ulid、
+	// flow_branch.target_node_ulid → flow_node.node_ulid 等）若不重写，
+	// 新版本就会指向旧版本子记录，形成跨版本悬挂引用。
+	//
+	// 配置后，框架在新 ULID 全部生成、子记录落库**之前**建立
+	// 旧 ULID → 新 ULID（权威）与 code → 新 ULID（兜底）映射并重写引用；
+	// 无法解析的引用让事务失败，绝不静默保留旧 ULID。详见 cascade_remap.go。
+	Remaps []ReferenceRemap
 }
 
 // ============================================================

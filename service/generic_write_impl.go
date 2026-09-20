@@ -316,6 +316,14 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 			if getStrField(&m, vf.VersionField) == "" {
 				common.SetFieldValue(&m, vf.VersionField, "v1.0")
 			}
+			// 发布痕迹基础列（REQ: publish trace）：create 直接落成 published 时，
+			// 与 activate 同一套语义写 published_at / published_by（via=create）。
+			// 发布历史与 OnPublished 回调在 _doCreate 成功落库后触发。
+			if s.statusBecomesPublished("", getStrField(&m, vf.StatusField)) {
+				if err := s.applyPublishTraceFields(&m, now, userID); err != nil {
+					s.warnPublishTraceUnavailable(err)
+				}
+			}
 		}
 		// Code 保护：无论版本化/非版本化，只要配置了 CodeField 且未提交 code → 自动生成 ULID
 		if s.config.VersionFields != nil && s.config.VersionFields.CodeField != "" {
@@ -442,13 +450,31 @@ func (s *GenericService[M]) _doCreate(ctx context.Context, input []*M) ([]*M, er
 	}
 
 	// BUG-045：请求显式字段列名白名单 → 显式零值（0/false/""）真实落库，不被 DB 默认值覆盖
+	//
+	// REQ publish trace：白名单必须并入发布痕迹基础列 —— PublishedAtField 通常是
+	// *time.Time（指针），而 collectNonZeroColumns 会跳过指针字段，导致「create 保存并
+	// 发布」时 published_at 有值却在 INSERT 里被漏掉（Select 白名单不含该列）。
 	cols := createColumnWhitelist(input, explicitColumnsFrom(ctx))
+	cols = s.appendPublishTraceColumns(cols, input)
 	if len(cols) > 0 {
 		if err := s.repo.InsertBatch(ctx, input, cols...); err != nil {
 			return nil, err
 		}
 	} else if err := s.repo.InsertBatch(ctx, input); err != nil {
 		return nil, err
+	}
+
+	// 发布痕迹（REQ: publish trace）：create 直接落成 published 时留痕（via=create）。
+	// 落库成功后触发，避免「插入失败却留下发布记录」。
+	if s.config.VersionMode && s.config.VersionFields != nil && s.config.VersionFields.StatusField != "" {
+		for _, ent := range input {
+			if ent == nil {
+				continue
+			}
+			if s.statusBecomesPublished("", getStrField(ent, s.config.VersionFields.StatusField)) {
+				s.recordPublished(ctx, ent, PublishViaCreate)
+			}
+		}
 	}
 	return input, nil
 }
@@ -511,7 +537,12 @@ func extractEntityID(v any) string {
 		return u.GetULID()
 	}
 	val := reflect.ValueOf(v)
-	if val.Kind() == reflect.Ptr {
+	// 解全部指针层：M 常为 *T，调用方传入 *M（即 **T）时只解一层会拿到指针，
+	// 后续 Kind() != Struct 直接返回空 ID（发布历史 / 操作日志的 EntityID 会丢）。
+	for val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return ""
+		}
 		val = val.Elem()
 	}
 	if val.Kind() != reflect.Struct {
@@ -702,6 +733,16 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 		codeCol := resolveColumn[M](vf.CodeField)
 		currentCol := resolveColumn[M](vf.CurrentField)
 
+		// 发布痕迹（REQ: publish trace）：版本化 update 落成 published 时留痕（via=update）。
+		// 旧值取退位旧行 —— 版本化下「旧行是 published」而新行也是 published 时
+		// 属原地发布（不算重新发布），故与 create 共用「旧值非 published」判据。
+		oldStatus := ""
+		if pair.Old != nil && vf.StatusField != "" {
+			oldStatus = getStrField(pair.Old, vf.StatusField)
+		}
+		publishing := s.statusBecomesPublished(oldStatus, getStrField(pair.New, vf.StatusField))
+		publishTraceFired := false
+
 		if cr := s.CRUDRepo(); cr != nil {
 			// MySQL：GORM 事务内批量退位 + 插入新版本
 			var txErr error
@@ -727,11 +768,21 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 					// 方案 B（default 只允许 0 值/无）后恢复 struct+Select：
 					// 无非零 default tag，GORM create 回调不再用默认值覆盖零值字段，
 					// 显式 0 原样落库，map 绕过不再必要（BUG-047 方案 A 回退）
-					return tx.Model(new(M)).Select(cols).Create(pair.New).Error
+					if err := tx.Model(new(M)).Select(cols).Create(pair.New).Error; err != nil {
+						return err
+					}
+				} else if err := tx.Create(pair.New).Error; err != nil {
+					return err
 				}
-				return tx.Create(pair.New).Error
+				if publishing {
+					// 发布历史挂事务提交后写（回滚不留痕）；回调为外部副作用无法撤回，
+					// 由 publishTraceFired 标记，供回滚分支记录已知不一致。
+					s.recordPublishedTx(ctx, tx, pair.New, PublishViaUpdate, &publishTraceFired)
+				}
+				return nil
 			})
 			if txErr != nil {
+				s.reportPublishTraceRollback(ctx, publishTraceFired, PublishViaUpdate, txErr)
 				return nil, txErr
 			}
 		} else {
@@ -741,6 +792,10 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 			}
 			if err := s.repo.Insert(ctx, pair.New); err != nil {
 				return nil, err
+			}
+			// Mongo 路径无 MySQL 事务，落库成功后直接留痕
+			if publishing {
+				s.recordPublished(ctx, pair.New, PublishViaUpdate)
 			}
 		}
 		return pair.New, nil
@@ -758,6 +813,24 @@ func (s *GenericService[M]) _doUpdate(ctx context.Context, id, data any) (*M, er
 	}
 	if err := s.repo.Save(ctx, _entity); err != nil {
 		return nil, err
+	}
+
+	// 发布痕迹（REQ: publish trace）：非版本化实体若带 version_status 列，
+	// 同样在落成 published 时留痕（via=update）。旧值取 UpdatePair.Old。
+	if s.config.VersionMode && s.config.VersionFields != nil && s.config.VersionFields.StatusField != "" {
+		oldStatus := ""
+		if pair, ok := data.(*UpdatePair[M]); ok && pair.Old != nil {
+			oldStatus = getStrField(pair.Old, s.config.VersionFields.StatusField)
+		}
+		newStatus := getStrField(_entity, s.config.VersionFields.StatusField)
+		if s.statusBecomesPublished(oldStatus, newStatus) {
+			// 基础列需在落库前写入，故此处只能补写一次（Save 已发生）——
+			// 非版本化 + 带状态列的形态在 heims 不存在，保留兜底以免语义缺口。
+			if err := s.applyPublishTraceFields(_entity, time.Now(), GetUserULID(ctx)); err != nil {
+				s.warnPublishTraceUnavailable(err)
+			}
+			s.recordPublished(ctx, _entity, PublishViaUpdate)
+		}
 	}
 	return _entity, nil
 }
