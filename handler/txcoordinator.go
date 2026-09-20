@@ -44,7 +44,12 @@ func NewTxCoordinator(db *gorm.DB, mongoDB *mongo.Database) *TxCoordinator {
 
 // Run 根据 ctx 中已有的存储类型自动选择事务。
 // 如果 ctx 中已包含 mongo session → RunMongo；否则 → RunMySQL。
+//
+// 同时在此创建**事务级 remap catalog**（级联引用重映射 v2）：catalog 的生命周期
+// 必须与「一次事务执行」严格对齐，而不是 HTTP request context —— 否则同一请求内
+// 发生事务重试时会复用上一次失败事务残留的映射（见 WithRemapCatalog）。
 func (tc *TxCoordinator) Run(ctx context.Context, fn func(txCtx context.Context) error) error {
+	ctx, _ = WithRemapCatalog(ctx)
 	if tc.mongoDB != nil && common.GetMongoSession(ctx) != nil {
 		// 上下文中已有 mongo session → 不另开事务，直接执行（级联场景）
 		return fn(ctx)
@@ -62,6 +67,7 @@ func (tc *TxCoordinator) Run(ctx context.Context, fn func(txCtx context.Context)
 
 // RunMySQL 在 GORM 事务内执行。
 func (tc *TxCoordinator) RunMySQL(ctx context.Context, fn func(txCtx context.Context) error) error {
+	ctx, _ = WithRemapCatalog(ctx)
 	if tc.db == nil {
 		return fn(ctx)
 	}
@@ -73,6 +79,7 @@ func (tc *TxCoordinator) RunMySQL(ctx context.Context, fn func(txCtx context.Con
 
 // RunMongo 在 MongoDB 事务内执行。
 func (tc *TxCoordinator) RunMongo(ctx context.Context, fn func(txCtx context.Context) error) error {
+	ctx, _ = WithRemapCatalog(ctx)
 	if tc.mongoDB == nil {
 		return fn(ctx)
 	}

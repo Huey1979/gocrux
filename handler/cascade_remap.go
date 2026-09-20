@@ -71,6 +71,20 @@ type ReferenceBinding struct {
 	// 配置后：ULID 命中优先；ULID 未命中时用 code 兜底；二者同时存在且指向
 	// 不同目标时**报错**（不静默取其一）。留空表示该形态不参与 code 兜底。
 	CodeKey string
+
+	// CodeField 标量模式下与 Field **同级**的 code 字段（如 Field="field_ulid"、
+	// CodeField="field_code"，可选）。
+	//
+	// 解决的是「消费方数据里根本没有旧 ULID」这一跨批次场景：
+	//
+	//	{"field_code": "amount"}   ← 只有 code，没有 field_ulid
+	//
+	// 解析顺序：先按 Field 取旧 ULID → 命中用 oldToNew；未命中/字段缺失则用
+	// CodeField 取 code → 用 codeToNew 兜底；**解析结果一律写回 Field**，
+	// 因此「字段原本缺失、仅凭 code 命中」也必须补写（不是仅在 ULID 存在时校验）。
+	//
+	// 二者同时存在且指向不同目标时**报错**（与 object_array 的 ULIDKey/CodeKey 同口径）。
+	CodeField string
 }
 
 // ReferenceRemap 声明「一批子数据内部的引用关系如何在版本重建后重映射」。
@@ -106,6 +120,18 @@ type ReferenceRemap struct {
 	// 仅在需要写入 JSON 键时使用；通常无需配置。
 	SourceULIDField string
 
+	// SourceRemapKey 跨级联批次消费键（v2，可选）。
+	//
+	// 留空 = 沿用 v1 行为：消费**本批次自身**构建的映射（映射表由本批 childData
+	// 与旧 PK 快照直接构建，见 prepareRemap）。
+	//
+	// 非空 = 消费当前**级联事务内**由该 RemapKey 命名空间发布出来的映射
+	// （发布方声明见 CascadeRelation.RemapKey）。适用场景：引用目标位于另一个
+	// 级联分支，本批 childData 里根本没有目标记录，无从构建映射。
+	//
+	// 留空是**向后兼容的关键**：v1 的接入方零改动。
+	SourceRemapKey string
+
 	// Bindings 引用字段清单。
 	Bindings []ReferenceBinding
 }
@@ -123,6 +149,9 @@ type RemapPlan struct {
 	bindings []ReferenceBinding
 	// handlerName 目标子 Handler 名（用于错误信息）。
 	handlerName string
+	// sourceKey 映射来源命名空间（v2 跨批次消费时非空；批内模式为空）。
+	// 仅用于错误文案，让「跨批次映射里找不到该值」与「批内映射里找不到」可区分。
+	sourceKey string
 	// childData 本批次子数据（供业务侧 ReferenceRemapper 计算自定义映射）。
 	childData []map[string]any
 }
@@ -215,7 +244,13 @@ func (p *RemapPlan) applyBinding(rec map[string]any, b ReferenceBinding) error {
 	}
 	v, ok := rec[b.Field]
 	if !ok || v == nil {
-		return nil // 该记录没有此引用字段，正常
+		// 引用字段本身缺失：v1 直接跳过（视作「该记录没有此引用」）。
+		// v2 例外：标量 + CodeField 已配置时，仅凭 code 也要能补写 Field
+		// （heims §9.5-1：{"field_code":"amount"} 必须解析出 field_ulid）。
+		if modeOf(b) == RemapModeScalar && b.CodeField != "" {
+			return p.applyValue(rec, b.Field, nil, b)
+		}
+		return nil
 	}
 	return p.applyValue(rec, b.Field, v, b)
 }
@@ -244,7 +279,7 @@ func (p *RemapPlan) applyValue(rec map[string]any, field string, v any, b Refere
 			if modeOf(b) != RemapModeScalar {
 				return nil
 			}
-			nv, err := p.resolveScalar(v, b)
+			nv, err := p.resolveScalar(rec, v, b)
 			if err != nil {
 				return err
 			}
@@ -258,7 +293,7 @@ func (p *RemapPlan) applyValue(rec map[string]any, field string, v any, b Refere
 
 	switch modeOf(b) {
 	case RemapModeScalar:
-		nv, err := p.resolveScalar(v, b)
+		nv, err := p.resolveScalar(rec, v, b)
 		if err != nil {
 			return err
 		}
@@ -340,6 +375,20 @@ func (p *RemapPlan) applyNestedBinding(rec map[string]any, b ReferenceBinding) e
 	containerPath, leaf := b.Field[:idx], b.Field[idx+1:]
 	leafBinding := b
 	leafBinding.Field = leaf
+	// CodeField 也可能写成完整路径（与 Field 同级书写，如 "a.b.field_code"）：
+	// 进入容器后执行的是**叶层**绑定，键名必须是相对叶层的，因此把容器前缀剥掉。
+	// 若 CodeField 本就是相对名（如 "field_code"），这里保持原样。
+	if b.CodeField != "" {
+		prefix := containerPath + "."
+		if strings.HasPrefix(b.CodeField, prefix) {
+			leafBinding.CodeField = b.CodeField[len(prefix):]
+		} else if strings.Contains(b.CodeField, ".") {
+			// 与容器不同源的点号路径无法在叶层使用 —— 显式报配置错误，不静默失效
+			return fmt.Errorf(
+				"%w: 嵌套绑定 %q 的 CodeField=%q 必须以容器路径 %q 为前缀（或写成相对名）",
+				errs.ErrRemapInvalidConfig, b.Field, b.CodeField, containerPath)
+		}
+	}
 
 	// 首层容器可能本身是 JSON 字符串（type:json 列）→ 先解码再下钻
 	root := firstSegment(containerPath)
@@ -395,6 +444,16 @@ func (p *RemapPlan) walkNestedContainer(container any, leafBinding ReferenceBind
 			}
 			return nil
 		}
+		// 叶 ULID 字段缺失但配了同级 CodeField → 仅凭 code 也要补写
+		// （heims §9.5-1 的嵌套形态：{"target":{"field_code":"amount"}}）
+		if leafBinding.CodeField != "" {
+			if _, hasCode := c[leafBinding.CodeField]; hasCode {
+				if err := p.applyValue(c, leafBinding.Field, nil, leafBinding); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
 		// 否则继续下钻（多层嵌套 JSON）
 		for _, v := range c {
 			if err := p.walkNestedContainer(v, leafBinding); err != nil {
@@ -421,19 +480,58 @@ func firstSegment(path string) string {
 
 // resolveScalar 解析标量 ULID 引用（含 code 兜底与不一致检测）。
 // 返回 nil 表示无需修改。
-func (p *RemapPlan) resolveScalar(v any, b ReferenceBinding) (any, error) {
-	oldULID := fmt.Sprint(v)
-	if oldULID == "" || oldULID == "<nil>" {
-		return nil, nil
+//
+// 与 v1 的差别（v2 标量 CodeField）：v1 只读 `Field`，因此 `{"field_code":"amount"}`
+// 这种「没有旧 ULID」的数据会直接被跳过，引用永远补不上。v2 允许配置
+// `CodeField` 指向同级的 code 字段：旧 ULID 缺失时用 code 兜底，
+// **并把解析出的新 ULID 补写进 `Field`**。
+func (p *RemapPlan) resolveScalar(rec map[string]any, v any, b ReferenceBinding) (any, error) {
+	oldULID := scalarToString(v)
+
+	byULID := ""
+	if oldULID != "" && !p.isNewULID(oldULID) {
+		byULID = p.oldToNew[oldULID]
 	}
-	// 已是本批次的新 ULID（回填场景下可能已经被改写）→ 幂等跳过
-	if p.isNewULID(oldULID) {
-		return nil, nil
+
+	// code 兜底：数据里可能没有旧 ULID（字段缺失），也可能旧 ULID 未命中本批次映射
+	oldCode := ""
+	byCode := ""
+	if b.CodeField != "" {
+		if c, ok := p.readRecKey(rec, b.CodeField); ok {
+			oldCode = c
+			byCode = p.codeToNew[c]
+		}
 	}
-	if newULID, ok := p.oldToNew[oldULID]; ok {
-		return newULID, nil
+
+	switch {
+	case byULID != "" && byCode != "" && byULID != byCode:
+		// ULID 与 code 都命中但指向不同目标 → 报错，不静默取其一
+		return nil, p.inconsistentErr(b, oldULID, oldCode)
+	case byULID != "":
+		return byULID, nil
+	case byCode != "":
+		// 关键：旧 ULID 缺失时也补写 —— 这正是 heims §9.5-1 要求的形态
+		return byCode, nil
+	case oldULID != "" && p.isNewULID(oldULID):
+		return nil, nil // 已是本批次新 ULID → 幂等
 	}
-	return nil, p.unresolvedErr(b.Field, oldULID, "")
+
+	if oldULID == "" && oldCode == "" {
+		return nil, nil // 该记录没有此引用字段，正常
+	}
+	return nil, p.unresolvedErr(b.Field, oldULID, oldCode)
+}
+
+// scalarToString 把标量值转为字符串（空值返回空串）。
+func scalarToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	s := fmt.Sprint(v)
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	return s
 }
 
 // resolveULIDArray 解析 ULID 数组引用。
@@ -551,6 +649,11 @@ func (p *RemapPlan) readKeyPath(m map[string]any, keyPath string) (string, bool)
 	return s, true
 }
 
+// readRecKey 从记录顶层读一个字符串值（支持点号路径，供标量 CodeField 使用）。
+func (p *RemapPlan) readRecKey(rec map[string]any, key string) (string, bool) {
+	return p.readKeyPath(rec, key)
+}
+
 // writeKeyPath 按键路径写入值（支持 "a.b" 形式的嵌套键）。
 func (p *RemapPlan) writeKeyPath(m map[string]any, keyPath, v string) {
 	if keyPath == "" {
@@ -579,6 +682,9 @@ func (p *RemapPlan) isNewULID(v string) bool {
 }
 
 // unresolvedErr 构造「引用无法解析」错误（带子实体名与字段，便于定位）。
+//
+// v2 区分来源：跨批次消费（sourceKey 非空）时错误里带上命名空间，
+// 便于区分「映射本身拿不到」与「映射拿到了但该值不在映射里」。
 func (p *RemapPlan) unresolvedErr(field, ulid, code string) error {
 	detail := ""
 	if ulid != "" {
@@ -590,8 +696,12 @@ func (p *RemapPlan) unresolvedErr(field, ulid, code string) error {
 		}
 		detail += fmt.Sprintf("code=%s", code)
 	}
-	return fmt.Errorf("%w: 子实体 %s 的字段 %s 的%s 在本批次中找不到对应目标",
-		errs.ErrRemapUnresolved, p.handlerName, field, detail)
+	scope := "本批次中"
+	if p.sourceKey != "" {
+		scope = fmt.Sprintf("命名空间 %q 的映射中", p.sourceKey)
+	}
+	return fmt.Errorf("%w: 子实体 %s 的字段 %s 的%s 在%s找不到对应目标",
+		errs.ErrRemapUnresolved, p.handlerName, field, detail, scope)
 }
 
 // inconsistentErr 构造「ULID 与 code 指向不一致」错误。

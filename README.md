@@ -28,6 +28,7 @@ go get github.com/Huey1979/gocrux
 - [级联机制](#级联机制)
   - [级联创建跨实体引用](#级联创建跨实体引用)
   - [版本重建时的子记录引用重映射](#版本重建时的子记录引用重映射cascaderelationremaps)
+  - [跨级联批次的引用重映射](#跨级联批次的引用重映射remapkey--sourceremapkey)
 - [版本管理](#版本管理)
   - [草稿可见性过滤](#草稿可见性过滤)
 - [身份认证与授权](#身份认证与授权)
@@ -1460,6 +1461,89 @@ childH.InstallRemapHook()
 > **业务自定义映射**：引用判定规则无法声明式表达时，让子实体实现
 > `handler.ReferenceRemapper`（`RemapReferences(ctx, childData) (map[string]string, error)`），
 > 返回值会并入 `oldToNew`（同键以业务侧为准）。
+
+### 跨级联批次的引用重映射（`RemapKey` / `SourceRemapKey`）
+
+`Remaps` 的映射表只在**当前这一个级联关系的子数据批次内**构建，因此只能重写同一批
+子记录内部的引用。但真实结构里引用常常**跨级联分支**：
+
+```
+form
+  ├─ write_section → write_field          ← 新 ULID 的生成源
+  ├─ list_column.field_ulid               ┐
+  ├─ detail_section → detail_field        ├ 引用 write_field
+  └─ validation.error_on[].field_ulid     ┘
+```
+
+`list_column` 等分支**看不到** `write_field` 的记录（不是它的子数据），
+无从自建映射，结果新版本会静默引用旧版本的字段。
+
+`RemapKey` / `SourceRemapKey` 提供**事务内、跨级联批次**的映射发布/消费：
+
+```go
+// 发布方：write_field 批次执行完毕后把「旧→新 / code→新」交付给 catalog
+CascadeRelation{
+    HandlerName:      "form_write_field",
+    ChildrenField:    "write_fields",
+    FKField:          "form_ulid",
+    OnCreate:         true,
+    OnUpdate:         true,
+    RemapKey:         "form.write_field",  // ← 发布键（命名空间）
+    PublishCodeField: "field_code",        // ← 发布 code→新ULID 兜底映射
+}
+
+// 消费方：从 catalog 取映射重写自己的引用
+CascadeRelation{
+    HandlerName:   "form_list_column",
+    ChildrenField: "list_columns",
+    FKField:       "form_ulid",
+    OnCreate:      true,
+    OnUpdate:      true,
+    Remaps: []handler.ReferenceRemap{{
+        SourceRemapKey: "form.write_field",       // ← 消费键（留空 = v1 批内行为）
+        Bindings: []handler.ReferenceBinding{
+            // 标量 + 同级 code：字段缺失时也能仅凭 code 补写
+            {Field: "field_ulid", CodeField: "field_code", Mode: handler.RemapModeScalar},
+        },
+    }},
+}
+```
+
+> **向后兼容**：`SourceRemapKey` 留空 = 沿用 v1 批内行为；两个新键都不配置时
+> 行为与 v1 完全一致（零改动接入）。
+
+**执行顺序契约（重要）**：发布方必须在消费方**之前**执行。框架提供三层校验：
+
+| 层 | 检查 | 时机 | 失败表现 |
+|:--|:--|:--|:--|
+| L1 | `SourceRemapKey` 存在发布方 | 启动期 | `ValidateRemapKeys()` 返回 error（聚合报告全部缺失 key） |
+| L2 | 同一 `Cascades` 数组内发布方更靠前 | 构造期 | **panic**（fail-fast） |
+| L3 | 跨 Handler 子树时消费点能否取到映射 | 运行时 | `ErrRemapSourceMissing`（文案含发布方 Handler 名） |
+
+```go
+// L1：在所有 Handler 构造 + SetHandlerReg 完成之后调用一次
+if err := formHandler.ValidateRemapKeys(); err != nil {
+    log.Fatalf("remap 配置错误: %v", err)
+}
+```
+
+L2 只校验**同一数组内**的顺序：若发布方在别的 Handler 子树里（如上例的
+`write_field` 位于 `write_section` 下），静态无法推断执行序，L2 会**跳过**
+交由 L1 做存在性校验、L3 做运行时兜底。因此跨子树时顺序由调用方保证，
+**建议在应用侧加一条顺序回归测试**。
+
+其他约定：
+
+- **catalog 生命周期严格绑定事务**（随 `ctx` 存亡，不跨请求/不跨事务），
+  由 `TxCoordinator.Run` 入口创建；
+- **同命名空间多批发布合并**：同一 old ULID / code 映射到不同新目标 →
+  `ErrRemapInconsistent`（不静默取其一）；映射到相同目标 → 幂等忽略；
+- **`Resolve` 是只读快照**：多个消费方可重复读取互不影响，返回的是**调用时刻**的
+  合并结果（若消费方之间又有新发布方写入，后者能看到更新内容）；
+- **空 code / 空旧 ULID 不参与映射且不报错**（必填约束属应用侧发布校验）；
+- **错误三分**（便于区分配置问题与数据问题）：命名空间无发布方
+  `ErrRemapSourceMissing` / 值不在映射中 `ErrRemapUnresolved` /
+  ULID 与 code 冲突 `ErrRemapInconsistent`。
 
 ### ChildrenWrapKey
 

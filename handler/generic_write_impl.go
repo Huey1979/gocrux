@@ -126,10 +126,14 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 				// 位置约束（REQ §重映射时机）：此处新 ULID 尚未生成（由子 Handler 的
 				// _beforeCreate 生成），故只登记声明 + 旧 PK 快照；真正的重写由子
 				// Handler 在 createPipeline 中（ULID 已生成、尚未落库）执行。
+				//
+				// rel.RemapKey 非空时，本批同时作为**发布方**：执行完毕后把映射发布到
+				// 事务级 catalog（v2 跨级联批次重映射的发布侧）。
 				childCtx := cascadeCtx
-				if len(rel.Remaps) > 0 {
-					childCtx = stageRemap(cascadeCtx, rel.HandlerName, rel.Remaps,
-						allChildData, childHandler.PKField())
+				if len(rel.Remaps) > 0 || rel.RemapKey != "" {
+					childCtx = stageRemapWithKey(cascadeCtx, rel.HandlerName, rel.Remaps,
+						allChildData, childHandler.PKField(), rel.RemapKey,
+						rel.PublishCodeField, resolveRemapPublishers(rel, h.handlerReg))
 				}
 
 				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
@@ -265,10 +269,12 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						// 级联引用重映射：必须在**清除旧 PK 之前**登记，才能拿到旧 ULID 快照
 						// （REQ §重映射时机：清除旧主键 → 新 ULID 生成 → 构建映射 → 重写引用 → 落库）。
 						// 真正的重写由子 Handler 在落库前执行（service BeforeCreatePersist 钩子）。
+						// rel.RemapKey 非空时本批同时作为发布方（同 _doCreate）。
 						childCtx := cascadeCtx
-						if len(rel.Remaps) > 0 {
-							childCtx = stageRemap(cascadeCtx, rel.HandlerName, rel.Remaps,
-								childData, childHandler.PKField())
+						if len(rel.Remaps) > 0 || rel.RemapKey != "" {
+							childCtx = stageRemapWithKey(cascadeCtx, rel.HandlerName, rel.Remaps,
+								childData, childHandler.PKField(), rel.RemapKey,
+								rel.PublishCodeField, resolveRemapPublishers(rel, h.handlerReg))
 						}
 
 						// 当 passToChild=true 时（版本化 or 非版本化全量替换），

@@ -303,6 +303,12 @@ func (h *GenericHandler[M]) initValidation() {
 		}
 		h.disabledRoutes = set
 	}
+	// L2：同一 Cascades 数组内的 remap 顺序校验（失败即 panic，fail-fast）。
+	// 跨 Handler 子树的顺序无法静态推断 —— 那里交给 L1（ValidateRemapKeys）
+	// 与 L3（运行时 ErrRemapSourceMissing）。详见 cascade_remap_ctx.go。
+	if err := h.validateRemapKeyOrder(); err != nil {
+		panic(fmt.Sprintf("[gocrux] handler %q 配置错误: %v", h.svcName, err))
+	}
 	if h.config.SkipAutoValidate {
 		// 动态 schema 实体：跳过自动字段校验，完全交由钩子处理
 		h.validateRules.Create = make(EndpointRules)

@@ -473,6 +473,46 @@ type CascadeRelation struct {
 	// 旧 ULID → 新 ULID（权威）与 code → 新 ULID（兜底）映射并重写引用；
 	// 无法解析的引用让事务失败，绝不静默保留旧 ULID。详见 cascade_remap.go。
 	Remaps []ReferenceRemap
+
+	// RemapKey 跨级联批次**发布**键（v2，可选）。
+	//
+	// 非空时，本关系产生的「旧 ULID → 新 ULID」「code → 新 ULID」映射会发布到
+	// 当前**级联事务**的该命名空间，供配置了 ReferenceRemap.SourceRemapKey 的
+	// 其它级联分支消费（同一事务内、可跨 Handler 边界）。
+	//
+	// 为什么需要：Remaps 的映射表只在**本批 childData** 内构建，而表单域的引用
+	// 天然跨分支 —— write_field 与 list_column / detail_field / validation 是
+	// form 下并列的级联分支，消费方看不到发布方的记录，无从自建映射。
+	//
+	//	form
+	//	  ├─ write_section → write_field      RemapKey: "form.write_field"  ← 发布方
+	//	  ├─ list_column                      SourceRemapKey: "form.write_field"
+	//	  ├─ detail_section → detail_field    SourceRemapKey: "form.write_field"
+	//	  └─ validation                       SourceRemapKey: "form.write_field"
+	//
+	// 顺序契约（重要）：
+	//   - 同一 Cascades 数组内，发布方必须声明在消费方**之前** —— 违反时构造期 panic；
+	//   - 跨 Handler 子树（发布方在子 Handler 内）无法静态推断，顺序由调用方保证，
+	//     违反时运行时返回 errs.ErrRemapSourceMissing（文案含发布方 Handler 名）；
+	//   - 可用 ValidateRemapKeys() 在启动期做全局存在性校验（L1）。
+	//
+	// 同一 RemapKey 可被多个 CascadeRelation 声明、可被同一批次多次发布：
+	// 映射合并；同 code / 同旧 ULID 映射到不同新 ULID 时返回 errs.ErrRemapInconsistent。
+	//
+	// 映射生命周期严格绑定级联事务（随 context 存亡），不跨请求、不跨事务。
+	RemapKey string
+
+	// PublishCodeField 发布时用于构建「code → 新 ULID」兜底映射的**本批子记录字段名**
+	// （如 "field_code"）。可选；留空则只发布「旧 ULID → 新 ULID」。
+	//
+	// 为什么需要独立字段：发布方常常只负责产出映射、自己并不消费（消费方在另外的
+	// 级联分支），因此它的 Remaps 往往是空的 —— 那时没有任何地方能声明 code 字段。
+	// 若强行要求发布方写一个空 Binding 只为携带 SourceCodeField，语义很别扭。
+	//
+	// 只依赖旧 ULID 映射也能工作（前提：消费方手里有旧 ULID）。跨版本场景下
+	// 消费方通常拿不到旧 ULID（那是别的分支的记录），此时 code 兜底是必须的，
+	// 故表单域这类结构应配置本字段。
+	PublishCodeField string
 }
 
 // ============================================================

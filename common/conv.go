@@ -86,6 +86,41 @@ func (r *Registry[T]) Get(name string) T {
 	return r.data[name]
 }
 
+// Each 遍历注册表中全部实例（fn 内**禁止**调用 Register/Get，会死锁）。
+//
+// 遍历顺序不确定（map 语义）：调用方若需要稳定输出，须自行排序后使用。
+// 覆盖写语义同 Register：同一 name 只出现一次。
+func (r *Registry[T]) Each(fn func(name string, val T)) {
+	if r == nil || fn == nil {
+		return
+	}
+	// 先快照再遍历：避免回调持锁期间调用方误触 Register 造成死锁
+	r.mu.RLock()
+	snapshot := make(map[string]T, len(r.data))
+	for k, v := range r.data {
+		snapshot[k] = v
+	}
+	r.mu.RUnlock()
+
+	for k, v := range snapshot {
+		fn(k, v)
+	}
+}
+
+// Names 返回注册表中全部名称（顺序不确定）。
+func (r *Registry[T]) Names() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.data))
+	for k := range r.data {
+		out = append(out, k)
+	}
+	return out
+}
+
 // IsSlice 判断值是否为切片/数组类型。
 func IsSlice(v any) bool {
 	rv := reflect.ValueOf(v)

@@ -227,6 +227,15 @@ var (
 
 	// ErrRemapInvalidConfig 重映射声明配置非法（未知形态、缺必填键等）。
 	ErrRemapInvalidConfig = errors.New("级联引用重映射配置错误")
+
+	// ErrRemapSourceMissing 消费方请求的命名空间在本事务中**尚无发布方**（v2，L3）。
+	//
+	// 与 ErrRemapUnresolved 严格区分：
+	//   - ErrRemapSourceMissing：映射本身拿不到（发布方 Handler 未执行 / 声明顺序错 / key 拼错）；
+	//   - ErrRemapUnresolved：映射拿到了，但当前这个 ULID/code 不在映射中（值的问题）。
+	//
+	// 两者在 errors.Is 层可精确区分，便于把「配置/时序错误」与「数据错误」分开排查。
+	ErrRemapSourceMissing = errors.New("级联引用重映射失败：请求的命名空间尚无发布方")
 )
 
 // ============================================================
