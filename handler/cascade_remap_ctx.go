@@ -56,8 +56,12 @@ type stagedRemap struct {
 	// publishCodeField 发布时用于构建 code → 新 ULID 的字段名
 	// （CascadeRelation.PublishCodeField）；留空则只发布旧 ULID → 新 ULID。
 	publishCodeFieldName string
-	// sourceHandlers 发布方 Handler 名（仅用于 L3 错误文案，让「发布方是谁没执行」可读）。
-	sourceHandlers []string
+	// sourceHandlers 消费命名空间 → 发布方 Handler 名（仅用于 L3 错误文案，
+	// 让「发布方是谁没执行」可读）。
+	//
+	// 按 key 索引而非单个切片：一个消费方关系可能声明多个 SourceRemapKey，
+	// 各自的发布方不同（heims §12.2）。
+	sourceHandlers map[string][]string
 	// done 是否已执行（防重复）。
 	done bool
 }
@@ -88,7 +92,7 @@ func stageRemapWithKey(
 	pkField string,
 	remapKey string,
 	publishCodeField string,
-	sourceHandlers []string,
+	sourceHandlers map[string][]string,
 ) context.Context {
 	// 只有「消费型」remaps（批内）与「发布键」都为空的批次才完全无事可做
 	if len(childData) == 0 {
@@ -183,15 +187,27 @@ func (h *GenericHandler[M]) consumeRemap(ctx context.Context, item *stagedRemap,
 	return nil
 }
 
-// buildRemapPlan 按发布/消费键决定映射来源。
+// buildRemapPlan 按发布/消费键决定映射来源，并**合并**两类来源。
 //
-//   - 任一 ReferenceRemap 配置了 SourceRemapKey → 跨批次消费：
-//     从 catalog 取快照；快照不存在 → ErrRemapSourceMissing（L3）。
-//     同时**跳过**批内映射的构建（映射来源互斥，避免把两种来源混在一张表里
-//     掩盖「发布方没执行」这一事实）。
-//   - 全部未配置 SourceRemapKey → 沿用 v1 批内行为（prepareRemap）。
+// 一个 CascadeRelation 可以同时声明两类绑定：
+//
+//	Remaps: []ReferenceRemap{
+//	    {Bindings: ...},                            // 批内自引用（映射由本批 childData 构建）
+//	    {SourceRemapKey: "x", Bindings: ...},       // 跨批次消费（映射来自 catalog）
+//	}
+//
+// 早期实现遇到任何 SourceRemapKey 就**只**走 catalog，导致 batchLocal 被静默丢弃
+// —— 批内引用不再重写且不报错，属无声漏项（heims §12.3）。现改为合并：
+//
+//   - 批内映射照常由 prepareRemap 构建（携带旧 PK 快照）；
+//   - 跨批次 namespace 照常从 catalog Resolve（缺失 → ErrRemapSourceMissing，L3）；
+//   - 两份 oldToNew / codeToNew 并集写入同一计划；**同 key 冲突时报
+//     ErrRemapInconsistent**（不静默取其一，与 Publish 的合并规则同口径）。
+//
+// 合并冲突理论上不该出现（旧 ULID / code 的归属唯一），一旦出现即为数据问题，
+// 故显式报错而非覆盖。
 func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRemap) (*RemapPlan, error) {
-	// 拆出跨批次消费声明（可能一个关系里既有批内声明又有跨批次声明）
+	// 拆出批内声明与跨批次声明（两类可共存，见函数注释）
 	var crossBatch []ReferenceRemap
 	var batchLocal []ReferenceRemap
 	for _, r := range item.remaps {
@@ -202,14 +218,14 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 		batchLocal = append(batchLocal, r)
 	}
 
+	// 批内映射：沿用 v1 行为（prepareRemap 已处理 bindings 为空 → nil）
+	batchPlan := prepareRemap(item.handlerName, batchLocal, item.childData, item.oldPKs)
+
 	if len(crossBatch) == 0 {
-		if len(batchLocal) == 0 {
-			return nil, nil
-		}
-		return prepareRemap(item.handlerName, batchLocal, item.childData, item.oldPKs), nil
+		return batchPlan, nil // 纯批内（或全空）
 	}
 
-	// 跨批次消费：按 namespace 归组，每个 namespace 一张计划（合并该 key 下全部 bindings）
+	// 跨批次消费：按 namespace 归组
 	byKey := make(map[string][]ReferenceBinding)
 	var order []string
 	for _, r := range crossBatch {
@@ -219,8 +235,6 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 		byKey[r.SourceRemapKey] = append(byKey[r.SourceRemapKey], r.Bindings...)
 	}
 
-	// 多个 namespace 合并为一张计划：不同发布键之间的映射表并集
-	// （互不污染的关键是各 namespace 的键值本就不重叠）。
 	catalog := remapCatalogFrom(ctx)
 	if catalog == nil {
 		return nil, fmt.Errorf(
@@ -229,27 +243,37 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 			errs.ErrRemapInvalidConfig, order[0], item.handlerName)
 	}
 
-	merged := &RemapPlan{
-		oldToNew:    make(map[string]string),
-		codeToNew:   make(map[string]string),
-		handlerName: item.handlerName,
-		sourceKey:   strings.Join(order, ","),
-		childData:   item.childData,
+	// 以批内计划为基底（若有），再并入各 namespace 的映射
+	merged := batchPlan
+	if merged == nil {
+		merged = &RemapPlan{
+			oldToNew:    make(map[string]string),
+			codeToNew:   make(map[string]string),
+			handlerName: item.handlerName,
+			childData:   item.childData,
+		}
 	}
+	if merged.oldToNew == nil {
+		merged.oldToNew = make(map[string]string)
+	}
+	if merged.codeToNew == nil {
+		merged.codeToNew = make(map[string]string)
+	}
+	merged.sourceKey = strings.Join(order, ",")
+
 	for _, key := range order {
 		snap, ok := catalog.Resolve(key)
 		if !ok {
 			// L3：发布方尚未执行 / key 拼错 —— 与「值无法解析」严格区分。
-			// 文案直接写明发布方 Handler，便于从「表单配置 → 级联顺序 → catalog」三层中定位。
+			// 文案直接写明**该 namespace 的**发布方 Handler，便于从
+			// 「表单配置 → 级联顺序 → catalog」三层中定位（heims §7.1-3 / §12.2）。
 			return nil, fmt.Errorf(
 				"%w: SourceRemapKey=%q 在本事务中尚无发布方；%s请检查 Cascades 声明顺序（消费方 %s）",
-				errs.ErrRemapSourceMissing, key, sourceHandlerHint(item.sourceHandlers), item.handlerName)
+				errs.ErrRemapSourceMissing, key,
+				sourceHandlerHint(remapPublishersFor(item.sourceHandlers, key)), item.handlerName)
 		}
-		for k, v := range snap.oldToNew {
-			merged.oldToNew[k] = v
-		}
-		for k, v := range snap.codeToNew {
-			merged.codeToNew[k] = v
+		if err := mergeIntoPlan(merged, snap, key); err != nil {
+			return nil, err
 		}
 		merged.bindings = append(merged.bindings, byKey[key]...)
 	}
@@ -257,6 +281,30 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 		return nil, nil
 	}
 	return merged, nil
+}
+
+// mergeIntoPlan 把一个 namespace 快照的映射并入计划，同 key 冲突时报
+// ErrRemapInconsistent（heims §12.3 的合并要求）。
+func mergeIntoPlan(plan *RemapPlan, snap *RemapSnapshot, key string) error {
+	for _, old := range sortedKeys(snap.oldToNew) {
+		newULID := snap.oldToNew[old]
+		if prev, ok := plan.oldToNew[old]; ok && prev != newULID {
+			return fmt.Errorf(
+				"%w: 命名空间 %q 中旧 ULID=%s 映射为 %s，与本批已构建的映射 %s 冲突",
+				errs.ErrRemapInconsistent, key, old, newULID, prev)
+		}
+		plan.oldToNew[old] = newULID
+	}
+	for _, code := range sortedKeys(snap.codeToNew) {
+		newULID := snap.codeToNew[code]
+		if prev, ok := plan.codeToNew[code]; ok && prev != newULID {
+			return fmt.Errorf(
+				"%w: 命名空间 %q 中 code=%s 映射为 %s，与本批已构建的映射 %s 冲突",
+				errs.ErrRemapInconsistent, key, code, newULID, prev)
+		}
+		plan.codeToNew[code] = newULID
+	}
+	return nil
 }
 
 // sourceHandlerHint 生成 L3 错误里「发布方 Handler=...」的提示。
@@ -427,23 +475,59 @@ func backfillNewPKs[M service.Record](item *stagedRemap, entities []*M, pkField 
 	}
 }
 
-// resolveRemapPublishers 找出「发布 key 等于 rel.RemapKey」的发布方 Handler 名。
+// resolveRemapPublishers 找出本 Handler 的**各个消费命名空间**对应的发布方 Handler 名。
 //
-// 为什么需要：消费方配置里只写 `SourceRemapKey`（字符串），看不到发布方在哪个
+// 为什么需要：消费方配置里只写 `SourceRemapKey`（字符串 key），看不到发布方在哪个
 // Handler 上。L3 的错误文案要求写明「发布方 Handler=... 可能未执行」，否则排查者
-// 必须跨「表单配置 → 级联声明顺序 → remap catalog」三层才能定位。
+// 必须跨「表单配置 → 级联声明顺序 → remap catalog」三层才能定位（heims §7.1-3）。
 //
-// 只能在运行时/启动期（有 handlerReg 时）解析：遍历注册表，找配置了
-// `Cascades[].RemapKey == key` 的 Handler。找不到返回 nil（不影响判定语义，
-// 仅少一句提示）。
-func resolveRemapPublishers(rel CascadeRelation, reg *HandlerRegistry) []string {
-	key := rel.RemapKey
-	if key == "" || reg == nil {
+// 注意作用对象是**消费键**而非 rel.RemapKey：消费方关系（form_list_column /
+// form_detail_field / form_validation）自身没有 RemapKey，发布方 key 在
+// `rel.Remaps[].SourceRemapKey` 里。早期实现误读 rel.RemapKey，导致消费侧
+// 登记的发布方恒为 nil、L3 文案缺提示（heims §12.2）。
+//
+// **解析依据只能是「父 Handler 的 Cascades 声明」**：
+//
+//	发布方声明 `RemapKey` 的位置是**父 Handler 的 Cascades**，而不是发布方子
+//	Handler 自身（v2_field 是个叶子 Handler，它的 config 里没有 RemapKey）。
+//	因此遍历 HandlerRegistry 是无效的 —— 注册表里只有子 Handler，它们无法自述
+//	「我作为某个父关系的子分支发布了什么」。故由调用方把**父 Handler 的全部
+//	Cascades** 传进来，按 key 反查声明了该 RemapKey 的关系的 HandlerName。
+//
+// 找不到时 map 中不出现该 key（不影响判定语义，仅少一句提示）。
+func resolveRemapPublishers(rel CascadeRelation, siblings []CascadeRelation) map[string][]string {
+	// 先收集本关系声明过的全部消费键
+	keys := make([]string, 0, len(rel.Remaps))
+	seen := make(map[string]bool)
+	for _, r := range rel.Remaps {
+		if r.SourceRemapKey != "" && !seen[r.SourceRemapKey] {
+			seen[r.SourceRemapKey] = true
+			keys = append(keys, r.SourceRemapKey)
+		}
+	}
+	if len(keys) == 0 {
 		return nil
 	}
-	// 发布方按定义就是 rel.HandlerName 这个子 Handler 本身（映射由本批子记录产生），
-	// 不必遍历注册表 —— 直接给出即可，这正是 L3 文案里最该写出的名字。
-	return []string{rel.HandlerName}
+
+	out := make(map[string][]string, len(keys))
+	for _, key := range keys {
+		// 在同一 Cascades 数组内找声明了 RemapKey == key 的关系，
+		// 其 HandlerName 即发布方 Handler（与 L2 的顺序校验同源）。
+		for _, sib := range siblings {
+			if sib.RemapKey == key && sib.HandlerName != "" {
+				out[key] = appendUnique(out[key], sib.HandlerName)
+			}
+		}
+	}
+	return out
+}
+
+// remapPublishersFor 返回某个命名空间的发布方 Handler 名（可能多个）。
+func remapPublishersFor(publishers map[string][]string, key string) []string {
+	if len(publishers) == 0 {
+		return nil
+	}
+	return publishers[key]
 }
 
 // remapDescriber 能自述「本 Handler 发布了哪些 remap 命名空间」的 Handler。

@@ -91,13 +91,16 @@ func (d *remapV2Field) SelfFKField() string      { return "" }
 
 // remapV2Column 消费方子实体（模拟 list_column：标量引用 + 仅 code 场景）。
 type remapV2Column struct {
-	ULID      string `gorm:"column:column_ulid;primaryKey;size:26" json:"ulid"`
-	ParentID  string `gorm:"column:parent_ulid;size:26" json:"parent_ulid"`
-	ColCode   string `gorm:"column:col_code;size:64" json:"col_code"`
+	ULID     string `gorm:"column:column_ulid;primaryKey;size:26" json:"ulid"`
+	ParentID string `gorm:"column:parent_ulid;size:26" json:"parent_ulid"`
+	ColCode  string `gorm:"column:col_code;size:64" json:"col_code"`
 
-	// 标量引用：指向 write_field
+	// 标量引用：指向 write_field（跨批次消费场景）
 	FieldULID string `gorm:"column:field_ulid;size:26" json:"field_ulid"`
 	FieldCode string `gorm:"column:field_code;size:64" json:"field_code"`
+
+	// 标量引用：指向同批的另一个列（批内自引用场景，验证 §12.3 混用）
+	ColULID string `gorm:"column:col_ulid;size:26" json:"col_ulid"`
 
 	// 点号路径：嵌套 JSON
 	Options string `gorm:"column:options;type:json" json:"options"`
@@ -944,5 +947,285 @@ func TestV2EmptyCodeAndULIDSkipped(t *testing.T) {
 	}
 	if _, bad := oldToNew[""]; bad {
 		t.Fatal("空旧 ULID 不应入映射")
+	}
+}
+
+// ============================================================
+// 用例 13：L3 错误文案必须含**真实发布方 Handler 名**（heims §12.2）
+// ============================================================
+
+func TestV2L3ErrorMentionsRealPublisher(t *testing.T) {
+	db := openRemapV2DB(t)
+	// 场景：发布方**已声明**（RemapKey 存在，故 L3 能给出名字），
+	// 但它在消费方**之后**执行 —— 为绕过 L2 的构造期校验（同数组顺序），
+	// 把发布方放到独立的父 Handler 里（跨 Handler 子树，L2 会跳过），
+	// 这样运行时才会真正走到 L3。
+	publishDeclared := true
+	h, reg := remapV2Handlers(t, db, nil, crossScalarRemaps(), nil, v2RemapKey)
+	_ = publishDeclared
+	_ = reg
+
+	// 直接构造「消费方先于发布方」的运行时现场：手工用带 RemapKey 声明的
+	// Cascades 调 resolveRemapPublishers 验证映射关系，再用无发布方的 catalog 触发 L3。
+	// —— 见 TestV2L3PublisherResolvedCrossHandler（正向解析）。
+	//
+	// 此处验证「发布方确实缺位（key 未声明）」时文案的行为，
+	// 以及「已声明但未执行」时文案**必须**给出名字：
+	rel := h.config.Cascades[1] // list_column（消费方）
+	pubs := resolveRemapPublishers(rel, h.config.Cascades)
+	if len(remapPublishersFor(pubs, v2RemapKey)) == 0 {
+		t.Fatal("前置条件不成立：发布方应可解析")
+	}
+	hint := sourceHandlerHint(remapPublishersFor(pubs, v2RemapKey))
+	if !strings.Contains(hint, "v2_field") {
+		t.Fatalf("★ 提示应含发布方 Handler 名 v2_field（§12.2），实际: %q", hint)
+	}
+	if !strings.Contains(hint, "可能未执行") {
+		t.Fatalf("提示应含「可能未执行」语义，实际: %q", hint)
+	}
+
+	// 端到端：故意把发布方声明去掉（publishKey=""）→ 无从得知发布方是谁，
+	// 文案仍须给出 key 且报 ErrRemapSourceMissing（不误报、不静默）
+	h2, _ := remapV2Handlers(t, db, nil, crossScalarRemaps(), nil, "")
+	raw := map[string]any{
+		"code": "P13", "name": "v1",
+		"fields":  []map[string]any{{"field_code": "amount"}},
+		"columns": []map[string]any{{"col_code": "c1", "field_code": "amount"}},
+	}
+	ctx := context.WithValue(context.Background(), rawCreateMapsKey{}, []map[string]any{raw})
+	_, err := h2._doCreate(ctx, []service.CrudRequest[*remapV2Parent]{v2Req(raw)})
+	if err == nil {
+		t.Fatal("发布方缺失应报错")
+	}
+	if !errors.Is(err, errs.ErrRemapSourceMissing) {
+		t.Fatalf("应为 ErrRemapSourceMissing, 实际: %v", err)
+	}
+	if !strings.Contains(err.Error(), v2RemapKey) {
+		t.Fatalf("文案应含 SourceRemapKey, 实际: %s", err.Error())
+	}
+}
+
+// TestV2L3PublisherResolvedCrossHandler 验证发布方在**另一个 Handler 子树**时，
+// L3 文案仍能给出正确名字（跨 Handler 场景，对应 heims 的 write_section → write_field）。
+func TestV2L3PublisherResolvedCrossHandler(t *testing.T) {
+	db := openRemapV2DB(t)
+	h, _ := remapV2Handlers(t, db, nil, crossScalarRemaps(), nil, v2RemapKey)
+
+	// 从父关系反查：消费键 v2.write_field 的发布方应为 "v2_field"
+	// （依据是**父 Handler 自己的 Cascades**：声明 RemapKey == v2.write_field 的关系的
+	//  HandlerName。发布方子 Handler 自身 config 里没有 RemapKey，故不能查注册表。）
+	rel := h.config.Cascades[1] // list_column（消费方）
+	pubs := resolveRemapPublishers(rel, h.config.Cascades)
+	got := remapPublishersFor(pubs, v2RemapKey)
+	if len(got) == 0 {
+		t.Fatalf("★ 应能反查出发布方 Handler（§12.2），实际为空: %v", pubs)
+	}
+	found := false
+	for _, name := range got {
+		if name == "v2_field" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("★ 发布方应为 v2_field，实际: %v", got)
+	}
+
+	// 同一关系若声明了多个消费键，应各自解析（此处只有一个）
+	if len(pubs) != 1 {
+		t.Fatalf("应只解析出 1 个消费键, 实际: %v", pubs)
+	}
+}
+
+// ============================================================
+// 用例 14：同一关系混用批内 + 跨批次绑定 → 两者都必须生效（heims §12.3）
+// ============================================================
+
+// mixedRemaps 同时声明批内绑定与跨批次消费绑定。
+//
+// 批内绑定写在嵌套 JSON 列 options 内（target.col_ulid + 同级 code 兜底），
+// 用于验证：早期实现在检测到任何 SourceRemapKey 时就**只**走 catalog、
+// 静默丢弃 batchLocal（heims §12.3）。
+//
+// 批内映射的来源是本批 childData 自身（prepareRemap 用 oldPKs + col_code 构建），
+// 与跨批次的 write_field 命名空间互不干扰。
+func mixedRemaps() []ReferenceRemap {
+	return []ReferenceRemap{
+		// 批内声明（无 SourceRemapKey）：prepareRemap 用本批子记录构建映射
+		{
+			SourceCodeField: "col_code",
+			Bindings: []ReferenceBinding{
+				{Field: "col_ulid", Mode: RemapModeScalar},
+			},
+		},
+		// 跨批次声明：消费 write_field 命名空间
+		{
+			SourceRemapKey: v2RemapKey,
+			Bindings: []ReferenceBinding{
+				{Field: "field_ulid", CodeField: "field_code", Mode: RemapModeScalar},
+			},
+		},
+	}
+}
+
+func TestV2MixedBatchLocalAndCrossBatchBothApply(t *testing.T) {
+	db := openRemapV2DB(t)
+	h, _ := remapV2Handlers(t, db, nil, mixedRemaps(), nil, v2RemapKey)
+
+	raw := map[string]any{
+		"code": "P14", "name": "v1",
+		"fields": []map[string]any{{"field_code": "amount"}},
+		"columns": []map[string]any{
+			// c1 的 col_ulid 批内自引用 → 指向 another 这个列的**旧 ULID**，
+			// 在同批次重建后应被重写为 another 的新 ULID。
+			// 但 create 阶段没有「旧 ULID」，故批内引用只在 update/版本重建时才有意义；
+			// 这里先建两条列，稍后 update 验证。
+			{"col_code": "c1", "field_code": "amount"},
+			{"col_code": "another", "field_code": "amount"},
+		},
+	}
+	v1 := v2Create(t, h, raw)
+
+	var colsV1 []remapV2Column
+	db.Where("parent_ulid = ?", v1).Order("col_code").Find(&colsV1)
+	if len(colsV1) != 2 {
+		t.Fatalf("v1 应有 2 个列, 实际 %d", len(colsV1))
+	}
+	// col_code 排序：another < c1
+	anotherV1, c1V1 := colsV1[0], colsV1[1]
+
+	// 建后把 c1.col_ulid 指向 another（模拟真实数据里的批内引用）
+	if err := db.Model(&remapV2Column{}).Where("column_ulid = ?", c1V1.ULID).
+		Update("col_ulid", anotherV1.ULID).Error; err != nil {
+		t.Fatalf("建立批内引用: %v", err)
+	}
+
+	// 版本化 update → 子表重建为新 ULID；两类绑定都必须重写。
+	// 回传子表时带 `ulid`（行主键），框架据此建立「旧列 ULID → 新列 ULID」的批内映射
+	// —— 没有它就没有 oldToNew，批内引用无从解析。
+	updateRaw := map[string]any{
+		"id": v1, "name": "v2",
+		"fields": []map[string]any{{"field_code": "amount"}},
+		"columns": []map[string]any{
+			{"ulid": c1V1.ULID, "col_code": "c1", "field_code": "amount",
+				"col_ulid": anotherV1.ULID},
+			{"ulid": anotherV1.ULID, "col_code": "another", "field_code": "amount"},
+		},
+	}
+	v2, err := v2Update(t, h, updateRaw)
+	if err != nil {
+		t.Fatalf("_doUpdate: %v", err)
+	}
+
+	var fieldsV2 []remapV2Field
+	db.Where("parent_ulid = ?", v2).Find(&fieldsV2)
+	amountV2 := fieldsV2[0].ULID
+
+	var colsV2 []remapV2Column
+	db.Where("parent_ulid = ?", v2).Order("col_code").Find(&colsV2)
+	if len(colsV2) != 2 {
+		t.Fatalf("v2 应有 2 个列, 实际 %d", len(colsV2))
+	}
+	anotherV2, c1V2 := colsV2[0], colsV2[1]
+
+	// ★ 跨批次绑定生效：两条列的 field_ulid 都指向 v2 的 amount 字段
+	for _, c := range colsV2 {
+		if c.FieldULID != amountV2 {
+			t.Fatalf("★ 跨批次绑定应指向 v2 字段: col=%s got=%s want=%s",
+				c.ColCode, c.FieldULID, amountV2)
+		}
+	}
+	// ★ 批内绑定同时生效（早期实现会被静默丢弃）：c1.col_ulid → v2 的 another 列
+	if c1V2.ColULID != anotherV2.ULID {
+		t.Fatalf("★ 批内绑定应指向 v2 的 another 列（§12.3）: got=%s want=%s",
+			c1V2.ColULID, anotherV2.ULID)
+	}
+	if c1V2.ColULID == anotherV1.ULID {
+		t.Fatal("★ 批内绑定仍指向 v1 的列 —— batchLocal 被静默丢弃")
+	}
+}
+
+// ============================================================
+// 用例 15：Publish 原子性 —— 冲突时报错且不留任何部分写入（heims §12.4）
+// ============================================================
+
+func TestV2PublishAtomicOnConflict(t *testing.T) {
+	c := NewRemapCatalog()
+	// 先建立一条已有映射
+	if err := c.Publish("ns", map[string]string{"existing": "n0"}, nil, "p0"); err != nil {
+		t.Fatalf("预置发布: %v", err)
+	}
+
+	// 本批：合法条目（a→n1、b→n2）+ 末尾一条冲突（existing→nX）
+	// 排序后 "existing" 会排在 "a"/"b" 之后，因此若实现是「边遍历边写入」，
+	// a/b 会残留在 catalog 中。
+	err := c.Publish("ns",
+		map[string]string{"a": "n1", "b": "n2", "existing": "nX"}, nil, "p1")
+	if !errors.Is(err, errs.ErrRemapInconsistent) {
+		t.Fatalf("应报 ErrRemapInconsistent, 实际: %v", err)
+	}
+
+	// ★ 原子性：失败的批次不得留下任何部分写入
+	snap, _ := c.Resolve("ns")
+	if _, bad := snap.oldToNew["a"]; bad {
+		t.Fatalf("★ 冲突批次不应留下部分写入（a 泄漏）: %v", snap.oldToNew)
+	}
+	if _, bad := snap.oldToNew["b"]; bad {
+		t.Fatalf("★ 冲突批次不应留下部分写入（b 泄漏）: %v", snap.oldToNew)
+	}
+	// 原有映射不受影响
+	if snap.oldToNew["existing"] != "n0" {
+		t.Fatalf("原有映射不应被改写: %v", snap.oldToNew)
+	}
+	// code 侧同理
+	err = c.Publish("ns", nil, map[string]string{"c1": "n1", "existingC": "n2"}, "p2")
+	if err != nil {
+		t.Fatalf("合法 code 发布: %v", err)
+	}
+	err = c.Publish("ns", nil, map[string]string{"c2": "nX", "existingC": "nY"}, "p3")
+	if !errors.Is(err, errs.ErrRemapInconsistent) {
+		t.Fatalf("code 冲突应报错, 实际: %v", err)
+	}
+	snap, _ = c.Resolve("ns")
+	if _, bad := snap.codeToNew["c2"]; bad {
+		t.Fatalf("★ code 冲突批次不应留下部分写入: %v", snap.codeToNew)
+	}
+	if snap.codeToNew["existingC"] != "n2" {
+		t.Fatalf("原有 code 映射不应被改写: %v", snap.codeToNew)
+	}
+}
+
+// ============================================================
+// 用例 16：mergeIntoPlan 的同 key 冲突检测（§12.3 合并路径）
+// ============================================================
+
+func TestV2MergeIntoPlanConflict(t *testing.T) {
+	plan := &RemapPlan{
+		oldToNew:    map[string]string{"o1": "n1"},
+		codeToNew:   map[string]string{"c1": "n1"},
+		handlerName: "h",
+	}
+	// 同 key 同值 → 幂等通过
+	snapSame := &RemapSnapshot{
+		oldToNew: map[string]string{"o1": "n1"}, codeToNew: map[string]string{"c1": "n1"},
+	}
+	if err := mergeIntoPlan(plan, snapSame, "ns"); err != nil {
+		t.Fatalf("同值合并应幂等通过, 实际: %v", err)
+	}
+	// 同 key 不同值 → 报 ErrRemapInconsistent
+	snapDiff := &RemapSnapshot{
+		oldToNew: map[string]string{"o1": "nX"}, codeToNew: nil,
+	}
+	if err := mergeIntoPlan(plan, snapDiff, "ns"); !errors.Is(err, errs.ErrRemapInconsistent) {
+		t.Fatalf("旧 ULID 冲突应报错, 实际: %v", err)
+	}
+	// 新增 key → 正常并入
+	snapNew := &RemapSnapshot{
+		oldToNew: map[string]string{"o2": "n2"}, codeToNew: map[string]string{"c2": "n2"},
+	}
+	if err := mergeIntoPlan(plan, snapNew, "ns"); err != nil {
+		t.Fatalf("新增映射应并入, 实际: %v", err)
+	}
+	if plan.oldToNew["o2"] != "n2" || plan.codeToNew["c2"] != "n2" {
+		t.Fatalf("新增映射未并入: %v / %v", plan.oldToNew, plan.codeToNew)
 	}
 }

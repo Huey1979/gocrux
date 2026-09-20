@@ -100,6 +100,13 @@ func remapCatalogFrom(ctx context.Context) *RemapCatalog {
 //
 // 空 key / 空 value 不参与映射（调用方已过滤，此处再兜一层）。
 // 返回的错误包装 errs.ErrRemapInconsistent，调用方应直接让事务失败。
+//
+// **原子性**：整批先校验、全部通过后才写入。任一条冲突则本次调用**不留任何痕迹**
+// —— 早期实现边遍历边写入，前半批已落、后半批报错，留下部分映射（heims §12.4）。
+// 虽然正常调用方会让事务失败从而丢弃 catalog，但「冲突不污染」不应只是巧合，
+// 故此方法保证为强不变式。
+//
+// 校验与写入分两趟是刻意的：只读遍历时才可能提前返回，避免写入后再回滚。
 func (c *RemapCatalog) Publish(key string, oldToNew, codeToNew map[string]string, publisher string) error {
 	if c == nil || key == "" {
 		return nil
@@ -109,37 +116,45 @@ func (c *RemapCatalog) Publish(key string, oldToNew, codeToNew map[string]string
 	}
 	snap := c.namespace(key)
 
-	// 排序后遍历，保证冲突报错内容稳定（map 遍历顺序随机 → 错误信息不确定会干扰测试）
+	// 排序后遍历，保证冲突报错内容稳定（map 遍历顺序随机 → 错误信息不确定会干扰测试）。
+	// 第一趟：全量校验，不写入。
 	for _, oldULID := range sortedKeys(oldToNew) {
 		newULID := oldToNew[oldULID]
 		if oldULID == "" || newULID == "" {
 			continue
 		}
-		if prev, ok := snap.oldToNew[oldULID]; ok {
-			if prev != newULID {
-				return fmt.Errorf(
-					"%w: 命名空间 %q 中旧 ULID=%s 已被映射为 %s，本次发布又映射为 %s"+
-						"（发布方 %s；同一旧记录被重建为不同新记录，不能静默取其一）",
-					errs.ErrRemapInconsistent, key, oldULID, prev, newULID, publisher)
-			}
-			continue // 幂等
+		if prev, ok := snap.oldToNew[oldULID]; ok && prev != newULID {
+			return fmt.Errorf(
+				"%w: 命名空间 %q 中旧 ULID=%s 已被映射为 %s，本次发布又映射为 %s"+
+					"（发布方 %s；同一旧记录被重建为不同新记录，不能静默取其一）",
+				errs.ErrRemapInconsistent, key, oldULID, prev, newULID, publisher)
 		}
-		snap.oldToNew[oldULID] = newULID
 	}
-
 	for _, code := range sortedKeys(codeToNew) {
 		newULID := codeToNew[code]
 		if code == "" || newULID == "" {
 			continue
 		}
-		if prev, ok := snap.codeToNew[code]; ok {
-			if prev != newULID {
-				return fmt.Errorf(
-					"%w: 命名空间 %q 中 code=%s 已被映射为 %s，本次发布又映射为 %s"+
-						"（发布方 %s；同 code 字段必须唯一）",
-					errs.ErrRemapInconsistent, key, code, prev, newULID, publisher)
-			}
-			continue // 幂等
+		if prev, ok := snap.codeToNew[code]; ok && prev != newULID {
+			return fmt.Errorf(
+				"%w: 命名空间 %q 中 code=%s 已被映射为 %s，本次发布又映射为 %s"+
+					"（发布方 %s；同 code 字段必须唯一）",
+				errs.ErrRemapInconsistent, key, code, prev, newULID, publisher)
+		}
+	}
+
+	// 第二趟：校验通过，写入（同行覆盖为幂等，值相同）
+	for _, oldULID := range sortedKeys(oldToNew) {
+		newULID := oldToNew[oldULID]
+		if oldULID == "" || newULID == "" {
+			continue
+		}
+		snap.oldToNew[oldULID] = newULID
+	}
+	for _, code := range sortedKeys(codeToNew) {
+		newULID := codeToNew[code]
+		if code == "" || newULID == "" {
+			continue
 		}
 		snap.codeToNew[code] = newULID
 	}

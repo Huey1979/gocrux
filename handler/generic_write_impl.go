@@ -133,7 +133,7 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 				if len(rel.Remaps) > 0 || rel.RemapKey != "" {
 					childCtx = stageRemapWithKey(cascadeCtx, rel.HandlerName, rel.Remaps,
 						allChildData, childHandler.PKField(), rel.RemapKey,
-						rel.PublishCodeField, resolveRemapPublishers(rel, h.handlerReg))
+						rel.PublishCodeField, resolveRemapPublishers(rel, h.config.Cascades))
 				}
 
 				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
@@ -274,7 +274,7 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 						if len(rel.Remaps) > 0 || rel.RemapKey != "" {
 							childCtx = stageRemapWithKey(cascadeCtx, rel.HandlerName, rel.Remaps,
 								childData, childHandler.PKField(), rel.RemapKey,
-								rel.PublishCodeField, resolveRemapPublishers(rel, h.handlerReg))
+								rel.PublishCodeField, resolveRemapPublishers(rel, h.config.Cascades))
 						}
 
 						// 当 passToChild=true 时（版本化 or 非版本化全量替换），

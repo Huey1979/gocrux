@@ -696,9 +696,11 @@ func (p *RemapPlan) unresolvedErr(field, ulid, code string) error {
 		}
 		detail += fmt.Sprintf("code=%s", code)
 	}
+	// 说明映射范围：合并计划既有批内映射也有跨批次映射，
+	// 因此文案不写死单一来源（否则批内引用失败时会误导排查方向）。
 	scope := "本批次中"
 	if p.sourceKey != "" {
-		scope = fmt.Sprintf("命名空间 %q 的映射中", p.sourceKey)
+		scope = fmt.Sprintf("本批次与命名空间 %q 的合并映射中", p.sourceKey)
 	}
 	return fmt.Errorf("%w: 子实体 %s 的字段 %s 的%s 在%s找不到对应目标",
 		errs.ErrRemapUnresolved, p.handlerName, field, detail, scope)

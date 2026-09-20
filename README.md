@@ -1538,12 +1538,22 @@ L2 只校验**同一数组内**的顺序：若发布方在别的 Handler 子树�
   由 `TxCoordinator.Run` 入口创建；
 - **同命名空间多批发布合并**：同一 old ULID / code 映射到不同新目标 →
   `ErrRemapInconsistent`（不静默取其一）；映射到相同目标 → 幂等忽略；
+- **`Publish` 是原子的**：整批先校验、全部通过后才写入。任一条冲突则本次调用
+  不留任何痕迹（不会出现「前半批已落、后半批报错」的部分映射）；
 - **`Resolve` 是只读快照**：多个消费方可重复读取互不影响，返回的是**调用时刻**的
   合并结果（若消费方之间又有新发布方写入，后者能看到更新内容）；
+- **批内与跨批次可混用**：同一 `CascadeRelation` 的 `Remaps` 里既可写批内声明
+  （无 `SourceRemapKey`），也可写跨批次声明，框架**合并两类映射**后统一重写；
+  合并时同 key 冲突 → `ErrRemapInconsistent`（旧版本曾静默丢弃批内声明）；
 - **空 code / 空旧 ULID 不参与映射且不报错**（必填约束属应用侧发布校验）；
 - **错误三分**（便于区分配置问题与数据问题）：命名空间无发布方
   `ErrRemapSourceMissing` / 值不在映射中 `ErrRemapUnresolved` /
   ULID 与 code 冲突 `ErrRemapInconsistent`。
+
+> **L3 文案会给出发布方 Handler 名**：发布方声明 `RemapKey` 的位置是
+> **父 Handler 的 `Cascades`**（发布方子 Handler 自身配置里没有该键），
+> 因此框架由父 Handler 的 `Cascades` 反查 `RemapKey == <缺失的 key>` 的关系，
+> 取其 `HandlerName` 写入提示。若该 key 完全未声明则只报 key（无从得知发布方是谁）。
 
 ### ChildrenWrapKey
 
