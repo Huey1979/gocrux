@@ -62,7 +62,25 @@ type stagedRemap struct {
 	// 按 key 索引而非单个切片：一个消费方关系可能声明多个 SourceRemapKey，
 	// 各自的发布方不同（heims §12.2）。
 	sourceHandlers map[string][]string
-	// done 是否已执行（防重复）。
+
+	// processed 已处理过的 childData 索引（按 map 身份去重）。
+	//
+	// 为什么需要：本批子记录可能被**拆成多次钩子调用**送达 ——
+	// service 逐条 Update 时每次只传一个实体（heims §13），
+	// 因此不能像早期实现那样用一次性 done 标记「本批已处理完」。
+	// 改为按索引累积：每次处理新到的那几条，并记录已处理。
+	processed map[int]bool
+
+	// publishedOld / publishedCode 已发布过的键 → 值（增量发布的去重标记）。
+	// 每次钩子调用都会把**当前已累积的全部映射**再发布一次（Publish 幂等），
+	// 这样无需知道「批次何时结束」也能保证最终完整。
+	//
+	// 必须记录**值**而非仅键：后续调用可能为同一键解析出更完整的新 ULID，
+	// 只按键去重会把这种修正挡掉。
+	publishedOld  map[string]string
+	publishedCode map[string]string
+
+	// done 是否已完成（仅表示「至少处理过一次」，不再用于跳过后续调用）。
 	done bool
 }
 
@@ -118,13 +136,24 @@ func stageRemapWithKey(
 // applyStagedRemap 执行本 Handler 名下登记的重映射（service BeforeCreatePersist 钩子）。
 //
 // 时机：主键 ULID 已生成、记录尚未 INSERT。
+//
+// **可多次调用**（heims §13 的关键约束）：同一登记项可能被拆成多次钩子调用送达 ——
+// 例如 service 逐条 Update 时每次只传一个实体。因此这里**不能**用一次性 done 标记
+// 就跳过后续调用（早期实现的缺陷：只有第一条子记录的新 ULID 进入映射，
+// 其余记录以「旧 ULID」发布，消费方找不到目标）。
+//
+// 改为按记录**累积**：
+//   - 每次调用只重写本次送达的那几条（其余尚未生成新 ULID，重写也无意义）；
+//   - 累积已处理索引，避免同一条被重复处理；
+//   - 每次调用后把「当前已累积的全部映射」重新发布一遍（Publish 对同键同值为幂等），
+//     这样**无需知道批次何时结束**也能保证 catalog 最终拿到完整映射。
 func (h *GenericHandler[M]) applyStagedRemap(ctx context.Context, entities []*M) error {
 	items, _ := ctx.Value(remapCtxKey{}).([]*stagedRemap)
 	if len(items) == 0 {
 		return nil
 	}
 	for _, item := range items {
-		if item == nil || item.done || item.handlerName != h.svcName {
+		if item == nil || item.handlerName != h.svcName {
 			continue
 		}
 		item.done = true
@@ -133,6 +162,73 @@ func (h *GenericHandler[M]) applyStagedRemap(ctx context.Context, entities []*M)
 		}
 	}
 	return nil
+}
+
+// matchChildIndexes 把本次送达的实体对应到 childData 的下标。
+//
+// 对应策略（按可靠性排序）：
+//  1. 实体主键能在 childData 里找到相同 ULID → 按下标精确匹配
+//     （最可靠：新 ULID 已生成且被回填进 childData 同一条）；
+//  2. 找不到时退回「第一个未处理且主键为空的 childData 下标」
+//     （逐条赠序送达的常见形态：新 ULID 尚未回填）。
+//
+// 返回的下标集合去除了已处理过的项。
+func matchChildIndexes[M service.Record](item *stagedRemap, entities []*M) []int {
+	if item == nil || len(item.childData) == 0 || len(entities) == 0 {
+		return nil
+	}
+	if item.processed == nil {
+		item.processed = make(map[int]bool)
+	}
+
+	// ① 先按「实体 ULID == childData 中现有 ULID」精确匹配
+	byULID := make(map[string]int, len(item.childData))
+	for j, rec := range item.childData {
+		if rec == nil {
+			continue
+		}
+		if v, ok := readPKValue(rec, item.pkField); ok && v != nil {
+			if s := scalarToString(v); s != "" {
+				byULID[s] = j
+			}
+		}
+	}
+
+	var out []int
+	claimed := make(map[int]bool)
+	for _, ent := range entities {
+		if ent == nil {
+			continue
+		}
+		if pk := extractPKFromResult(ent); pk != nil {
+			if j, ok := byULID[scalarToString(pk)]; ok && !item.processed[j] && !claimed[j] {
+				out = append(out, j)
+				claimed[j] = true
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+
+	// ② 退回顺序匹配：取未处理的下标（按位置对应，与 stageRemap 登记顺序一致）
+	need := 0
+	for _, ent := range entities {
+		if ent != nil {
+			need++
+		}
+	}
+	for j := range item.childData {
+		if len(out) >= need {
+			break
+		}
+		if item.processed[j] || claimed[j] {
+			continue
+		}
+		out = append(out, j)
+		claimed[j] = true
+	}
+	return out
 }
 
 // runRemap 构建映射计划并重写本批子数据中的引用。
@@ -149,24 +245,33 @@ func (h *GenericHandler[M]) applyStagedRemap(ctx context.Context, entities []*M)
 // 若先发布再消费，「自产自销」会把本批自身的映射混进消费视图，
 // 掩盖跨批次缺失问题（消费方即使拿不到发布方也会“看起来成功”）。
 func (h *GenericHandler[M]) runRemap(ctx context.Context, item *stagedRemap, entities []*M) error {
-	// 0. 把 service 生成的新主键回填进 childData（按位置对应，见 stageRemap 的登记顺序）
-	backfillNewPKs(item, entities, h.PKField())
+	// 0. 定位本次送达的实体在 childData 中的下标，并把新主键回填到那几条
+	idxs := matchChildIndexes(item, entities)
+	backfillNewPKsAt(item, entities, idxs, h.PKField())
+	for _, j := range idxs {
+		item.processed[j] = true
+	}
 
-	// 1. 消费：重写本批引用
-	if err := h.consumeRemap(ctx, item, entities); err != nil {
+	// 1. 消费：重写**本次这几条**的引用。
+	//    尚未生成新 ULID 的子记录若一起重写，映射里还没有它们的目标 → 会误报
+	//    「无法解析」，因此按子集重写。
+	if err := h.consumeRemap(ctx, item, entities, idxs); err != nil {
 		return err
 	}
 
-	// 2. 发布：本批执行完毕，把映射交付给后续批次
-	if err := publishRemap(ctx, item, h.svcName); err != nil {
-		return err
-	}
-	return nil
+	// 2. 发布：把**当前已累积的全部映射**发布出去（Publish 幂等）。
+	//    不等待「批次全部结束」也能保证最终完整 —— 因为每次调用都会带上
+	//    之前已回填的记录（它们的 map 已被就地改写）。
+	return publishRemap(ctx, item, h.svcName)
 }
 
 // consumeRemap 用映射（批内自建 或 跨批次 catalog）重写本批子数据中的引用。
-func (h *GenericHandler[M]) consumeRemap(ctx context.Context, item *stagedRemap, entities []*M) error {
-	plan, err := h.buildRemapPlan(ctx, item)
+func (h *GenericHandler[M]) consumeRemap(ctx context.Context, item *stagedRemap, entities []*M, idxs []int) error {
+	subset := item.subset(idxs)
+	if len(subset) == 0 {
+		return nil
+	}
+	plan, err := h.buildRemapPlan(ctx, item, subset)
 	if err != nil {
 		return err
 	}
@@ -177,14 +282,31 @@ func (h *GenericHandler[M]) consumeRemap(ctx context.Context, item *stagedRemap,
 	if err := callCustomRemapper(ctx, h, plan); err != nil {
 		return err
 	}
-	// 原地重写本批次所有引用字段；解析失败 → 事务失败。
+	// 原地重写**本次子集**的引用字段；解析失败 → 事务失败。
 	// 注意：此时 _beforeCreate 已把 childData 灌入 entities，
 	// 改写 childData 不会被再次读取，故必须同步回写实体（见 mergeRemappedBack）。
-	if err := applyRemap(plan, item.childData); err != nil {
+	if err := applyRemap(plan, subset); err != nil {
 		return err
 	}
-	mergeRemappedBack(item, entities)
+	mergeRemappedBackSubset(entities, subset)
 	return nil
+}
+
+// subset 取 childData 的指定下标子集（保持顺序）。idxs 为 nil 时返回全部。
+func (item *stagedRemap) subset(idxs []int) []map[string]any {
+	if item == nil {
+		return nil
+	}
+	if idxs == nil {
+		return item.childData
+	}
+	out := make([]map[string]any, 0, len(idxs))
+	for _, j := range idxs {
+		if j >= 0 && j < len(item.childData) {
+			out = append(out, item.childData[j])
+		}
+	}
+	return out
 }
 
 // buildRemapPlan 按发布/消费键决定映射来源，并**合并**两类来源。
@@ -206,7 +328,11 @@ func (h *GenericHandler[M]) consumeRemap(ctx context.Context, item *stagedRemap,
 //
 // 合并冲突理论上不该出现（旧 ULID / code 的归属唯一），一旦出现即为数据问题，
 // 故显式报错而非覆盖。
-func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRemap) (*RemapPlan, error) {
+// subset 为本次要重写的子数据切片（累积语义下可能只是整批的一部分）。
+// 批内映射必须**基于整批**构建（映射需要全部旧→新），但重写只作用于 subset。
+func (h *GenericHandler[M]) buildRemapPlan(
+	ctx context.Context, item *stagedRemap, subset []map[string]any,
+) (*RemapPlan, error) {
 	// 拆出批内声明与跨批次声明（两类可共存，见函数注释）
 	var crossBatch []ReferenceRemap
 	var batchLocal []ReferenceRemap
@@ -218,8 +344,12 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 		batchLocal = append(batchLocal, r)
 	}
 
-	// 批内映射：沿用 v1 行为（prepareRemap 已处理 bindings 为空 → nil）
+	// 批内映射：沿用 v1 行为（prepareRemap 已处理 bindings 为空 → nil）。
+	// 映射基于全量 childData 构建，但计划的目标数据限定为本次 subset。
 	batchPlan := prepareRemap(item.handlerName, batchLocal, item.childData, item.oldPKs)
+	if batchPlan != nil {
+		batchPlan.childData = subset
+	}
 
 	if len(crossBatch) == 0 {
 		return batchPlan, nil // 纯批内（或全空）
@@ -250,7 +380,7 @@ func (h *GenericHandler[M]) buildRemapPlan(ctx context.Context, item *stagedRema
 			oldToNew:    make(map[string]string),
 			codeToNew:   make(map[string]string),
 			handlerName: item.handlerName,
-			childData:   item.childData,
+			childData:   subset,
 		}
 	}
 	if merged.oldToNew == nil {
@@ -320,11 +450,19 @@ func sourceHandlerHint(publishers []string) string {
 	return fmt.Sprintf("发布方 Handler=%q 可能未执行，", publishers[0])
 }
 
-// publishRemap 把本批的「旧 ULID → 新 ULID」「code → 新 ULID」发布到 catalog。
+// publishRemap 把本批**当前已累积**的「旧 ULID → 新 ULID」「code → 新 ULID」
+// 发布到 catalog。
 //
 // 时机（与 heims 共识 §7.3 / §9.4 一致）：本批 BeforeCreatePersist 中的重写已完成、
-// 新 ULID 已全部生成 —— **不要求记录已 INSERT**，因为 catalog 只需要
+// 新 ULID 已生成 —— **不要求记录已 INSERT**，因为 catalog 只需要
 // 「旧/新 ULID + code」的关系。
+//
+// **增量发布**（heims §13）：本批可能被拆成多次钩子调用，因此每次都把
+// 「全部已回填新 ULID 的记录」重新发布一遍。Publish 对同键同值是幂等的，
+// 重发无害；这样无需知道批次何时结束也能保证 catalog 最终完整。
+//
+// buildPublishMaps 会跳过新 ULID 仍为空的记录 —— 那些是尚未送达钩子的
+// 子记录，等它们各自的调用到来时自然会被补发。
 func publishRemap(ctx context.Context, item *stagedRemap, publisher string) error {
 	if item == nil || item.remapKey == "" {
 		return nil
@@ -342,13 +480,59 @@ func publishRemap(ctx context.Context, item *stagedRemap, publisher string) erro
 	// （Bindings 为空时返回 nil），而发布方只关心「旧→新」映射，可能一个
 	// Binding 都不声明（映射的消费方在别的批次）。故单独构建。
 	oldToNew, codeToNew := buildPublishMaps(item.childData, item.oldPKs, item.publishCodeField())
-	return catalog.Publish(item.remapKey, oldToNew, codeToNew, publisher)
+	if len(oldToNew) == 0 && len(codeToNew) == 0 {
+		return nil
+	}
+	// 去重：只发布与上次**不同的值**（同键同值才跳过）。
+	//
+	// 必须按「键 + 值」判重而非只按键：同一 old ULID / code 在本次调用里
+	// 可能被解析出与上次不同的新 ULID（上一次它还没被回填，值不完整）——
+	// 只按键去重会把「修正」也挡掉（heims §13 的隐患之一）。
+	deltaOld := make(map[string]string)
+	for k, v := range oldToNew {
+		if prev, ok := item.publishedOld[k]; !ok || prev != v {
+			deltaOld[k] = v
+		}
+	}
+	deltaCode := make(map[string]string)
+	for k, v := range codeToNew {
+		if prev, ok := item.publishedCode[k]; !ok || prev != v {
+			deltaCode[k] = v
+		}
+	}
+	if len(deltaOld) == 0 && len(deltaCode) == 0 {
+		return nil
+	}
+	if err := catalog.Publish(item.remapKey, deltaOld, deltaCode, publisher); err != nil {
+		return err
+	}
+	if item.publishedOld == nil {
+		item.publishedOld = make(map[string]string)
+	}
+	if item.publishedCode == nil {
+		item.publishedCode = make(map[string]string)
+	}
+	for k, v := range deltaOld {
+		item.publishedOld[k] = v
+	}
+	for k, v := range deltaCode {
+		item.publishedCode[k] = v
+	}
+	return nil
 }
 
 // buildPublishMaps 从一批子数据构建发布用的「旧 ULID → 新 ULID」与「code → 新 ULID」。
 //
 // 空值处理（heims §9.3）：空 code、空旧 ULID、空新 ULID 一律**跳过且不报错** ——
 // 草稿态允许存在未填完整的 code，必填约束由应用侧发布校验承担。
+//
+// **未处理的记录必须跳过**（heims §13 的关键）：本批可能被拆成多次钩子调用，
+// 尚未送达的子记录其 `ulid` 仍等于**旧主键**（新 ULID 还没生成/回填）。
+// 若此时把它们也发布出去，会产出 `old2 → old2` 这样的**错误映射**，
+// 消费方据此「成功」解析到旧记录 —— 比直接报错更糟（静默指向旧版本）。
+//
+// 因此判据是：`newULID == oldPK` 或 `newULID` 为空 → 尚未处理，跳过。
+// 真正的「旧值等于新值」不可能发生（版本重建必然换新 ULID）。
 func buildPublishMaps(
 	childData []map[string]any,
 	oldPKs []string,
@@ -365,11 +549,16 @@ func buildPublishMaps(
 		if newULID == "" {
 			continue
 		}
-		// 旧 ULID（调用方在清除 PK 前留存）
+		old := ""
 		if j < len(oldPKs) {
-			if old := oldPKs[j]; old != "" {
-				oldToNew[old] = newULID
-			}
+			old = oldPKs[j]
+		}
+		// 尚未处理：新 ULID 还没被回填（仍等于旧主键）→ 跳过，等它的调用到来
+		if old != "" && newULID == old {
+			continue
+		}
+		if old != "" {
+			oldToNew[old] = newULID
 		}
 		// 业务 code（空值跳过，不报错）
 		if codeField != "" {
@@ -403,28 +592,26 @@ func (item *stagedRemap) publishCodeField() string {
 	return ""
 }
 
-// mergeRemappedBack 把重写后的 childData 回写进实体。
+// mergeRemappedBackSubset 把重写后的 childData 回写进对应的实体。
 //
 // 时点约束：applyStagedRemap 跑在 `_beforeCreate` **之后**，
 // 此时 childData 已通过 MergeTo 变成 entities，后续 `_doCreate` 只读 entities。
 // 若不回写，「引用字段被正确改写」这一事实就丢了 —— 落库仍是旧 ULID。
 //
-// 回写方式：把 childData 重新 json 序列化后反序列化进实体，
+// subset 与 entities 一一对应（都是本次钩子调用的那几条）。
+// 回写方式：把 map 重新 json 序列化后反序列化进实体，
 // 与 MergeTo 的语义一致（JSON tag 映射，BUG-075 起结构化字段亦可）。
-func mergeRemappedBack[M service.Record](item *stagedRemap, entities []*M) {
-	if item == nil || len(entities) == 0 {
-		return
-	}
-	n := len(item.childData)
+func mergeRemappedBackSubset[M service.Record](entities []*M, subset []map[string]any) {
+	n := len(subset)
 	if len(entities) < n {
 		n = len(entities)
 	}
-	for j := 0; j < n; j++ {
-		rec := item.childData[j]
-		if rec == nil || entities[j] == nil {
+	for i := 0; i < n; i++ {
+		rec := subset[i]
+		if rec == nil || entities[i] == nil {
 			continue
 		}
-		if err := remapMergeRecord(rec, entities[j]); err != nil {
+		if err := remapMergeRecord(rec, entities[i]); err != nil {
 			// 回写失败不静默：交由调用方链路上的错误传播（此处记录并继续，
 			// 因为字段级失败通常意味着实体不含该列，属正常形态）
 			continue
@@ -441,29 +628,35 @@ func remapMergeRecord(rec map[string]any, target any) error {
 	return json.Unmarshal(b, target)
 }
 
-// backfillNewPKs 把实体上已生成的新主键回填进 childData 的对应位置。
+// backfillNewPKsAt 把实体上已生成的新主键回填进 childData 的**指定下标**。
 //
-// 按**位置**对应：stageRemap 保存的 childData 与子 Handler 收到的 entities
-// 来自同一次 DoCreate/DoUpdate 调用，顺序一致（_doCreate 逐条 newRecord + MergeTo）。
+// idxs 与 entities 一一对应（由 matchChildIndexes 解析）。
 // 子实体主键既可能写在 pkField（gorm 列名）也可能在 JSON 名 "ulid"（BUG-060 约定），
 // 因此两个 key 都写 —— MergeTo 只认 JSON 名，多写一个无害。
-func backfillNewPKs[M service.Record](item *stagedRemap, entities []*M, pkField string) {
-	if item == nil || len(entities) == 0 {
+//
+// **必须逐条回填**（heims §13）：不能只处理第一批 —— 未回填的记录会以旧 ULID
+// 发布，消费方找不到目标而让事务失败。
+func backfillNewPKsAt[M service.Record](
+	item *stagedRemap, entities []*M, idxs []int, pkField string,
+) {
+	if item == nil || len(idxs) == 0 {
 		return
 	}
 	if pkField == "" {
 		pkField = item.pkField
 	}
-	n := len(item.childData)
-	if len(entities) < n {
-		n = len(entities)
-	}
-	for j := 0; j < n; j++ {
-		rec := item.childData[j]
-		if rec == nil || entities[j] == nil {
+	for i, j := range idxs {
+		if i >= len(entities) || entities[i] == nil {
 			continue
 		}
-		pk := extractPKFromResult(entities[j])
+		if j < 0 || j >= len(item.childData) {
+			continue
+		}
+		rec := item.childData[j]
+		if rec == nil {
+			continue
+		}
+		pk := extractPKFromResult(entities[i])
 		if pk == nil {
 			continue
 		}

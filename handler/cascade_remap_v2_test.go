@@ -1229,3 +1229,162 @@ func TestV2MergeIntoPlanConflict(t *testing.T) {
 		t.Fatalf("新增映射未并入: %v / %v", plan.oldToNew, plan.codeToNew)
 	}
 }
+
+// ============================================================
+// 用例 17：批量发布 —— 逐条钩子调用必须累积全部映射（heims §13）
+//
+// 复现 heims E2E 缺陷：版本化批次重建时 service 逐条 Update，
+// BeforeCreatePersist 每次只收到 len(entities)==1。早期实现用一次性
+// done 标记，导致只有第一条子记录的新 ULID 进入 catalog，
+// 其余以「旧 ULID」发布（或干脆缺失），消费方找不到目标而事务失败。
+// ============================================================
+
+// TestV2BatchPublishAccumulatesAllRecords 直接模拟「逐条钩子调用」形态：
+// 3 条子记录、3 次调用，断言最终 catalog 含全部 3 条的正确映射。
+func TestV2BatchPublishAccumulatesAllRecords(t *testing.T) {
+	db := openRemapV2DB(t)
+	_, reg := remapV2Handlers(t, db, nil, nil, nil, v2RemapKey)
+	fh := reg.Get("v2_field").(*GenericHandler[*remapV2Field])
+
+	// 父 Handler 登记时的状态：childData 只带旧主键
+	childData := []map[string]any{
+		{"ulid": "old1", "field_code": "f1"},
+		{"ulid": "old2", "field_code": "f2"},
+		{"ulid": "old3", "field_code": "f3"},
+	}
+	ctx := context.Background()
+	ctx, catalog := WithRemapCatalog(ctx)
+	ctx = stageRemapWithKey(ctx, "v2_field", nil, childData,
+		"field_ulid", v2RemapKey, "field_code", nil)
+
+	// 模拟 service 逐条调用钩子：每次只传一个实体（新 ULID 只在该实体上）
+	for i := 0; i < 3; i++ {
+		code := childData[i]["field_code"].(string)
+		e := &remapV2Field{ULID: "new_" + code}
+		if err := fh.applyStagedRemap(ctx, []**remapV2Field{&e}); err != nil {
+			t.Fatalf("第 %d 次 applyStagedRemap: %v", i+1, err)
+		}
+	}
+
+	snap, ok := catalog.Resolve(v2RemapKey)
+	if !ok {
+		t.Fatal("catalog 应有该 namespace")
+	}
+	// ★ 核心断言：全部 3 条都必须进入映射（不能只有第一条）
+	for _, code := range []string{"f1", "f2", "f3"} {
+		want := "new_" + code
+		if got := snap.codeToNew[code]; got != want {
+			t.Fatalf("★ code=%s: got=%q want=%q —— 批量发布不完整（heims §13）",
+				code, got, want)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		old := "old" + string(rune('0'+i))
+		want := "new_f" + string(rune('0'+i))
+		if got := snap.oldToNew[old]; got != want {
+			t.Fatalf("★ %s: got=%q want=%q", old, got, want)
+		}
+	}
+}
+
+// TestV2BatchPublishNoStaleMapping 验证「未处理的记录不产生错误映射」：
+// 若某条尚未收到新 ULID，绝不能把 `old → old` 发布出去
+// （否则消费方会「成功」解析到旧记录，比报错更糟）。
+func TestV2BatchPublishNoStaleMapping(t *testing.T) {
+	childData := []map[string]any{
+		{"ulid": "new1", "field_code": "f1"}, // 已处理：旧 PK 已被新 ULID 替换
+		{"ulid": "old2", "field_code": "f2"}, // 尚未处理（ulid 仍是旧主键）
+		{"ulid": "old3", "field_code": "f3"}, // 尚未处理
+	}
+	oldToNew, codeToNew := buildPublishMaps(childData,
+		[]string{"old1", "old2", "old3"}, "field_code")
+
+	// 已处理记录应产生正确映射
+	if len(oldToNew) != 1 || oldToNew["old1"] != "new1" {
+		t.Fatalf("已处理记录应入映射 old1→new1: %v", oldToNew)
+	}
+	// ★ 尚未处理的记录不得产生映射 —— 尤其不能产出 old2→old2 这种
+	// 「指向旧记录」的错误映射（比报错更糟：消费方会静默指向旧版本）。
+	for _, bad := range []string{"old2", "old3"} {
+		if _, found := oldToNew[bad]; found {
+			t.Fatalf("★ 未处理记录 %s 不应发布映射（会指向旧记录）: %v", bad, oldToNew)
+		}
+	}
+	if len(codeToNew) != 1 || codeToNew["f1"] != "new1" {
+		t.Fatalf("只有已处理记录应有 code 映射: %v", codeToNew)
+	}
+	if _, found := codeToNew["f2"]; found {
+		t.Fatalf("★ 未处理记录 f2 不应有 code 映射: %v", codeToNew)
+	}
+}
+
+// TestV2BatchPublishE2EThreeRefs heims §13.5 要求的完整 E2E：
+// 同一父批次下 3 个发布方记录，消费方分别引用第 1/2/3 个 code，
+// 更新发布后断言三个引用都指向本批次各自的新 ULID。
+//
+// 为使批次被**拆成多次钩子调用**（复现缺陷前提），这里让 3 个字段不带 ulid
+// 分三次独立 create，再触发一次父级版本化 update 重建。
+func TestV2BatchPublishE2EThreeRefs(t *testing.T) {
+	db := openRemapV2DB(t)
+	h, _ := remapV2Handlers(t, db, nil, crossScalarRemaps(), nil, v2RemapKey)
+
+	raw := map[string]any{
+		"code": "P17", "name": "v1",
+		"fields": []map[string]any{
+			{"field_code": "f1"}, {"field_code": "f2"}, {"field_code": "f3"},
+		},
+		"columns": []map[string]any{
+			{"col_code": "c1", "field_code": "f1"},
+			{"col_code": "c2", "field_code": "f2"},
+			{"col_code": "c3", "field_code": "f3"},
+		},
+	}
+	v1 := v2Create(t, h, raw)
+
+	var fieldsV1 []remapV2Field
+	db.Where("parent_ulid = ?", v1).Order("field_code").Find(&fieldsV1)
+	if len(fieldsV1) != 3 {
+		t.Fatalf("v1 应有 3 个字段, 实际 %d", len(fieldsV1))
+	}
+	updateRaw := map[string]any{
+		"id": v1, "name": "v2",
+		"fields": []map[string]any{
+			{"ulid": fieldsV1[0].ULID, "field_code": "f1"},
+			{"ulid": fieldsV1[1].ULID, "field_code": "f2"},
+			{"ulid": fieldsV1[2].ULID, "field_code": "f3"},
+		},
+		"columns": []map[string]any{
+			{"col_code": "c1", "field_code": "f1"},
+			{"col_code": "c2", "field_code": "f2"},
+			{"col_code": "c3", "field_code": "f3"},
+		},
+	}
+	v2, err := v2Update(t, h, updateRaw)
+	if err != nil {
+		t.Fatalf("★ _doUpdate 失败（heims §13 场景）: %v", err)
+	}
+
+	var fieldsV2 []remapV2Field
+	db.Where("parent_ulid = ?", v2).Order("field_code").Find(&fieldsV2)
+	if len(fieldsV2) != 3 {
+		t.Fatalf("v2 应有 3 个字段, 实际 %d", len(fieldsV2))
+	}
+	byCode := make(map[string]string, 3)
+	for _, f := range fieldsV2 {
+		byCode[f.FieldCode] = f.ULID
+	}
+
+	var colsV2 []remapV2Column
+	db.Where("parent_ulid = ?", v2).Order("col_code").Find(&colsV2)
+	if len(colsV2) != 3 {
+		t.Fatalf("v2 应有 3 个列, 实际 %d", len(colsV2))
+	}
+	// ★ 三个引用都必须指向 v2 各自的字段
+	for _, c := range colsV2 {
+		want := byCode[c.FieldCode]
+		if c.FieldULID != want {
+			t.Fatalf("★ 列 %s 引用 %s: got=%s want=%s（批量发布缺陷）",
+				c.ColCode, c.FieldCode, c.FieldULID, want)
+		}
+	}
+}
