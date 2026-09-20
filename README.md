@@ -2414,6 +2414,9 @@ gocrux/
 │   ├── generic_version_impl.go # 版本操作默认实现
 │   ├── generic_util.go     # injectDepth/injectIgnore/injectStop + ResponseMapper + aux
 │   ├── cascade.go          # depthCtx/ignoreCtx/visitedCtx/fieldLimitCtx + CascadeRelation/StopRule
+│   ├── cascade_remap.go    # 级联引用重映射（Remaps 声明 + 四形态重写）
+│   ├── cascade_remap_ctx.go # 重映射时机/传递 + 跨批次发布消费 + L1/L2 校验
+│   ├── cascade_remap_catalog.go # 事务级 remap catalog（命名空间 → 映射，随 ctx 存亡）
 │   ├── hooks.go            # HandlerHooks 钩子类型定义
 │   ├── registry.go         # HandlerRegistry 注册表
 │   ├── txcoordinator.go    # TxCoordinator 事务编排器
@@ -2427,10 +2430,13 @@ gocrux/
 │   └── utils.go            # extractPK/extractMapID/removeMapID
 ├── service/                # 业务逻辑层
 │   ├── generic.go          # GenericService 定义 + Record/CrudRequest 接口 + Config
-│   ├── generic_impl.go     # 内置 _before/_do/_after 默认实现
+│   ├── generic_impl.go     # 内置 _before/_do/_after 默认实现 + normalizeNotFound/parseBsonKey 收敛点
 │   ├── generic_read_impl.go # _doList 读取实现（含软删除/draft 过滤）
 │   ├── generic_write_impl.go # _doCreate/_doUpdate/_doDelete 写入实现（含版本化/级联）
 │   ├── generic_version_impl.go # 版本操作实现（Activate/ListVersions/EditVersion）
+│   ├── publish_trace.go    # 发布痕迹（published_at/by + 发布历史 + OnPublished）
+│   ├── oplog.go            # 操作日志（OpLogRecord/OpLogWriter/SetOpLogDB）
+│   ├── filter_value.go     # 过滤值按列类型归一（time/int/float/bool）
 │   ├── hooks.go            # Hooks 钩子类型定义
 │   ├── registry.go         # ServiceRegistry 注册表
 │   ├── request.go          # CrudRequest/Mergeable/Identifiable/Validatable 接口
@@ -2438,10 +2444,10 @@ gocrux/
 │   └── tx.go               # WithTx/GetTx 事务透传
 ├── repository/             # 数据访问层
 │   ├── crud.go             # CRUDRepository 泛型仓储 + ListFilters + FilterOp
-│   ├── base.go             # BaseRepository + VersionRepository
+│   ├── base.go             # BaseRepository + VersionRepository（遗留非泛型版，新代码用 CRUDRepository）
 │   ├── dao.go              # BaseDAO（缓存/审计扩展点）
 │   ├── repo.go             # Repo[M] 统一仓储接口
-│   └── mongo_repo.go       # MongoCRUDRepository MongoDB 仓储
+│   └── mongo_repo.go       # MongoCRUDRepository MongoDB 仓储（mapMongoFindError 归一 not-found）
 ├── internal/               # 框架内部
 │   ├── bootstrap/          # 启动引导（Init/InitMySQL/InitOther/Migrate/Close）
 │   ├── config/             # 配置加载（Config/Load + 各配置段结构体）
@@ -2456,6 +2462,7 @@ gocrux/
 ├── common/                 # 通用工具
 │   ├── ulid.go             # ULID 生成器
 │   ├── reflect.go          # SetFieldValue 反射辅助
+│   ├── conv.go             # ToSnakeCase / ExtractGormColumn / ParseBSONKey / Registry[T]
 │   └── tx.go               # WithTx/GetTx context 事务传递
 ├── constants/              # 业务状态码（BusinessCode + 消息映射）
 ├── errors/                 # 哨兵错误 + 格式化错误函数
@@ -2467,6 +2474,33 @@ gocrux/
 ├── config.yaml             # 应用主配置（脱敏，不提交）
 └── go.mod
 ```
+
+---
+
+## 开发约定：避免跨包重复实现
+
+框架历史上多次因「同一段解析逻辑在各包各写一份」而产生缺陷 —— 修了 A 包漏了 B 包，
+最典型的是 struct tag 选项剥离同时引发 **BUG-053**（repository 侧落库键带
+`,omitempty`）与 **BUG-061**（service 侧查询条件永不匹配），根因完全相同却修了两轮。
+
+因此约定：**跨包共用的解析/归一逻辑必须有唯一入口，且放在 `common` 或调用方最小公倍数包**。
+
+| 逻辑 | 唯一入口 | 禁止再内联 |
+|:--|:--|:--|
+| bson / json tag 取逗号前段 | `common.ParseBSONKey` | 禁止 `strings.IndexByte(tag, ',')` / `strings.Cut(tag, ",")` 手写 |
+| bson `,inline` 判定 | `common.IsBSONInline` | — |
+| gorm tag 取 column | `common.ExtractGormColumn` | — |
+| 驱动 not-found → 框架哨兵 | `service.normalizeNotFound`（service 内）/ `repository.mapMongoFindError`（Mongo 仓储内） | 禁止手写 `errors.Is(err, gorm.ErrRecordNotFound)` 后返回哨兵 |
+| 分页参数（page/page_size/offset） | `handler.GetPageParams`（HTTP）/ `repository.mongoPageOpts`(Mongo) | 新增别名时须同步全部入口 |
+
+新增实体/仓储调用点时，凡是「错误归一」「tag 解析」「主键读写」这三类，
+先查上表是否已有 helper 再动手。
+
+> 已知待收敛项（未做，记录以免遗忘）：`handler/utils.go` 的 `extractPKFromResult`
+> 与 `service/generic_write_impl.go` 的 `extractEntityID` 是两份同构的「主键提取」
+> 实现；反射解指针样板（`for rv.Kind() == reflect.Ptr`）散落在 handler /
+> service / repository 约 10 处。二者语义有细微差异（前者额外支持 `PKField()` 分支），
+> 收敛需一并提升到 `common` 并补回归，属独立重构，不在 bug 修复范围内顺手做。
 
 ---
 

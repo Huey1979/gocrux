@@ -752,10 +752,8 @@ func toBsonDocFields(v reflect.Value) bson.D {
 		// BUG-053：bson tag 可能带选项（如 bson:"link_url,omitempty"），
 		// 只能取逗号前段作为字段 key——否则落库 key 变 "link_url,omitempty"（带逗号），
 		// 读取时 mongo-driver 按标准解析取 link_url，字段读不到（create 后全空）。
-		key := tag
-		if i := strings.IndexByte(tag, ','); i >= 0 {
-			key = tag[:i]
-		}
+		// 解析规则收敛在 common.ParseBSONKey（与 BUG-061 的 service 侧同源）。
+		key := common.ParseBSONKey(tag)
 		if key == "" { // 防御：bson:",omitempty" 之类无 key 的非法 tag 不写空 key
 			continue
 		}
@@ -764,20 +762,10 @@ func toBsonDocFields(v reflect.Value) bson.D {
 	return doc
 }
 
-// isBsonInline 判断 bson tag 是否为 inline 选项（mongo-driver 语义）：
-// 首段（key）必须为空，后续选项段含 "inline"（如 bson:",inline" / bson:",inline,omitempty"）。
-// 注意 bson:"inline"（无逗号）首段是字段名，不算 inline 选项。
+// isBsonInline 判断 bson tag 是否为 inline 选项（mongo-driver 语义）。
+// 实现收敛在 common.IsBSONInline —— 与 handler 侧的 inline 判定共用同一实现。
 func isBsonInline(tag string) bool {
-	parts := strings.Split(tag, ",")
-	if parts[0] != "" {
-		return false
-	}
-	for _, opt := range parts[1:] {
-		if opt == "inline" {
-			return true
-		}
-	}
-	return false
+	return common.IsBSONInline(tag)
 }
 
 // extractPKVal 从 struct 提取主键值（支持匿名嵌入 struct 递归查找）。
@@ -800,11 +788,8 @@ func extractPKValFields(v reflect.Value, pkField string) any {
 		if f.PkgPath != "" { // 未导出字段跳过（避免 Interface() panic）
 			continue
 		}
-		tag := f.Tag.Get("bson")
 		// BUG-053：与 toBsonDoc 一致，bson tag 只取逗号前段（去 omitempty 等选项）。
-		if idx := strings.IndexByte(tag, ','); idx >= 0 {
-			tag = tag[:idx]
-		}
+		tag := common.ParseBSONKey(f.Tag.Get("bson"))
 		if tag == pkField || (tag == "" && f.Name == pkField) {
 			return v.Field(i).Interface()
 		}

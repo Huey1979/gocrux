@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/Huey1979/gocrux/repository"
 
 	"github.com/sirupsen/logrus"
-	"gorm.io/gorm"
 )
 
 // -------- Activate --------
@@ -27,8 +25,8 @@ func (s *GenericService[M]) _beforeActivate(ctx context.Context, id any) (any, e
 	// 取实体
 	_entity, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrRecordNotFound
+		if norm := normalizeNotFound(err); norm != err {
+			return nil, norm
 		}
 		return nil, errs.ErrQueryRecordFailed(err)
 	}
@@ -151,10 +149,7 @@ func (s *GenericService[M]) _beforeListVersions(ctx context.Context, id any, cod
 		// 尝试按 ULID 查实体，提取 code
 		_entity, err := s.repo.GetByID(ctx, id)
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrRecordNotFound
-			}
-			return nil, err
+			return nil, normalizeNotFound(err)
 		}
 
 		code = getStrField(_entity, vf.CodeField)
@@ -199,8 +194,8 @@ func (s *GenericService[M]) _beforeEditVersion(ctx context.Context, id any, patc
 	// 查当前实体（用于状态校验 & 备份旧值）
 	_entity, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, errs.ErrRecordNotFound
+		if norm := normalizeNotFound(err); norm != err {
+			return nil, nil, norm
 		}
 		return nil, nil, errs.ErrQueryRecordFailed(err)
 	}
@@ -308,8 +303,8 @@ func (s *GenericService[M]) _doEditVersion(ctx context.Context, id any, pdata an
 	// 查回更新后的结果
 	result, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrRecordNotFound
+		if norm := normalizeNotFound(err); norm != err {
+			return nil, norm
 		}
 		return nil, errs.ErrQueryRecordFailed(err)
 	}

@@ -2,15 +2,45 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/Huey1979/gocrux/common"
-	errs "github.com/Huey1979/gocrux/errors"
 	"reflect"
 	"strings"
+
+	"github.com/Huey1979/gocrux/common"
+	errs "github.com/Huey1979/gocrux/errors"
+
+	"gorm.io/gorm"
 )
 
 // keywordSearchKey context key（内部使用）。
 type keywordSearchKey struct{}
+
+// normalizeNotFound 把驱动层「记录不存在」错误归一为框架哨兵 errs.ErrRecordNotFound。
+//
+// 为什么需要：MySQL（GORM）与 MongoDB 各有自己的 not-found 错误类型
+// （gorm.ErrRecordNotFound / mongo.ErrNoDocuments），而 handler 层
+// mapServiceError 只认识框架哨兵。**归一化必须在 service 出口前完成**，
+// 否则 mapServiceError 走默认分支映射成 500（BUG-062 就是这样在 Mongo 侧暴露的）。
+//
+// 历史形态是这条 3 行 if 在 service/repository 里手写了 6+ 次
+// （_doGet / _doGetByCode / _doListVersions / _doEditVersion / _doActivate / repo.GetByID…），
+// 且出现过「只归一了 GetByID 漏了 GetByField」这类遗漏（BUG-062 后的 BatchFindByPK 仍是裸返回）。
+// 收敛到此处后，新增仓储调用点只需包一层。
+//
+// 注意：已是框架哨兵的错误原样返回（幂等）；其它错误不包装，保留原始错误链。
+func normalizeNotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errs.ErrRecordNotFound) {
+		return errs.ErrRecordNotFound // 幂等：避免重复包装
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errs.ErrRecordNotFound
+	}
+	return err
+}
 
 // KwField 关键字搜索字段配置（service 层，避免循环引用 handler 包）。
 type KwField struct {
@@ -366,14 +396,14 @@ func scalarToFloat(v any) (float64, bool) {
 }
 
 // parseBsonKey 解析 bson tag，取逗号前段作为真正的 MongoDB 字段名。
+//
 // bson:"xxx,omitempty" / bson:"xxx,omitempty,inline" 等带选项的 tag，
 // 原样使用会把 ",omitempty" 当成字段名，List 过滤永远匹配不到（BUG-061）。
-// 与 repository/mongo_repo.go（BUG-053）的解析方式保持一致。
+//
+// 实现已收敛到 common.ParseBSONKey（与 BUG-053 的 repository 侧同源）——
+// 此前的教训是「各包各写一份」，修了 repository 漏了 service。
 func parseBsonKey(bsonTag string) string {
-	if idx := strings.IndexByte(bsonTag, ','); idx >= 0 {
-		return bsonTag[:idx]
-	}
-	return bsonTag
+	return common.ParseBSONKey(bsonTag)
 }
 
 // resolveColumn 根据 Go 结构体字段名 → GORM column 名称
@@ -416,7 +446,7 @@ func resolveColumnByName[M Record](jsonName string) string {
 		if jsonTag == "" || jsonTag == "-" {
 			continue
 		}
-		name, _, _ := strings.Cut(jsonTag, ",")
+		name := common.ParseBSONKey(jsonTag)
 		if name != jsonName {
 			continue
 		}
@@ -564,8 +594,7 @@ func collectKnownColumns(t reflect.Type, cols map[string]bool, depth int) {
 		}
 		// json tag (fallback)
 		if jsonTag := f.Tag.Get("json"); jsonTag != "" && jsonTag != "-" {
-			jsonName, _, _ := strings.Cut(jsonTag, ",")
-			if jsonName != "" {
+			if jsonName := common.ParseBSONKey(jsonTag); jsonName != "" {
 				cols[jsonName] = true
 			}
 		}

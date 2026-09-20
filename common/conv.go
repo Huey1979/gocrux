@@ -152,3 +152,48 @@ func ExtractGormColumn(tag string) string {
 	}
 	return ""
 }
+
+// ParseBSONKey 从 bson / json struct tag 中取出真正的字段名（**逗号前段**）。
+//
+//	bson:"link_url,omitempty"         → "link_url"
+//	bson:"shared_fields,omitempty"    → "shared_fields"
+//	json:"field_ulid,omitempty"       → "field_ulid"
+//	bson:",inline"                    → ""
+//	""                                → ""
+//
+// 这是全框架**唯一**的 tag 选项剥离入口。历史上该逻辑被手写在至少 4 处，
+// 直接后果是两个真实缺陷：
+//   - BUG-053：`toBsonDoc` 原样用整个 tag 当 Mongo key，落库键变成
+//     "link_url,omitempty"（带逗号），读取按 link_url 读不到 → create 后字段全空；
+//   - BUG-061：`resolveColumn` 等把 tag 原样当列名，拼接的 Mongo 查询条件
+//     永远匹配不到（List 过滤 total=0）。
+//
+// 之所以单独成函数而非各处内联：上述两处 bug 的根因完全相同，
+// 且分散实现导致「修了一处漏一处」（BUG-053 修完 repository 又发现 service 同名问题）。
+func ParseBSONKey(tag string) string {
+	if idx := strings.IndexByte(tag, ','); idx >= 0 {
+		return tag[:idx]
+	}
+	return tag
+}
+
+// IsBSONInline 判断 bson tag 是否为 inline 选项（mongo-driver 语义）。
+//
+// 首段（key）必须为空、且后续选项段含 "inline"：
+//
+//	bson:",inline"            → true
+//	bson:",inline,omitempty"  → true
+//	bson:"inline"             → false（无逗号，首段是字段名）
+//	bson:"link_url,omitempty" → false
+func IsBSONInline(tag string) bool {
+	parts := strings.Split(tag, ",")
+	if parts[0] != "" {
+		return false
+	}
+	for _, opt := range parts[1:] {
+		if opt == "inline" {
+			return true
+		}
+	}
+	return false
+}

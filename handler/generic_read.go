@@ -463,10 +463,7 @@ func pkOutputKey[M service.Record](dbColumn string) string {
 		if c := common.ExtractGormColumn(f.Tag.Get("gorm")); c != "" {
 			col = c
 		} else if b := f.Tag.Get("bson"); b != "" && b != "-" {
-			if idx := strings.IndexByte(b, ','); idx >= 0 {
-				b = b[:idx]
-			}
-			col = b
+			col = common.ParseBSONKey(b)
 		} else {
 			col = common.ToSnakeCase(f.Name)
 		}
@@ -474,7 +471,7 @@ func pkOutputKey[M service.Record](dbColumn string) string {
 			continue
 		}
 		if jt := f.Tag.Get("json"); jt != "" && jt != "-" {
-			if name, _, _ := strings.Cut(jt, ","); name != "" {
+			if name := common.ParseBSONKey(jt); name != "" {
 				return name
 			}
 		}

@@ -9,8 +9,6 @@ import (
 	"github.com/Huey1979/gocrux/common"
 	errs "github.com/Huey1979/gocrux/errors"
 	"github.com/Huey1979/gocrux/repository"
-
-	"gorm.io/gorm"
 )
 
 // -------- Get --------
@@ -23,10 +21,7 @@ func (s *GenericService[M]) _beforeGet(ctx context.Context, id any) (any, error)
 func (s *GenericService[M]) _doGet(ctx context.Context, id any) (*M, error) {
 	result, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, errs.ErrRecordNotFound
-		}
-		return nil, err
+		return nil, normalizeNotFound(err)
 	}
 	// BUG-069：读路径**不做**软删过滤 —— 已删记录照常返回（含 is_deleted 标记）。
 	// 是否允许调用方查看已删数据属业务权限语义，由应用端在 AfterGet 钩子中
