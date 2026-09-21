@@ -2477,7 +2477,7 @@ gocrux/
 │   ├── model/entity/       # 框架内置实体（SysOperationLog）
 │   └── router/             # 基础路由注册
 ├── common/                 # 通用工具
-│   ├── ulid.go             # ULID 生成器
+│   ├── ulid.go             # ULID 生成器（并发安全：crypto/rand + 时间戳）
 │   ├── reflect.go          # SetFieldValue 反射辅助
 │   ├── conv.go             # ToSnakeCase / ExtractGormColumn / ParseBSONKey / Registry[T]
 │   └── tx.go               # WithTx/GetTx context 事务传递
