@@ -20,6 +20,25 @@ func mapServiceError(err error) constants.BusinessCode {
 		return constants.CodeInternalError
 	}
 
+	// 外部引用解析（应用方 §19.4/§20.3）：置于 ErrRecordNotFound 之前 ——
+	// ErrExternalRefNotFound 用双 %w 保留了底层「记录不存在」，
+	// 先按外部引用语义判定可让响应文案与语义一致（仍是 404）。
+	if errors.Is(err, errs.ErrExternalRefNotFound) {
+		return constants.CodeNotFound
+	}
+	// 「版本已变化，请重新选择」是**调用方可修正**的冲突（重新选择即可），
+	// 不是服务端错误 → 409，与唯一性冲突同级。
+	if errors.Is(err, errs.ErrExternalRefStale) {
+		return constants.CodeConflict
+	}
+	if errors.Is(err, errs.ErrExternalRefTargetMissing) {
+		// 配置/接线问题（目标 Handler 未注册）→ 服务端错误
+		return constants.CodeInternalError
+	}
+	if errors.Is(err, errs.ErrExternalRefInvalidParam) {
+		return constants.CodeParamError
+	}
+
 	// 通用
 	if errors.Is(err, errs.ErrRecordNotFound) {
 		return constants.CodeNotFound

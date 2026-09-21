@@ -131,6 +131,17 @@ func (h *GenericHandler[M]) createPipeline(ctx context.Context, rawReqs []map[st
 		return nil, err
 	}
 
+	// 预分配通道（v3）：请求入口挂载注册表 + ticket（凭证闭环），
+	// 并为**顶层实体**预分配 ULID。必须在任何子分支处理之前完成 ——
+	// 装配的 Target 索引需要在阶段 2 看到全部记录（设计文档 §11.2.1）。
+	//
+	// 仅当本次是请求入口（entered）才做顶层预分配：级联子调用的本批主键
+	// 归属由父级阶段 1 决定，子级不得再把请求体里的值登记为可信。
+	ctx, entered := h.ensureAssemblyContext(ctx)
+	if entered {
+		ctx = preallocateRoot(ctx, preallocRegistryFrom(ctx), h.PKField(), rawReqs)
+	}
+
 	// 将原始 map 注入 ctx，供 _doCreate 级联创建时提取子数据
 	ctx = context.WithValue(ctx, rawCreateMapsKey{}, rawReqs)
 
@@ -388,6 +399,13 @@ func (h *GenericHandler[M]) updatePipeline(ctx context.Context, rawReqs []map[st
 		},
 	); err != nil {
 		return nil, err
+	}
+
+	// 预分配通道（v3）：同 createPipeline，请求入口挂载注册表 + ticket，
+	// 并为顶层实体预分配 ULID（见 _doCreate 的说明）。
+	ctx, entered := h.ensureAssemblyContext(ctx)
+	if entered {
+		ctx = preallocateRoot(ctx, preallocRegistryFrom(ctx), h.PKField(), rawReqs)
 	}
 
 	// 若配置了级联更新，将原始 maps 注入 ctx，供 _doUpdate 提取子数据

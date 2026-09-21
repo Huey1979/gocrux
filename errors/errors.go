@@ -239,6 +239,90 @@ var (
 )
 
 // ============================================================
+// 引用装配 — Handler 层（reference assembly，v3）
+//
+// 与上面的 v2 重映射错误并列而非替换：两套机制在迁移期共存
+// （阶段 1 新增装配通道、旧机制保留，见设计文档 §8.1）。
+// ============================================================
+var (
+	// ErrAssemblyAmbiguous 装配命中多条目标记录。
+	//
+	// 与 v2 的 ErrRemapInconsistent 同哲学但语义不同：
+	//   - ErrRemapInconsistent：映射表里同一 key 被映射到不同目标（发布侧冲突）；
+	//   - ErrAssemblyAmbiguous：**查询**时命中多条（匹配键在目标集合里不唯一）。
+	//
+	// 不可容忍（设计文档 §6.2）：匹配不到是「数据形态」（可 WARN 后保留旧值），
+	// 命中多条则说明「匹配键唯一」这一前提被破坏，结果不确定。
+	// heims 已确认同一 form 版本内 field_code 唯一（§13.2 B6），故报错正确。
+	ErrAssemblyAmbiguous = errors.New("引用装配失败：匹配到多条目标记录")
+
+	// ErrAssemblyInvalidConfig 装配声明配置非法（缺 Match/Assign、多层数组等）。
+	//
+	// 构造期经 validateAssemblies 拦截并 panic（fail-fast，B7 与 BUG-071 同哲学）；
+	// 运行时此哨兵用于「Target 需要请求级索引但 context 中没有注册表」等
+	// 「配置本身没错、但调用路径不具备前置条件」的场景。
+	ErrAssemblyInvalidConfig = errors.New("引用装配配置错误")
+
+	// ErrAssemblyIdentityAmbiguous 版本化回填时「旧子记录 ↔ 预分配项」无法唯一对应。
+	//
+	// 设计文档 §5.2①（应用方 §13.4）：回填后清 PK、填预分配 ULID 时，
+	// 旧 A 必须对应新 A。若仅按**位置**对应，会在「子表顺序变化 / 存在软删行」
+	// 时把旧 A 对应到新 B —— 且静默错位。故无法唯一对应时**报错，不猜测**。
+	ErrAssemblyIdentityAmbiguous = errors.New("版本化回填失败：旧子记录与预分配项无法唯一对应")
+
+	// ErrAssemblyPKConflict 预分配的主键与库中已有记录冲突（概率 ≈ 1.2e-24）。
+	//
+	// 处理策略（设计文档 §7.2/§7.3）：
+	//   - 有事务部署：整树回滚 + 重试 1 次（由 TxCoordinator 封装）；
+	//   - 无事务部署：不重试，报错 + 尽力而为标记本次写入的记录 is_deleted=1 + ERROR 日志。
+	//
+	// 错误文案明确提示「请重新发起整个请求」——重放同一请求体是不行的
+	// （会复用旧 ticket 与旧 ULID，见 §7.4）。
+	ErrAssemblyPKConflict = errors.New("主键冲突：预分配的 ULID 与已有记录冲突，请重新发起整个请求")
+)
+
+// PKConflictError 包装底层主键冲突错误，保留原始错误链并统一为框架哨兵。
+//
+// 为什么用包装而非直接返回哨兵：排查时需要看到底层是 MySQL 1062 还是
+// Mongo E11000、冲突的是哪个索引 —— 只报「主键冲突」会丢失这些线索。
+// errors.Is(err, ErrAssemblyPKConflict) 仍可命中。
+func PKConflictError(cause error) error {
+	if cause == nil {
+		return ErrAssemblyPKConflict
+	}
+	return fmt.Errorf("%w: %v", ErrAssemblyPKConflict, cause)
+}
+
+// ============================================================
+// 外部引用解析 — Handler/Service 层（external reference，应用方 §19.4 / §20.5）
+//
+// 与 v3 装配（请求树**内部**引用）的分工：
+//
+//	装配（Assemblies）：引用的目标在同一请求树里「本次新建」，ULID 由预分配产出；
+//	外部引用（本节）  ：引用的目标**已经存在**（如 data_select 选中的表单/流程），
+//	                    不做装配，而是「按 code 解析权威版本 → 校验 → 按策略持久化」。
+//
+// 因此二者机制不同、互不替代（应用方 §20.5 的判断正确）。
+// ============================================================
+var (
+	// ErrExternalRefNotFound 外部引用目标不存在（或已软删，不可作为引用目标）。
+	ErrExternalRefNotFound = errors.New("外部引用目标不存在")
+
+	// ErrExternalRefStale 调用方提交的 ULID 与「按 code 解析出的权威版本」不一致。
+	//
+	// 语义（应用方 §20.3 第 3 条）：前端提交的是快照意图（ulid + code），
+	// 但服务端按 code 查到的权威 ULID 已经变了 —— 说明引用的是旧版本。
+	// 必须让调用方重新选择，绝不静默改成新版本（那会悄悄改变业务语义）。
+	ErrExternalRefStale = errors.New("外部引用目标版本已变化，请重新选择")
+
+	// ErrExternalRefTargetMissing 目标 Handler 未注册（或未实现外部引用解析能力）。
+	ErrExternalRefTargetMissing = errors.New("外部引用目标 Handler 未注册")
+
+	// ErrExternalRefInvalidParam 解析参数不合法（未给 code/ULID、模式未知、缺注册表等）。
+	ErrExternalRefInvalidParam = errors.New("外部引用解析参数不合法")
+)
+
+// ============================================================
 // 引用/级联展开 — Handler 层
 //
 // 这四个构造函数都同时包装 errRefResolveSentinel（BUG-080）：

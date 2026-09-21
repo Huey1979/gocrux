@@ -726,10 +726,13 @@ func (s *GenericService[M]) Get(ctx context.Context, id any) (*M, error) {
 	return s.afterGet(ctx, result)
 }
 
-// GetByCode 按业务编码查询实体的正式发布版本（version_status='published'）。
+// GetByCode 按业务编码查询实体的**当前版本**（版本化模式下 CurrentField=1）。
 //
-// 仅版本化模式生效；非版本化模式退化为 repo.GetByField(ctx, "code", code)。
-// code 不能为空。
+// ⚠ 语义澄清：本方法取的是 is_current=1 的行 —— **不论 version_status 是否为
+// published**（编辑中的草稿同样满足）。需要「线上生效版本（published）」时用
+// GetPublishedByCode。二者在无草稿时指向同一行，有草稿时分叉。
+//
+// 非版本化模式退化为按 CodeField 等值查询（repo.GetByField）。code 不能为空。
 func (s *GenericService[M]) GetByCode(ctx context.Context, code string) (*M, error) {
 	if code == "" {
 		return nil, errs.ErrMissingParam("code")

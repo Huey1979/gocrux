@@ -133,6 +133,47 @@ func stageRemapWithKey(
 	return context.WithValue(ctx, remapCtxKey{}, append(existing, item))
 }
 
+// stageRemapWithKeyOldPKs 同 stageRemapWithKey，但**直接传入旧主键快照**。
+//
+// 存在的必要性：v3 的三阶段改造后，清 PK 发生在**阶段 1**（收集阶段），
+// 而 stageRemap 在阶段 3（落库前）才被调用 —— 此时旧 PK 已被清除，
+// stageRemap 内部的 snapshotPKs 只能取到空值，导致 v2 的「旧 ULID → 新 ULID」
+// 映射完全构建不出来（引用解析必然失败）。
+//
+// 因此阶段 1 清 PK 之前先留存快照（b.oldPKs），在此处透传。
+// 这与 v1/v2 时期「先 stage 再清 PK」的语义完全等价，只是把留存的时点
+// 提前到了三阶段的划分里。
+func stageRemapWithKeyOldPKs(
+	ctx context.Context,
+	handlerName string,
+	remaps []ReferenceRemap,
+	childData []map[string]any,
+	oldPKs []string,
+	pkField string,
+	remapKey string,
+	publishCodeField string,
+	sourceHandlers map[string][]string,
+) context.Context {
+	if len(childData) == 0 {
+		return ctx
+	}
+	if len(remaps) == 0 && remapKey == "" {
+		return ctx
+	}
+	item := &stagedRemap{
+		handlerName:          handlerName,
+		remaps:               remaps,
+		childData:            childData,
+		pkField:              pkField,
+		oldPKs:               oldPKs,
+		remapKey:             remapKey,
+		publishCodeFieldName: publishCodeField,
+		sourceHandlers:       sourceHandlers,
+	}
+	existing, _ := ctx.Value(remapCtxKey{}).([]*stagedRemap)
+	return context.WithValue(ctx, remapCtxKey{}, append(existing, item))
+}
+
 // applyStagedRemap 执行本 Handler 名下登记的重映射（service BeforeCreatePersist 钩子）。
 //
 // 时机：主键 ULID 已生成、记录尚未 INSERT。
@@ -758,6 +799,32 @@ func (h *GenericHandler[M]) RemapPublishKeys() []string {
 // （SetHandlerReg 是独立调用），那时看不到任何其它 Handler。
 // 故 L1 由调用方在所有 SetHandlerReg 完成后显式调用一次（幂等）。
 // ============================================================
+
+// validateCascadeAssemblies 构造期校验装配声明（v3，fail-fast）。
+//
+// 两条规则：
+//
+//  1. **同一关系不得同时配置 Remaps 与 Assemblies**（设计文档 §8.1 B3）：
+//     两套机制并存会让行为难以预期（一个在落库前重写、一个在落库前装配，
+//     谁先谁后、映射从哪来都不清晰）。应用方已确认按关系逐个迁移，
+//     不需要同一关系半旧半新 —— 故直接报错而非"取其一 + WARN"。
+//
+//  2. 装配声明本身合法（Match/Assign 非空、键非空、Source 数组标记合规）。
+func (h *GenericHandler[M]) validateCascadeAssemblies() error {
+	for i, rel := range h.config.Cascades {
+		if len(rel.Assemblies) > 0 && len(rel.Remaps) > 0 {
+			return fmt.Errorf(
+				"Cascades[%d]（HandlerName=%q）同时配置了 Remaps 与 Assemblies；"+
+					"两套机制互斥（一个在落库时生成 ULID 再回写引用，一个在请求入口预分配），"+
+					"请按关系逐个迁移：新关系用 Assemblies，未迁移的保持 Remaps",
+				i, rel.HandlerName)
+		}
+		if err := validateAssemblies(rel, h.config.Cascades); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // validateRemapKeyOrder 构造期 L2 校验：同一 Cascades 数组内的顺序。
 //

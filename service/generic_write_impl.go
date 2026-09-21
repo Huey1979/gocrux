@@ -293,9 +293,26 @@ func (s *GenericService[M]) _beforeCreate(ctx context.Context, input []CrudReque
 
 		// 兜底：MergeTo 后 PK 仍为空 → 框架自动生成 ULID。
 		// 40 个 entity 可逐步删除 SetID() 方法，gocrux 在框架层统一处理 PK 生成。
+		//
+		// 预分配通道（v3）：PK 非空时不再无条件信任，而是先校验凭证 ——
+		// 「非空就信任」会把前端伪造/误传的 ULID 当合法主键用，使预分配失去意义
+		// （设计文档 §3.1）。凭证默认实现为请求级 ctx 注册表成员校验：
+		// 注册表只在进程内存、随 ctx 传递，外部请求无法注入（§3.2）。
+		//
+		// 向后兼容（关键）：**未挂载凭证桥时保持既有语义**（视为可信、不重新生成）。
+		// 那意味着调用方没走预分配通道（老代码 / 直接调 service），
+		// 若在此一律拒绝会破坏所有未迁移的调用方。
 		if pkDBName := m.PKField(); pkDBName != "" {
 			if pkGoField := resolveColumnFromDB[M](pkDBName); pkGoField != "" {
-				if getStrField(&m, pkGoField) == "" {
+				cur := getStrField(&m, pkGoField)
+				if cur == "" {
+					common.SetFieldValue(&m, pkGoField, common.NewULID())
+				} else if !verifyPKTrusted(ctx, cur) {
+					// PK 非空但**不是本请求框架生成的** → 前端传入的。
+					// 按原语义处理：重新生成（不沿用外部值），并记录可排查的日志。
+					logrus.Warnf("gocrux: 请求携带的 %s=%s 不在本请求预分配注册表中，"+
+						"按外部值处理并重新生成（entity=%s）",
+						pkDBName, cur, s.config.EntityName)
 					common.SetFieldValue(&m, pkGoField, common.NewULID())
 				}
 			}

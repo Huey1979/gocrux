@@ -309,6 +309,12 @@ func (h *GenericHandler[M]) initValidation() {
 	if err := h.validateRemapKeyOrder(); err != nil {
 		panic(fmt.Sprintf("[gocrux] handler %q 配置错误: %v", h.svcName, err))
 	}
+	// 装配声明（v3）的构造期校验（失败即 panic，fail-fast，B7 与 BUG-071 同哲学）：
+	// ① 同一关系不得同时配 Remaps 与 Assemblies（B3，避免两套机制互相干扰）；
+	// ② Match/Assign 非空、键非空、Source 只支持一层数组（§4.5 边界）。
+	if err := h.validateCascadeAssemblies(); err != nil {
+		panic(fmt.Sprintf("[gocrux] handler %q 配置错误: %v", h.svcName, err))
+	}
 	if h.config.SkipAutoValidate {
 		// 动态 schema 实体：跳过自动字段校验，完全交由钩子处理
 		h.validateRules.Create = make(EndpointRules)

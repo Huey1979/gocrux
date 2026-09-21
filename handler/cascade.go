@@ -513,6 +513,47 @@ type CascadeRelation struct {
 	// 消费方通常拿不到旧 ULID（那是别的分支的记录），此时 code 兜底是必须的，
 	// 故表单域这类结构应配置本字段。
 	PublishCodeField string
+
+	// Target 本关系的**发布标识**（v3 装配用，可选）。
+	//
+	// 非空表示「本批记录作为装配目标，供其它级联分支引用」，其值即
+	// ReferenceAssembly.Target 的取值（如 "form.write_field"）。装配阶段
+	// 据此把本批记录登记进请求级索引，消费方按 Match 在索引里查找。
+	//
+	//	form
+	//	  ├─ write_section → write_field      Target: "form.write_field"  ← 发布方
+	//	  ├─ list_column                      Assemblies[].Target: "form.write_field"
+	//	  └─ validation                       Assemblies[].Target: "form.write_field"
+	//
+	// 与 v2 的 RemapKey 语义相同（都是「跨级联分支的发布命名空间」），
+	// 区别在**时点**（设计文档 §10.1 的迁移对照）：
+	//   - v2（RemapKey）：落库时才生成新 ULID，再把「旧 → 新」映射发布出去；
+	//   - v3（Target）  ：请求入口预分配 ULID，登记记录本身，无需映射传递。
+	// 因此**不得同时配置**：配了 Remaps/RemapKey 走 v2 通道（不预分配），
+	// 配了 Target 走 v3 通道（预分配 + 装配）。heims 按关系逐个迁移即可。
+	//
+	// 与 Assemblies 的分工：Assemblies 声明**消费**（本批要装配哪些引用），
+	// Target 声明**发布**（本批供谁引用）。同一关系可只发布、只消费或两者兼有。
+	Target string
+
+	// Assemblies 本批子数据的引用装配声明（v3，可选）。
+	//
+	// 与 Remaps（v1/v2 的事后重映射）**互斥**：同一关系不允许同时配置两者
+	// （构造期报错，见 §8.1 B3）—— 两套机制并存会让行为难以预期。
+	// heims 按关系逐个迁移，不需要同一关系半旧半新。
+	//
+	// 装配与重映射的本质区别在**时点**：
+	//
+	//	v1/v2：落库时才生成新 ULID → 事后回头把引用改对（需要映射表/顺序校验/catalog）
+	//	v3  ：请求入口预分配 ULID → 引用在落库前一次性写对（不需要任何映射传递）
+	//
+	// 因此配置了 Assemblies 的批次：
+	//   - 在阶段 1（展开请求树）为本批记录预分配 ULID 并登记索引；
+	//   - 在阶段 2（全树预分配完成后）统一装配；
+	//   - 阶段 3 落库时 PK 已存在，service 不再生成、引用不再修改。
+	//
+	// 配置示例见 handler/assembly.go 的 ReferenceAssembly 文档。
+	Assemblies []ReferenceAssembly
 }
 
 // ============================================================

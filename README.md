@@ -29,6 +29,8 @@ go get github.com/Huey1979/gocrux
   - [级联创建跨实体引用](#级联创建跨实体引用)
   - [版本重建时的子记录引用重映射](#版本重建时的子记录引用重映射cascaderelationremaps)
   - [跨级联批次的引用重映射](#跨级联批次的引用重映射remapkey--sourceremapkey)
+  - [引用装配（v3：Target + Assemblies）](#引用装配v3target--assemblies)
+  - [外部引用解析（引用已存在的实体）](#外部引用解析引用已存在的实体)
 - [版本管理](#版本管理)
   - [草稿可见性过滤](#草稿可见性过滤)
 - [身份认证与授权](#身份认证与授权)
@@ -1632,6 +1634,171 @@ siteHandler.SetHandlerReg(handlerReg)
 3. 创建 `write_fields` 前，框架将 `__ref:form_field:ff1__` 替换为 `01JXXXX...`
 
 > `_temp_ref` 字段不会写入数据库，仅用于级联期间的临时引用。
+
+### 引用装配（v3：`Target` + `Assemblies`）
+
+> 设计文档：`doc/design_ulid_preallocation_2026-09-21.md`（三方确认口径）
+
+v1/v2 的「事后重映射」把 ULID 的确定时机留在落库那一刻，因此必须靠映射表、
+顺序校验与 catalog 把引用"追回来"。v3 换掉时点：**请求入口预分配 ULID，
+引用在落库前一次性写对**，因此不再需要映射传递。
+
+三阶段（这是「无装配顺序依赖」的关键）：
+
+```
+阶段 1：展开请求树 + 为整棵树预分配 ULID + 登记目标索引
+阶段 2：基于完整索引统一装配所有引用
+阶段 3：各 Handler 正常落库（顺序任意）
+```
+
+**1 与 2 绝不能合并**：若"边展开边装配"，消费分支可能在目标分支登记前就装配
+—— 那正是「装配可见性依赖」，会重新需要 v2 的顺序校验与 catalog。
+
+#### 发布方：`CascadeRelation.Target`
+
+```go
+CascadeRelation{
+    HandlerName:   "form_write_field",
+    ChildrenField: "write_fields",
+    FKField:       "form_ulid",
+    OnCreate:      true,
+    Target:        "form.write_field",   // ← 本批记录作为装配目标（供他处引用）
+}
+```
+
+#### 消费方：`CascadeRelation.Assemblies`
+
+```go
+CascadeRelation{
+    HandlerName:   "form_list_column",
+    ChildrenField: "list_columns",
+    OnCreate:      true,
+    Assemblies: []ReferenceAssembly{{
+        Source: "field_ulid",                   // 引用字段（路径）
+        Target: "form.write_field",             // ULID 来源；留空 = 本批次自身
+        Match:  map[string]string{"field_code": "field_code"},
+        Assign: map[string]string{"field_ulid": "ulid"},
+    }},
+}
+```
+
+`Source` 路径形态：`field_ulid`（标量）/ `error_on[]`（逐元素）/
+`options.target`（固定嵌套）/ `$` 或留空（当前子记录本身）。只支持**一层**数组标记。
+
+#### 存在性判定（最容易踩错的一条）
+
+判定依据是**引用字段（`Assign` 的目标键）的 key 是否存在**，而不是值是否为空：
+
+| 源数据形态 | 处理 |
+|:--|:--|
+| key 不存在 | code-only 引用 → 跳过，**不生成、不补写** ULID |
+| key 存在，值为 `""` / `null` | ULID-bearing 模式 → 按 `Match` 回填本批次新 ULID |
+| key 存在，值为旧 ULID | 重写为本批次新 ULID |
+| key 存在，值已是本批次新 ULID | 幂等跳过（`Idempotent`） |
+| `Match` 匹配不到 | WARN + 保留旧值（应用侧发布门禁负责 fail-closed） |
+| `Match` 命中多条 | **报错** `ErrAssemblyAmbiguous`（匹配键唯一性是前提） |
+
+不能拿 `Match` 键（如 `field_code`）判定存在性 —— code-only 引用同样带 `field_code`，
+用它判定会把「只传 code」的引用偷偷升级成 ULID。
+
+对象数组（`error_on[]`）按元素**独立**判定：某元素不带 `field_ulid` key → 该元素跳过，
+不影响同一数组里的其它元素。批内自引用（`Target` 留空）时，候选集合会排除
+正在装配的那条记录自身（否则「记录引用自己」会被判为命中多条）。
+
+#### 凭证闭环（区分「自己生成的」与「前端伪造的」）
+
+预分配时把 ULID 记入**请求级注册表**（挂 ctx、进程内存、随请求释放），
+`service._beforeCreate` 落库前校验：
+
+- PK 非空且在注册表中 → 框架生成 → 信任，直接落库（不重新生成）；
+- PK 非空但不在注册表中 → 外部传入 → **重新生成**（子表批次一律不登记外部 PK）；
+- 未挂载注册表（未迁移的调用方）→ 保持既有「非空即信任」语义，零影响。
+
+> 顶层实体例外：请求显式传入的顶层主键仍按既有语义沿用（向后兼容），
+> 因此防伪强度是「子表严于顶层」。
+
+默认实现零配置；`SetTicketVerifier` 可替换为 HMAC / Redis 等实现（语义等价）。
+
+#### 主键冲突（概率 ≈ 1.2e-24）
+
+```go
+tc := handler.NewTxCoordinator(db, nil).SetRetryOnPKConflict(true)  // 有事务：整树回滚 + 重试 1 次
+h.txCoord.SetRetryOnPKConflict(false)                              // 无事务：不重试
+```
+
+冲突错误统一为 `errs.ErrAssemblyPKConflict`（MySQL 1062 / SQLite UNIQUE /
+Mongo E11000 均可识别），文案提示**重新发起整个请求**（重放同一请求体会复用旧 ULID）。
+无事务部署下走「尽力标删本次已写入记录 + ERROR 日志」，主流程不依赖清理成功。
+
+#### 与 v2 的关系
+
+| 项 | v2（`Remaps` / `RemapKey`） | v3（`Assemblies` / `Target`） |
+|:--|:--|:--|
+| ULID 生成时机 | 落库时 | 请求入口预分配 |
+| 跨分支可见性 | 靠 catalog 传递映射 | 同一请求树内直接可见 |
+| 顺序校验 | L1 / L2 / L3 | 不需要（三阶段） |
+| 分流判据 | `Remaps` / `RemapKey` 非空 | 两者皆空 |
+
+- 同一 `CascadeRelation` **禁止同时配置** `Remaps` 与 `Assemblies`（构造期 panic）；
+- 启动期可调 `h.ValidateAssemblies()` 做全局 L1 校验，**聚合报告**全部找不到声明方的
+  `Target`（若某标识只由 v2 的 `RemapKey` 声明，报告会附迁移提示）；
+- heims 迁移写法：`RemapKey: "x"` → `Target: "x"`（设计文档 §10.1）。
+
+### 外部引用解析（引用**已存在**的实体）
+
+> 与「引用装配」的分工：装配处理**同一请求树内本次新建**的引用（ULID 由预分配产出）；
+> 本节处理**已经存在**的外部实体（如 `data_select` 选中的表单 / 流程）——
+> 它们不在请求树里，无法装配，只能「解析权威版本 → 应用侧校验 → 按策略持久化」。
+
+框架此前对这类引用完全不介入：前端传什么就存什么。于是「只有 ULID」「只有 code」
+「ULID + code」三种形态混成同一种隐式行为，「引用了旧版本」只能靠人工发现。
+
+`ResolveExternalRef` 把「选择意图」解析为「权威身份」：
+
+```go
+resolved, err := h.ResolveExternalRef(ctx, handler.ExternalRefLookup{
+    HandlerName: "form",
+    Code:        "F001",                              // 选择锚点
+    ULID:        "",                                  // 可选：给了就做陈旧检测
+    Mode:        handler.ExternalRefModePublished,    // 留空则自动推导
+})
+// resolved.ULID / resolved.Code / resolved.VersionStatus / resolved.VersionCode / resolved.Record
+```
+
+也可用包级入口（应用侧只有注册表时）：
+
+```go
+resolved, err := handler.ResolveExternalRef(ctx, handlerReg, lookup)
+```
+
+| 模式 | 语义 |
+|------|------|
+| `published` | 按 code 取**线上生效版本**（`version_status='published'`） |
+| `current` | 按 code 取**当前版本**（`is_current=1`，可能仍是编辑中的草稿） |
+| `snapshot` | 按 ULID 取**固定版本**（校验存在、未软删） |
+
+- `Mode` 留空时按以下规则推导（**必须记住这张表**）：
+
+  | 提交 | 推导模式 | 语义 |
+  |------|----------|------|
+  | 仅 `Code` | 版本化 → `published`；非版本化 → `current` | 按 code 解析 |
+  | 仅 `ULID` | `snapshot` | 固定该版本 |
+  | `Code` + `ULID` | `published` | 按 code 解析权威版本并**校验一致** |
+
+  需要「固定版本**同时**带 code」时必须**显式**传 `Mode=snapshot`；
+- `Code` + `ULID` 的组合会做**陈旧检测**：不一致返回
+  `ErrExternalRefStale`（「版本已变化，请重新选择」）—— 绝不静默改成新版本；
+- 目标不存在 / 已软删 → `ErrExternalRefNotFound`（404）；未注册 / 未实现解析能力 →
+  `ErrExternalRefTargetMissing`（500）；参数不合法 → `ErrExternalRefInvalidParam`（4001）；
+  陈旧 → `ErrExternalRefStale`（409）。
+
+⚠ **`GetByCode` 与 `GetPublishedByCode` 的区别**（容易踩）：前者取 `is_current=1`
+（**不论是否 published**，编辑中的草稿同样命中），后者取 `version_status='published'`。
+存在草稿时二者指向不同行。
+
+**框架不做的部分**（属业务语义，应用侧负责）：权限 / 数据归属 / 业务状态校验，
+以及最终持久化形态（只存 `ulid`、只存 `code`、还是存 `{ulid, code}` 与数组包装）——
+应用拿到权威身份后自行组装。
 
 ---
 
