@@ -88,6 +88,16 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 			}
 			results = created
 
+			// 应用方 §27.3：本 Handler 记录自身也可作为装配目标（祖先作为发布方）。
+			// 关系级 Target 只能发布子批次，顶层/祖先记录没有对应关系，故用
+			// HandlerConfig.Target 声明。
+			//
+			// 登记的是**落库后的实体快照**（而不是请求 map）：请求里往往缺少
+			// Match 需要的字段（update 尤其如此，如 code 通常不在请求体里），
+			// 用请求 map 会让消费方的 Match 因缺字段而落空。目标记录只被读取
+			// （Match 与 Assign 的源），故用快照不影响落库内容。
+			h.registerRootTargetFromResults(preallocRegistryFrom(txCtx), created)
+
 			// 2. 级联创建子实体（按级联关系归拢，每个关系只调一次 DoCreate → 一次 InsertBatch）
 			if rawMaps == nil {
 				return nil
@@ -111,118 +121,58 @@ func (h *GenericHandler[M]) _doCreate(ctx context.Context, input []service.CrudR
 			// （会造成装配可见性依赖，从而又需要 v2 的顺序校验与 catalog）。
 			// ============================================================
 
-			// batch 一个待落库的子批次（阶段 1 的产物）。
-			type createBatch struct {
-				rel       CascadeRelation
-				child     CascadeHandler
-				childData []map[string]any
-				tempRefs  map[string]tempRefEntry
-			}
-			var batches []createBatch
-
-			// ---------- 阶段 1：收集 + 预分配 + 登记 ----------
-			for _, rel := range h.config.Cascades {
-				if !rel.OnCreate {
-					continue
-				}
-				// 先收集所有父实体的子数据并注入 FK
-				var allChildData []map[string]any
-				for i, parent := range created {
-					parentPK := extractPKFromResult(parent)
-					childData := extractChildData(rawMaps[i], rel.ChildrenField, rel.ChildrenWrapKey)
-					for j := range childData {
-						setByPath(childData[j], rel.FKField, parentPK)
-					}
-					allChildData = append(allChildData, childData...)
-				}
-				if len(allChildData) == 0 {
-					continue
-				}
-
-				childHandler := h.handlerReg.Get(rel.HandlerName)
-				if childHandler == nil {
-					continue
-				}
-
-				// 预分配本批 ULID 并登记 Target 索引（v3）。
-				// 注意：预分配**不能**独立遍历请求树（工程前提 A3）—— 这里用的
-				// 正是真实级联展开路径上的 childData，因此「分配给 A 的值必然
-				// 用在 A 上」。未配置 Assemblies / 未挂载注册表时本调用是空操作。
-				//
-				// ⚠ 仅在**纯 v3 批次**（该关系未配 Remaps/RemapKey）时预分配：
-				// v2 通道的语义是「落库时才生成新 ULID」（映射表需要「旧 → 新」的
-				// 对照），若在此提前填入 ULID，v2 的 prepareRemap 会把「新 ULID」
-				// 记成旧 PK 的值，导致映射失效（实测：v2 用例
-				// TestRemapUpdateRewritesScalarRefToNewVersion 精确失败）。
-				// 两套机制本就互斥（构造期校验），故按关系分流是正确的隔离方式。
-				if useV3Prealloc(rel) {
-					cascadeCtx = preallocateChildBatch(cascadeCtx, rel, rel.HandlerName,
-						childHandler.PKField(), allChildData)
-				}
-
-				// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
-				// 在级联创建前，将子数据中的代码字段解析为实际的 ULID 外键值。
-				// 预分配已填好 PK 时它以预分配值为准（resolveSelfFKCodeRefs 幂等）。
-				if sfk := childHandler.SelfFKField(); sfk != "" {
-					resolveSelfFKCodeRefs(allChildData, childHandler.PKField(), sfk)
-				}
-
-				// 跨实体引用：解析 allChildData 中的 __ref:handler:temp__ 占位符
-				resolveCrossRefs(allChildData, refMap)
-				// 收集本批的 _temp_ref 标记
-				tempRefs := collectTempRefsOrdered(allChildData, rel.HandlerName)
-
-				batches = append(batches, createBatch{
-					rel: rel, child: childHandler,
-					childData: allChildData, tempRefs: tempRefs,
-				})
+			// ---------- 嵌套调用：本批次已由入口完成阶段 1/2 ----------
+			// 入口把「本批次的子树」随 ctx 下传（withBatchNode），嵌套 Handler
+			// 据此跳过预分配/登记/装配 —— 重复登记会让同一记录在目标索引里
+			// 出现两次（命中多条），重复装配则是无用功。
+			if node := batchNodeFrom(ctx); node != nil {
+				return h.persistCreateNodes(cascadeCtx, node.subs, refMap)
 			}
 
-			// ---------- 阶段 2：统一装配（基于完整索引） ----------
-			// 所有批次的 ULID 与索引都已登记完毕，此刻消费方必然能看到目标。
-			if reg := preallocRegistryFrom(txCtx); reg != nil {
-				for bi := range batches {
-					st, asmErr := runAssemblies(txCtx, reg, h.config.Cascades,
-						indexOfCascade(h.config.Cascades, batches[bi].rel),
-						batches[bi].childData,
-						assemblyOwnerID(rawMaps[0]), h.svcName)
-					if asmErr != nil {
-						return asmErr
-					}
-					if st.Unmatched > 0 {
-						// B5：匹配不到是 WARN（应用侧发布门禁负责 fail-closed），
-						// 日志已在 assemble 内输出，此处仅留汇总便于排查。
-						asmWarnf("gocrux: 引用装配存在未匹配项（Handler=%s 批次=%s unmatched=%d）",
-							h.svcName, batches[bi].rel.HandlerName, st.Unmatched)
-					}
+			// ---------- 阶段 1：全树展开 + 预分配 + 登记（递归） ----------
+			// 注意这里是**整棵树**：孙批次（如 form_write_section → form_write_field）
+			// 必须在祖批次的阶段 2 之前完成预分配与登记，否则祖批次直接子批次上的
+			// 消费方装配时目标索引为空（应用方 §25.2 指出的缺陷）。
+			// 顶层父记录的权威 PK 来自 service 落库结果（未启用预分配时请求 map 里没有）
+			parentPKs := make([]any, len(rawMaps))
+			for i := range rawMaps {
+				if i < len(results) {
+					parentPKs[i] = extractPKFromResult(results[i])
+				}
+			}
+			prep, perr := h.prepareCreateSubtree(cascadeCtx, rawMaps, parentPKs,
+				func(r CascadeRelation) bool { return r.OnCreate })
+			if perr != nil {
+				return perr
+			}
+			// 注意：阶段 2/3 继续使用**未下钻**的 cascadeCtx。
+			// prep.ctx 是递归下钻过程中逐层构造的 ctx（visited 与 depth 已按更深层级
+			// 递减），拿它去落库会让子 Handler 把自己判成"已访问过"而短路级联。
+			// 每一层落库时各自 buildCascadeCtx 才是正确口径（与既有实现一致）。
+
+			// ---------- 阶段 2：全树统一装配（递归）+ 装配后编码（后序） ----------
+			if reg := preallocRegistryFrom(cascadeCtx); reg != nil {
+				owner := ""
+				if len(rawMaps) > 0 {
+					owner = assemblyOwnerID(rawMaps[0])
+				}
+				if _, aerr := assembleTree(cascadeCtx, reg, prep.nodes, owner, h.svcName); aerr != nil {
+					return aerr
+				}
+				// §26.3：装配全部完成后才做「深到浅」编码 —— 子层先于父层
+				// （外层若先被序列化成文本，内层随后的装配改动就进不去那段文本）。
+				if aerr := encodeTree(cascadeCtx, prep.nodes); aerr != nil {
+					return aerr
+				}
+				if aerr := h.runAfterCascadeAssemble(cascadeCtx, rawMaps); aerr != nil {
+					return aerr
 				}
 			}
 
-			// ---------- 阶段 3：落库（顺序任意） ----------
-			for bi := range batches {
-				b := batches[bi]
-				// 批次内横向引用重映射（v1/v2 通道）：与 Assemblies 互斥
-				// （构造期已校验），故配置了 Assemblies 时不会进入此分支。
-				childCtx := cascadeCtx
-				if len(b.rel.Remaps) > 0 || b.rel.RemapKey != "" {
-					childCtx = stageRemapWithKey(cascadeCtx, b.rel.HandlerName, b.rel.Remaps,
-						b.childData, b.child.PKField(), b.rel.RemapKey,
-						b.rel.PublishCodeField, resolveRemapPublishers(b.rel, h.config.Cascades))
-				}
-
-				// 传递含 visited + depth 的 context，子 Handler 可感知级联链状态
-				pks, txErr := b.child.DoCreate(childCtx, b.childData)
-				if txErr != nil {
-					return errs.ErrCascadeCreate(b.rel.HandlerName, txErr)
-				}
-				// 登记已落库记录（无事务冲突兜底清理用，设计文档 §7.3）
-				for _, pk := range pks {
-					markWrittenRecord(txCtx, b.rel.HandlerName, scalarToString(pk))
-				}
-				// 将本批创建的实体 ULID 加入引用映射，供后续级联批次使用
-				updateRefMap(refMap, b.tempRefs, pks)
-			}
-			return nil
+			// ---------- 阶段 3：全树落库（递归，顺序任意） ----------
+			// 每个批次把「本批次子树」随 ctx 交给子 Handler（withBatchNode），
+			// 因此嵌套层不会重新展开、也不会重新预分配（A3：同一批句柄）。
+			return h.persistCreateNodes(cascadeCtx, prep.nodes, refMap)
 		})
 		if err != nil {
 			// 主键冲突：有事务部署已在 runWithPKRetry 内整树回滚并重试；
@@ -266,7 +216,6 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 		}
 
 		rawMaps, _ := ctx.Value(rawUpdateMapsKey{}).([]map[string]any)
-		isVersioned := h.svc.IsVersionMode()
 
 		// 预分配通道（v3）：同 _doCreate —— 绕过 HTTP 管线直接调用时幂等补齐
 		// 注册表（顶层 PK 不在此重分配：update 的主键来自请求的 id，
@@ -278,13 +227,36 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 		err := h.txCoord.RunWithPKRetry(ctx, func(txCtx context.Context) error {
 			cascadeCtx := h.buildCascadeCtx(txCtx)
 
+			// ---------- 嵌套调用：本批次已由入口完成阶段 1/2 ----------
+			// 入口把「本批次的子树」随 ctx 下传（withBatchNode），嵌套 Handler
+			// 据此跳过回填/清 PK/预分配/登记/装配，只做本层记录的落库。
+			if node := batchNodeFrom(ctx); node != nil {
+				for _, req := range reqs {
+					if forceCreate || req.GetID() == nil {
+						created, txErr := h.svc.Create(txCtx, []service.CrudRequest[M]{req})
+						if txErr != nil {
+							return txErr
+						}
+						results = append(results, created[0])
+						continue
+					}
+					r, txErr := h.svc.Update(txCtx, req.GetID(), req)
+					if txErr != nil {
+						return txErr
+					}
+					results = append(results, r)
+				}
+				return h.persistUpdateNodes(cascadeCtx, node.subs)
+			}
+
+			// ---------- 入口：逐条更新/创建父记录，并准备整棵子树 ----------
+			// 记录集合 = raw map（句柄）+ 落库前后身份（回填查询 / FK 注入 / 目标登记）。
+			var records []updateLevelRecord
 			for i, req := range reqs {
 				var result *M
 				var oldPK any
-				var txErr error
 
 				shouldCreate := forceCreate || req.GetID() == nil
-
 				if shouldCreate {
 					created, txErr := h.svc.Create(txCtx, []service.CrudRequest[M]{req})
 					if txErr != nil {
@@ -293,180 +265,64 @@ func (h *GenericHandler[M]) _doUpdate(ctx context.Context, reqs []service.CrudRe
 					result = created[0]
 				} else {
 					oldPK = req.GetID()
-					result, txErr = h.svc.Update(txCtx, oldPK, req)
+					updated, txErr := h.svc.Update(txCtx, oldPK, req)
 					if txErr != nil {
 						return txErr
 					}
-				}
-
-				newPK := extractPKFromResult(result)
-				// 版本化向下传播：一旦本节点或父节点是版本化的，子节点必须按版本化处理
-				passParentVersioned := isVersioned || parentVersioned
-
-				// 级联委托子 Handler 的 DoUpdate（三阶段，同 _doCreate）
-				if rawMaps != nil && i < len(rawMaps) {
-					raw := rawMaps[i]
-
-					// updateBatch 一个待落库的子批次。
-					type updateBatch struct {
-						rel         CascadeRelation
-						child       CascadeHandler
-						childData   []map[string]any
-						passToChild bool
-						// oldPKs v2 通道所需的旧主键快照（在清 PK 之前留存）。
-						// v3 通道不使用（装配基于预分配 ULID，不需要「旧 → 新」对照）。
-						oldPKs []string
-					}
-					var ubatches []updateBatch
-
-					// ---------- 阶段 1：收集 + 预分配 + 登记 ----------
-					for _, rel := range h.config.Cascades {
-						if !rel.OnUpdate {
-							continue
-						}
-						childHandler := h.handlerReg.Get(rel.HandlerName)
-						if childHandler == nil {
-							continue
-						}
-
-						childData := extractChildData(raw, rel.ChildrenField, rel.ChildrenWrapKey)
-						_, hasChildren := raw[rel.ChildrenField]
-						// v2 通道：本批是否走「落库时生成 ULID + 事后重映射」。
-						// 与 v3 预分配互斥（构造期已校验），故按关系分流是干净的。
-						isV2 := !useV3Prealloc(rel)
-						var oldPKs []string
-
-						if !hasChildren {
-							if oldPK == nil {
-								continue // 新建记录无子数据 → 跳过后代
-							}
-							oldChildren, txErr := childHandler.DoList(txCtx, rel.FKField, oldPK, false)
-							if txErr != nil {
-								return errs.ErrCascadeUpdateBackfill(rel.HandlerName, txErr)
-							}
-							childData = oldChildren
-
-							// 为 backfill 数据补充 id 键，确保 GetID() 能匹配到主键
-							// 使用 childHandler.PKField() 精确定位，避免后缀匹配误取 FK（BUG-035）。
-							// childData 的 key 是 JSON 字段名（marshalToMap），PKField() 可能返回
-							// gorm 列名（如 field_ulid）而非 JSON 名（ulid，gentity 约定），
-							// 两者都查，避免 id 注入失败（BUG-060）。
-							pkField := childHandler.PKField()
-							for j := range childData {
-								if _, ok := childData[j]["id"]; !ok {
-									if pkVal, exists := childData[j][pkField]; exists && pkVal != nil && pkVal != "" {
-										childData[j]["id"] = pkVal
-									} else if pkVal, exists := childData[j]["ulid"]; exists && pkVal != nil && pkVal != "" {
-										childData[j]["id"] = pkVal
-									}
-								}
-							}
-						} else if !passParentVersioned && oldPK != nil {
-							// 父非版本化且有请求子数据 → 先清理旧子记录（全量替换）
-							if txErr = childHandler.DoDeleteByFK(txCtx, rel.FKField, []any{oldPK}); txErr != nil {
-								return errs.ErrCascadeUpdateCleanup(rel.HandlerName, txErr)
-							}
-						}
-
-						// 计算传递给子 Handler 的版本化标志
-						passToChild := passParentVersioned
-						// 非版本化全量替换：旧子记录已删，子数据应走 CREATE 而非 UPDATE（BUG-018 修复）
-						if !passParentVersioned && hasChildren && oldPK != nil {
-							passToChild = true
-						}
-
-						// 当 passToChild=true 时（版本化 or 非版本化全量替换），
-						// 子记录的旧 PK 必须清除，否则 CREATE 时会与旧记录冲突（BUG-020）。
-						// 版本化父表回填（未携带子表）同样进入：清除 PK 走 CREATE，
-						// 为每个新版本复制重建子表快照，旧版本子行保持不变（BUG-059）。
-						if passToChild && (hasChildren || passParentVersioned) {
-							if isV2 {
-								// v2 通道：**只清 PK，不填预分配值** —— v2 的语义是
-								// 「落库时才生成新 ULID，再回头重写引用」，它的映射表需要
-								// 「旧 ULID → 新 ULID」的对照，故新 ULID 必须留给 service 生成。
-								// 旧 PK 快照在此留存（清之前），供 prepareRemap 构建映射。
-								oldPKs = snapshotPKs(childData, childHandler.PKField())
-								clearChildPKs(childData, childHandler.PKField())
-							} else {
-								// v3 通道：清 PK 后**立即填回预分配值**，这样引用可以在
-								// 落库前装配（设计文档 §5.2①）。填回前先建立「旧子记录 ↔
-								// 预分配项」的身份映射 —— 无法唯一对应则报错，
-								// 绝不按位置静默猜测（应用方 §13.4）。
-								if _, txErr := rebuildChildPKs(preallocRegistryFrom(txCtx),
-									rel.HandlerName, childHandler.PKField(), childData); txErr != nil {
-									return txErr
-								}
-							}
-							// 自引用 FK 代码解析（如 parent_menu_code → parent_item_ulid）
-							// PK 已清除/已填预分配值，在此解析代码字段，子 Handler 的
-							// _beforeCreate → MergeTo 会保留这些值。
-							if sfk := childHandler.SelfFKField(); sfk != "" {
-								resolveSelfFKCodeRefs(childData, childHandler.PKField(), sfk)
-							}
-						}
-						// 补充子数据时：
-						// - 非版本化父表：现有子记录只需更新 FK，不强制创建（原地改 FK 语义保留，BUG-018/020）
-						// - 版本化父表：passToChild 保持 true，回填数据已清除 PK，走 CREATE 复制重建（BUG-059）
-						if !hasChildren && oldPK != nil && !passParentVersioned {
-							passToChild = false
-						}
-
-						// 预分配本批 ULID 并登记 Target 索引（v3，仅纯 v3 批次，见 _doCreate 的说明）。
-						// 注意顺序：必须在 rebuildChildPKs **之后** —— 重建路径已填好
-						// 预分配值（幂等），此处只为「未清 PK 的批次」（如非版本化的
-						// 原地更新分支）补分配，并统一完成 Target 索引登记。
-						if !isV2 {
-							cascadeCtx = preallocateChildBatch(cascadeCtx, rel, rel.HandlerName,
-								childHandler.PKField(), childData)
-						}
-
-						ubatches = append(ubatches, updateBatch{
-							rel: rel, child: childHandler,
-							childData: childData, passToChild: passToChild,
-							oldPKs: oldPKs,
-						})
-					}
-
-					// ---------- 阶段 2：统一装配（基于完整索引） ----------
-					if reg := preallocRegistryFrom(txCtx); reg != nil {
-						for bi := range ubatches {
-							st, asmErr := runAssemblies(txCtx, reg, h.config.Cascades,
-								indexOfCascade(h.config.Cascades, ubatches[bi].rel),
-								ubatches[bi].childData, assemblyOwnerID(raw), h.svcName)
-							if asmErr != nil {
-								return asmErr
-							}
-							if st.Unmatched > 0 {
-								asmWarnf("gocrux: 引用装配存在未匹配项（Handler=%s 批次=%s unmatched=%d）",
-									h.svcName, ubatches[bi].rel.HandlerName, st.Unmatched)
-							}
-						}
-					}
-
-					// ---------- 阶段 3：落库（顺序任意） ----------
-					for bi := range ubatches {
-						b := ubatches[bi]
-						// 级联引用重映射（v1/v2 通道）：旧主键快照在阶段 1 清 PK 之前
-						// 已留存（b.oldPKs），此处据此登记重映射任务；真正的重写由子
-						// Handler 在落库前执行（service BeforeCreatePersist 钩子）。
-						// 与 Assemblies 互斥（构造期已校验）。
-						childCtx := cascadeCtx
-						if len(b.rel.Remaps) > 0 || b.rel.RemapKey != "" {
-							childCtx = stageRemapWithKeyOldPKs(cascadeCtx, b.rel.HandlerName, b.rel.Remaps,
-								b.childData, b.oldPKs, b.child.PKField(), b.rel.RemapKey,
-								b.rel.PublishCodeField, resolveRemapPublishers(b.rel, h.config.Cascades))
-						}
-
-						// 传递含 visited + depth（以及重映射登记项）的 context，
-						// 子 Handler 可感知级联链状态并在落库前完成引用重写
-						if txErr = b.child.DoUpdate(childCtx, b.rel.FKField, newPK, b.childData, b.passToChild); txErr != nil {
-							return errs.ErrCascadeUpdate(b.rel.HandlerName, txErr)
-						}
-					}
+					result = updated
 				}
 				results = append(results, result)
+
+				newPK := extractPKFromResult(result)
+				var raw map[string]any
+				if rawMaps != nil && i < len(rawMaps) {
+					raw = rawMaps[i]
+				}
+				records = append(records, updateLevelRecord{raw: raw, oldPK: oldPK, newPK: newPK})
+				// 应用方 §27.3：祖先记录自身作为 Target。用**落库后的实体快照**
+				// （update 请求常常只有 id + 改动的字段，缺少 Match 需要的 code 等）。
+				h.registerRootTargetFromResults(preallocRegistryFrom(txCtx),
+					[]*M{result})
 			}
-			return nil
+
+			// ---------- 阶段 1：全树展开 + 回填 + 预分配 + 登记（递归） ----------
+			// 与 _doCreate 同理：必须递归到孙批次及更深，否则祖批次的直接子批次
+			// 在阶段 2 装配时看不到孙批次发布的目标（应用方 §25.2）。
+			prep, perr := h.prepareUpdateSubtree(cascadeCtx, records, parentVersioned)
+			if perr != nil {
+				return perr
+			}
+			// 同 _doCreate：阶段 2/3 用未下钻的 cascadeCtx（prep.ctx 的 visited/depth
+			// 已按更深层级递减，会让子 Handler 误判自己已访问而短路级联）。
+
+			// ---------- 阶段 2：全树统一装配（递归）+ 装配后编码（后序） ----------
+			if reg := preallocRegistryFrom(cascadeCtx); reg != nil {
+				owner := ""
+				for _, r := range records {
+					if r.raw != nil {
+						owner = assemblyOwnerID(r.raw)
+						break
+					}
+				}
+				if _, aerr := assembleTree(cascadeCtx, reg, prep.nodes, owner, h.svcName); aerr != nil {
+					return aerr
+				}
+				// §26.3：装配全部完成后才「深到浅」编码（子层先于父层）
+				if aerr := encodeTree(cascadeCtx, prep.nodes); aerr != nil {
+					return aerr
+				}
+				for _, r := range records {
+					if r.raw == nil {
+						continue
+					}
+					if aerr := h.runAfterCascadeAssemble(cascadeCtx, []map[string]any{r.raw}); aerr != nil {
+						return aerr
+					}
+				}
+			}
+
+			// ---------- 阶段 3：全树落库（递归，顺序任意） ----------
+			return h.persistUpdateNodes(cascadeCtx, prep.nodes)
 		})
 		if err != nil {
 			return nil, err

@@ -1730,6 +1730,98 @@ h.txCoord.SetRetryOnPKConflict(false)                              // 无事务�
 Mongo E11000 均可识别），文案提示**重新发起整个请求**（重放同一请求体会复用旧 ULID）。
 无事务部署下走「尽力标删本次已写入记录 + ERROR 日志」，主流程不依赖清理成功。
 
+#### 嵌套级联：阶段 1/2 按**整棵** Cascade 树递归
+
+这是 v3 的关键前提。若阶段 1/2 只处理「本 Handler 的直接子批次」，那么
+「发布方在孙批次、消费方在祖批次的直接子批次」的树形（heims 表单域的常态：
+
+```text
+form
+  ├─ form_write_section → form_write_field    ← 发布方在**孙批次**
+  ├─ form_list_column                         ← 消费方在直接子批次
+  └─ form_validation         （error_on[]）
+```
+
+）会在祖批次的阶段 2 装配时**看不到**孙批次（孙批次要到阶段 3 才被登记）→
+只能 Unmatched、保留空 ULID。
+
+因此：
+
+```text
+阶段 1（递归）：展开整棵树 → 每批预分配 ULID → 每个非空 Target 立即登记索引
+阶段 2（递归）：对每一批执行本关系的 Assemblies（此刻全树索引已完整）
+阶段 2'（后序）：每层的装配后处理（见下方规范化钩子），子层先于父层
+阶段 3（递归落库）：保持既有 DoCreate / DoUpdate 顺序
+```
+
+- 递归复用**同一批 `childData` 句柄**（阶段 3 把「本批次子树」随 ctx 下传给
+  嵌套 Handler，嵌套层据此跳过阶段 1/2），因此「分配给 A 的 ULID 一定用在 A 上」；
+- 深度与防环沿用既有 `depth` / `visited` 机制，且**只有**在该批记录已持有
+  权威 PK 时才继续下钻（v2 通道的 ULID 要落库时才生成，其子树仍由嵌套
+  Handler 自行展开 —— 与旧行为一致）。
+- 嵌套层**复用外层事务**（`TxCoordinator` 不再另开一个）：否则单连接池下
+  三层级联会自锁，多连接下会产生一个与父事务无关的空事务。
+
+#### 任意跨级引用：不需要亲属专用配置
+
+同一请求树内，引用能力不按「亲兄弟 / 堂兄弟 / 叔侄 / 爷孙」分类，
+所有批次统一用 `Target + Assemblies`；差异只在**目标准备时机**与声明位置：
+
+| 关系 | 树形示例 | 说明 |
+|:--|:--|:--|
+| 亲兄弟 | `root.A`、`root.B` | 同一父的直接子批次互引 |
+| 堂兄弟 | `root.A.A1`、`root.B.B1` | 两个分支的孙批次互引 |
+| 叔侄 | `root.A`、`root.B.B1` | 跨层级、跨分支互引 |
+| 爷孙 | `root.A`、`root.A.A1` | 同分支跨层互引 |
+| 更远 | 四层及以上 | 只受 `MaxExpandDepth` / 防环机制约束 |
+
+前提只有两条：① 双方在**同一次请求展开的 Cascade 树内**；② 消费方匹配前，
+发布方已登记。若发布方是**库里已存在**的实体（不在本次请求树内），
+那不是装配，应走外部引用解析。
+
+#### 祖先记录自身作为 Target：`HandlerConfig.Target`
+
+`CascadeRelation.Target` 只能发布**子批次**；顶层/祖先记录没有对应的关系，
+若引用方向是「子孙 → 祖记录本身」，用 `HandlerConfig.Target` 声明：
+
+```go
+HandlerConfig[*Form]{
+    Target:   "root.form",     // ← 本 Handler 的记录可被任意批次引用
+    Cascades: []CascadeRelation{...},
+}
+```
+
+登记的是**落库后的实体快照**（而非请求 map）：update 请求通常只有
+`{id, 改动字段}`，缺少 `Match` 需要的 `code` 等字段，用请求 map 会让消费方
+匹配落空。主键同时以 PK 列名与约定 JSON 名 `ulid` 写入，`Assign` 取值键两种都能命中。
+
+#### 装配前 / 后处理：`BeforeCascadePrepare` / `AfterCascadeAssemble`
+
+装配器按 **JSON 字段名**在 raw map 上求值，因此要求被装配的节点已是对象/数组；
+而这两类数据仍可能是 JSON 文本：
+
+1. 请求体（历史调用方仍传字符串）；
+2. 数据库存量数据与「版本化 update 未传子表」时的 **DB 回填数据**。
+
+框架**不猜**哪个字符串是 JSON（普通字符串若恰好长得像 JSON 必须保持原样），
+由应用按自己的 schema 在这对钩子里处理：
+
+```go
+h.SetHooks(HandlerHooks[*Column]{
+    // 本层记录即将被展开/预分配/装配之前：浅到深（外层不解码，内层路径根本不存在）
+    BeforeCascadePrepare: func(ctx context.Context, rawMaps []map[string]any) error { ... },
+    // 本层（含更深层）装配全部完成之后、落库之前：深到浅（子层先于父层）
+    AfterCascadeAssemble: func(ctx context.Context, rawMaps []map[string]any) error { ... },
+})
+```
+
+契约要点：
+
+- 收到的 `rawMaps` 就是后续提取、预分配与**落库实际读取的同一批 map 句柄**，原地修改即可；
+- **逐层触发**（含叶子层）：DB 回填数据在请求体里不存在，只在入口做一次钩不住；
+- 仅在**装配通道启用**（该请求挂了预分配注册表）时触发；未启用装配的调用方零影响；
+- 编码必须**后序**（子先父后）：外层若先序列化成文本，内层随后的装配改动就进不去那段文本。
+
 #### 与 v2 的关系
 
 | 项 | v2（`Remaps` / `RemapKey`） | v3（`Assemblies` / `Target`） |

@@ -106,9 +106,23 @@ func (tc *TxCoordinator) Run(ctx context.Context, fn func(txCtx context.Context)
 }
 
 // RunMySQL 在 GORM 事务内执行。
+//
+// 级联场景（ctx 中已携带外层事务）**直接复用外层事务**，不另开一个：
+//
+//   - 另开会占用第二个连接 —— 连接池被占满时自锁（实测 sqlite SetMaxOpenConns(1)
+//     的三层级联直接死锁）；
+//   - 即使连接充足，新开的事务与父事务无关，只是空转（写入仍走 ctx 里的 tx），
+//     徒增开销并让「事务边界」变得难以推理。
+//
+// 这与 Run 中 Mongo 分支的判断同源（已有 session → 不另开事务），此前 MySQL
+// 分支缺了这一步。层级 ≥3 的级联（如 heims form → section → field）才会触发，
+// 因此长期未被发现。
 func (tc *TxCoordinator) RunMySQL(ctx context.Context, fn func(txCtx context.Context) error) error {
 	ctx, _ = WithRemapCatalog(ctx)
 	if tc.db == nil {
+		return fn(ctx)
+	}
+	if common.GetTx(ctx) != nil {
 		return fn(ctx)
 	}
 	return tc.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

@@ -387,8 +387,11 @@ func matchRecords(
 // 语义：每个 Match 键都要命中；容器侧键不存在 → 视为不匹配
 // （调用方已保证至少存在一个匹配键）。
 func recordMatches(container, candidate map[string]any, match map[string]string) bool {
-	for _, srcKey := range match {
-		tgtKey := match[srcKey]
+	// 注意：必须是 key→value 双变量 range —— 单变量 range 取到的是**值**，
+	// 拿它再当 key 查只会得到空串。此前所有用例的 Match 都写成
+	// {"field_code": "field_code"}（键值同名），因此这个错误一直没暴露；
+	// 一旦写成 {"form_code": "code"}（源键 ≠ 目标键）匹配就恒失败。
+	for srcKey, tgtKey := range match {
 		sv, ok := getByPath(container, srcKey)
 		if !ok {
 			return false

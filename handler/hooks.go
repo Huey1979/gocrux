@@ -84,4 +84,31 @@ type HandlerHooks[M service.Record] struct {
 	BeforeEditVersion func(ctx context.Context, id any, patches map[string]any) (any, map[string]any, error)
 	DoEditVersion     func(ctx context.Context, id any, patches map[string]any) (*M, error)
 	AfterEditVersion  func(ctx context.Context, result *M) (*M, error)
+
+	// -------- 整树装配前后：raw map 树规范化（应用方 §26.3） --------
+	//
+	// 为什么需要这对钩子：装配器按 **JSON 字段名**在 raw map 上做路径求值 /
+	// Match / Assign，因此它要求「被装配的节点已经是对象/数组」。
+	// 而以下两类数据仍可能是 **JSON 文本**（type:json 列 / 表单配置的 JSON 字段）：
+	//
+	//	① 请求体（历史调用方仍传字符串）；
+	//	② 数据库存量数据与「版本化 update 未传子表」时的 DB 回填数据。
+	//
+	// 框架**不猜**哪个字符串是 JSON（普通字符串若恰好长得像 JSON 必须保持原样），
+	// 因此由应用按自己的 schema 实现这一步。
+	//
+	// 契约（与执行时机的对应关系，逐层触发）：
+	//
+	//	BeforeCascadePrepare  本层记录即将被展开/预分配/装配**之前**。
+	//	                      必须「浅到深」：外层 JSON 文本不先解码，内层路径根本不存在。
+	//	                      收到的 rawMaps 就是**后续 _doCreate/_doUpdate、
+	//	                      预分配与装配实际读取的同一批 map 句柄**（原地修改即可）。
+	//	AfterCascadeAssemble  本层（含更深层）的装配**全部完成之后、落库之前**。
+	//	                      必须「深到浅」：先把内层恢复成字符串，再序列化包含它的外层
+	//	                      （框架按后序调用，子层先于父层）。
+	//
+	// 触发范围：仅在**装配通道启用**（该请求挂了预分配注册表）时触发；
+	// 未启用装配的调用方行为完全不变（零影响）。
+	BeforeCascadePrepare func(ctx context.Context, rawMaps []map[string]any) error
+	AfterCascadeAssemble func(ctx context.Context, rawMaps []map[string]any) error
 }

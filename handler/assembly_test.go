@@ -58,7 +58,9 @@ type asmField struct {
 	ParentID  string `gorm:"column:parent_ulid;size:26" json:"parent_ulid"`
 	FieldCode string `gorm:"column:field_code;size:64" json:"field_code"`
 	Name      string `gorm:"column:name;size:100" json:"name"`
-	IsDeleted int8   `gorm:"column:is_deleted;default:0" json:"-"`
+	// FieldAccess 字段级访问配置（模拟 heims field_access[]）：批内自引用用例
+	FieldAccess string `gorm:"column:field_access;type:json" json:"field_access"`
+	IsDeleted   int8   `gorm:"column:is_deleted;default:0" json:"-"`
 }
 
 func (d *asmField) SetDefaults()             {}
@@ -138,12 +140,12 @@ func captureAsmWarn() (func() []string, func()) {
 		msgs = append(msgs, fmt.Sprintf(format, args...))
 	}
 	return func() []string {
-			mu.Lock()
-			defer mu.Unlock()
-			out := make([]string, len(msgs))
-			copy(out, msgs)
-			return out
-		}, func() { asmLogger = prev }
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]string, len(msgs))
+		copy(out, msgs)
+		return out
+	}, func() { asmLogger = prev }
 }
 
 // ============================================================
@@ -368,7 +370,7 @@ func TestAsmExistenceIdempotent(t *testing.T) {
 func TestAsmArrayElementIndependentJudgement(t *testing.T) {
 	src := asmRec(map[string]any{
 		"error_on": []any{
-			map[string]any{"field_code": "amount"},               // key 缺失 → 跳过
+			map[string]any{"field_code": "amount"},                // key 缺失 → 跳过
 			map[string]any{"field_code": "qty", "field_ulid": ""}, // key 存在 → 回填
 		},
 	})

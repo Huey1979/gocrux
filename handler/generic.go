@@ -75,6 +75,22 @@ type HandlerConfig[M service.Record] struct {
 	// 配置后，Create / Delete / Get / List 自动处理子表联动（List 中批量展开子记录）。
 	Cascades []CascadeRelation
 
+	// Target 本 Handler **记录自身**的装配发布标识（v3，可选；应用方 §27.3）。
+	//
+	// 场景：引用方向是「子孙批次 → 祖批次记录本身」时（如 flow_node 引用它所属的
+	// flow 记录）。CascadeRelation.Target 只能声明子批次，祖先记录没有对应的关系，
+	// 因此需要在这里单独声明。
+	//
+	//	HandlerConfig[*Flow]{
+	//	    Target:   "root.flow",       // ← 本 Handler 的记录可被任意批次引用
+	//	    Cascades: []CascadeRelation{...},
+	//	}
+	//
+	// 与关系级 Target 的分工：关系级 Target 发布的是**子批次**记录；
+	// 本字段发布的是**本 Handler 自身**的记录（顶层/祖先）。二者命名空间共用，
+	// 因此不要重名。消费方写法完全相同（Assemblies[].Target 指向该标识）。
+	Target string
+
 	// References 向上级联声明（可选，子→父）。
 	// 配置后，Get/List 查询时自动解析本实体的逻辑外键字段（如 site_ulid→site），
 	// 并将解析结果挂到返回 map 的对应键下。
