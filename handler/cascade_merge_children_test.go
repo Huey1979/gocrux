@@ -16,25 +16,31 @@ import (
 )
 
 // ============================================================
-// 回归测试：版本化父级联更新时，非版本化子表的**局部字段**更新不得丢失未提交字段
-// （CascadeRelation.MergeChildrenOnVersionedRebuild）
+// 回归测试：更新父记录**携带子表**时，子表的**局部字段**更新不得丢失未提交字段
+// （CascadeRelation.MergeChildrenOnUpdate）
 //
 // 场景（下游 BUG 报告 cascade_partial_child）：
 //
-//	父 A 版本化，子 B 非版本化（OnUpdate 挂载）。旧子记录 A=1,B=2,C=3,D=4,E=5,F=6；
+//	父 A、子 B 非版本化（OnUpdate 挂载）。旧子记录 A=1,B=2,C=3,D=4,E=5,F=6；
 //	更新父时只提交 B 的 E/F/G → 期望新快照 = 旧 A/B/C/D + 新 E/F/G；
 //	修复前的新快照只有 E/F/G，A~D 退化为零值/默认值。
 //
+// 同一开关**覆盖两条父路径**（应用方要求）：
+//
+//	版本化父  ：合并后清 PK 重建新子快照
+//	非版本化父：合并后仍走该路径既有的「删旧子行 → 全量替换」
+//
 // 测试实体：
 //
-//	bug059VersionedParent（复用 BUG-059 的版本化父，含 code/version/current/status）
-//	mergeChild          非版本化子（PK=child_ulid，JSON 名 ulid；FK=parent_id）
+//	bug059VersionedParent（复用 BUG-059 的父实体，含 code/version/current/status）
+//	mergeChild          子实体（PK=child_ulid，JSON 名 ulid；FK=parent_id）
 //
-// 覆盖（BUG 报告 §六 的四种边界 + 身份匹配）：
+// 覆盖（BUG 报告 §六 的四种边界 + 身份匹配 + 两条路径）：
 //
 //	① 未提交字段保留（旧记录为基底）② 显式置空 ③ 子记录新增
 //	④ 子记录删除（数组即子记录集合）⑤ 按业务 code 兜底匹配 ⑥ code 歧义报错
-//	⑦ 关闭开关时保持既有「请求即完整快照」语义（向后兼容）
+//	⑦ 关闭开关时两条路径都保持既有语义（向后兼容）⑧ 非版本化父路径同样合并
+//	⑨ 旧字段名（兼容别名）仍然生效
 // ============================================================
 
 // mergeChild 非版本化子实体（模拟 heims 的表单子表：字段多、支持局部提交）。
@@ -119,7 +125,7 @@ func newMergeParentHandler(db *gorm.DB, merge bool) *GenericHandler[*bug059Versi
 	cascades := []CascadeRelation{{
 		HandlerName: "merge_child", ChildrenField: "children", FKField: "parent_id",
 		OnCreate: true, OnUpdate: true,
-		MergeChildrenOnVersionedRebuild: merge,
+		MergeChildrenOnUpdate: merge,
 		// 业务 code 作为身份兜底键（前端不带旧 ULID 时按它配对旧子记录）
 		PublishCodeField: "col_code",
 	}}
@@ -129,6 +135,28 @@ func newMergeParentHandler(db *gorm.DB, merge bool) *GenericHandler[*bug059Versi
 		svc:        svc,
 		svcName:    "merge_parent",
 		config:     HandlerConfig[*bug059VersionedParent]{PathPrefix: "/merge/parent", Cascades: cascades},
+		handlerReg: reg,
+		txCoord:    NewTxCoordinator(db, nil),
+	}
+}
+
+// newMergeNonVersionedParentHandler **非版本化**父 Handler（同一开关必须覆盖此路径）。
+func newMergeNonVersionedParentHandler(db *gorm.DB, merge bool) *GenericHandler[*bug059VersionedParent] {
+	svc := service.NewGenericService[*bug059VersionedParent](
+		repository.NewCRUDWithDB[*bug059VersionedParent](db),
+		service.Config[*bug059VersionedParent]{})
+	cascades := []CascadeRelation{{
+		HandlerName: "merge_child", ChildrenField: "children", FKField: "parent_id",
+		OnCreate: true, OnUpdate: true,
+		MergeChildrenOnUpdate: merge,
+		PublishCodeField:      "col_code",
+	}}
+	reg := NewHandlerRegistry()
+	reg.Register("merge_child", newMergeChildHandler(db))
+	return &GenericHandler[*bug059VersionedParent]{
+		svc:        svc,
+		svcName:    "merge_nv_parent",
+		config:     HandlerConfig[*bug059VersionedParent]{PathPrefix: "/merge/nv_parent", Cascades: cascades},
 		handlerReg: reg,
 		txCoord:    NewTxCoordinator(db, nil),
 	}
@@ -397,5 +425,147 @@ func TestCascadeMergeChildrenDisabledKeepsSnapshotSemantics(t *testing.T) {
 	// 既有语义：请求即新版本的**完整**内容 —— 请求没带的字段（含业务 code）一律为空
 	if got.Title != "" || got.Unit != "" || got.Width != 0 || got.ColCode != "" {
 		t.Fatalf("未开启开关时应保持既有语义（请求即完整快照，未提交字段为零值）: %+v", got)
+	}
+}
+
+// -------- ⑧ 非版本化父 + 携带子表：同一开关必须覆盖这条路径 --------
+
+func TestCascadeMergeChildrenNonVersionedParent(t *testing.T) {
+	db := openMergeDB(t)
+	h := newMergeNonVersionedParentHandler(db, true)
+
+	// 非版本化父（PK 显式指定）
+	v1 := mergeCreate(t, h, map[string]any{
+		"parent_ulid": "nv_merge_1", "code": "M6", "name": "v1",
+		"children": []map[string]any{
+			mergeFullChild("c1", "列1", "px", "a+b", 120),
+			mergeFullChild("c2", "列2", "%", "c+d", 60),
+		},
+	})
+	if v1 != "nv_merge_1" {
+		t.Fatalf("非版本化父 PK 应沿用显式传入值, 实际 %s", v1)
+	}
+	oldC1 := mergePick(t, mergeChildrenOf(t, db, v1), "c1")
+
+	// update 携带子表：该路径既有语义是「删旧子行 + 全量替换」，合并后替换内容
+	// 变为「旧记录 ⊕ 请求字段」，因此未提交字段同样不得归零。
+	pk := mergeUpdate(t, h, map[string]any{
+		"id": v1, "name": "v2",
+		"children": []map[string]any{
+			{"ulid": oldC1.ULID, "expr": "a-b"},              // 局部字段 → 合并
+			{"col_code": "c3", "title": "列3", "expr": "e+f"}, // 新增
+			// c2 从数组消失 → 删除
+		},
+	})
+	if pk != v1 {
+		t.Fatalf("非版本化 update 不应更换父主键: %s → %s", v1, pk)
+	}
+
+	rows := mergeChildrenOf(t, db, pk)
+	if len(rows) != 2 {
+		t.Fatalf("非版本化父合并后应有 2 个子记录（c1 合并 + c3 新增）, 实际 %d：%+v", len(rows), rows)
+	}
+
+	got := mergePick(t, rows, "c1")
+	if got.Expr != "a-b" {
+		t.Fatalf("提交字段应被覆盖: expr=%q", got.Expr)
+	}
+	if got.Title != "列1" || got.Unit != "px" || got.Width != 120 || got.Remark != "旧备注-c1" {
+		t.Fatalf("★ 非版本化父路径同样不得丢未提交字段: title=%q unit=%q width=%d remark=%q",
+			got.Title, got.Unit, got.Width, got.Remark)
+	}
+	// 该路径既有语义：旧子行被删除、子记录重建 → 子主键为新建
+	if got.ULID == oldC1.ULID {
+		t.Fatalf("该路径既有语义为「删旧行 + 新建」，子主键应为新建, 仍是 %s", oldC1.ULID)
+	}
+
+	added := mergePick(t, rows, "c3")
+	if added.Title != "列3" || added.Expr != "e+f" {
+		t.Fatalf("新增子记录内容错误: %+v", added)
+	}
+
+	// 消失的 c2 已被删除（软删）
+	var deletedC2 int64
+	db.Model(&mergeChild{}).
+		Where("parent_id = ? AND col_code = ? AND is_deleted = 1", pk, "c2").
+		Count(&deletedC2)
+	if deletedC2 != 1 {
+		t.Fatalf("c2 从数组消失 → 应被删除（软删）, 实际软删行数 %d", deletedC2)
+	}
+}
+
+// 关闭开关时，非版本化父保持既有「全量替换（请求即完整内容）」语义。
+func TestCascadeMergeChildrenNonVersionedDisabledKeepsReplacementSemantics(t *testing.T) {
+	db := openMergeDB(t)
+	h := newMergeNonVersionedParentHandler(db, false)
+
+	v1 := mergeCreate(t, h, map[string]any{
+		"parent_ulid": "nv_merge_2", "code": "M7", "name": "v1",
+		"children": []map[string]any{mergeFullChild("c1", "列1", "px", "a+b", 120)},
+	})
+	oldC1 := mergePick(t, mergeChildrenOf(t, db, v1), "c1")
+
+	pk := mergeUpdate(t, h, map[string]any{
+		"id": v1, "name": "v2",
+		"children": []map[string]any{
+			{"ulid": oldC1.ULID, "expr": "a-b"},
+		},
+	})
+
+	rows := mergeChildrenOf(t, db, pk)
+	if len(rows) != 1 {
+		t.Fatalf("应有 1 个子记录, 实际 %d", len(rows))
+	}
+	got := rows[0]
+	if got.Expr != "a-b" {
+		t.Fatalf("提交字段应照常写入: expr=%q", got.Expr)
+	}
+	if got.Title != "" || got.Unit != "" || got.Width != 0 || got.ColCode != "" {
+		t.Fatalf("未开启开关时非版本化路径应保持既有全量替换语义（未提交字段为零值）: %+v", got)
+	}
+}
+
+// -------- ⑨ 兼容别名：旧字段名 MergeChildrenOnVersionedRebuild 仍然生效 --------
+
+func TestCascadeMergeChildrenDeprecatedAliasStillWorks(t *testing.T) {
+	db := openMergeDB(t)
+	svc := service.NewGenericService[*bug059VersionedParent](
+		repository.NewCRUDWithDB[*bug059VersionedParent](db),
+		service.Config[*bug059VersionedParent]{})
+	reg := NewHandlerRegistry()
+	reg.Register("merge_child", newMergeChildHandler(db))
+	h := &GenericHandler[*bug059VersionedParent]{
+		svc:     svc,
+		svcName: "merge_alias_parent",
+		config: HandlerConfig[*bug059VersionedParent]{
+			PathPrefix: "/merge/alias",
+			Cascades: []CascadeRelation{{
+				HandlerName: "merge_child", ChildrenField: "children", FKField: "parent_id",
+				OnCreate: true, OnUpdate: true,
+				// Deprecated 别名（早期采用者写法）：语义等同 MergeChildrenOnUpdate
+				MergeChildrenOnVersionedRebuild: true,
+				PublishCodeField:                "col_code",
+			}},
+		},
+		handlerReg: reg,
+		txCoord:    NewTxCoordinator(db, nil),
+	}
+
+	v1 := mergeCreate(t, h, map[string]any{
+		"parent_ulid": "alias_p1", "code": "M8", "name": "v1",
+		"children": []map[string]any{mergeFullChild("c1", "列1", "px", "a+b", 120)},
+	})
+	oldC1 := mergePick(t, mergeChildrenOf(t, db, v1), "c1")
+
+	pk := mergeUpdate(t, h, map[string]any{
+		"id": v1, "name": "v2",
+		"children": []map[string]any{
+			{"ulid": oldC1.ULID, "expr": "a-b"},
+		},
+	})
+
+	got := mergePick(t, mergeChildrenOf(t, db, pk), "c1")
+	if got.Title != "列1" || got.Unit != "px" || got.Expr != "a-b" {
+		t.Fatalf("旧字段名（兼容别名）应同样生效: %+v", got)
 	}
 }

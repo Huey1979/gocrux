@@ -209,6 +209,31 @@ func (h *GenericHandler[M]) prepareUpdateSubtree(
 			childData := extractChildData(raw, rel.ChildrenField, rel.ChildrenWrapKey)
 			_, hasChildren := raw[rel.ChildrenField]
 
+			// ① 携带子表 + 开启合并（MergeChildrenOnUpdate）：先按身份与旧子记录逐字段
+			//    合并，再走下面的各自既有语义。
+			//
+			//    这是**两条父路径共用**的一步（「携带子表局部更新」是同一个语义，不因父
+			//    是否版本化而分裂）：版本化父合并后重建新子快照；非版本化父合并后仍走
+			//    该路径既有的「删旧子行 → 全量替换」，只是替换的内容变成了合并结果，
+			//    因此未提交字段同样不会归零。
+			//
+			//    顺序关键：非版本化路径随后会删旧子行，必须在删除**之前**读回旧记录 ——
+			//    这也是本步骤放在分支链之前的原因。
+			//
+			//    读到的是该父记录下**当前有效**的子行（软删行不参与合并）。
+			if hasChildren && rec.oldPK != nil && mergeChildrenOnUpdate(rel) {
+				oldChildren, txErr := childHandler.DoList(ctx, rel.FKField, rec.oldPK, false)
+				if txErr != nil {
+					return res, errs.ErrCascadeUpdateBackfill(rel.HandlerName, txErr)
+				}
+				childData, txErr = mergeChildrenByOldIdentity(
+					childData, oldChildren, pkField, rel.PublishCodeField, rel.HandlerName)
+				if txErr != nil {
+					return res, txErr
+				}
+			}
+
+			// ② 取子数据 / 清理旧子记录
 			if !hasChildren {
 				if rec.oldPK == nil {
 					continue // 新建记录无子数据 → 跳过后代
@@ -229,23 +254,6 @@ func (h *GenericHandler[M]) prepareUpdateSubtree(
 							childData[j]["id"] = pkVal
 						}
 					}
-				}
-			} else if rel.MergeChildrenOnVersionedRebuild && passParentVersioned && rec.oldPK != nil {
-				// 版本化父 + 携带子表 + 已开启字段合并：请求只提交了子记录的**部分
-				// 字段**（「提交哪些字段就改哪些字段」的契约）。直接按请求重建会让
-				// 未提交字段退化为零值 —— 先按身份与旧子记录逐字段合并，再走下面的
-				// 清 PK → CREATE 重建（旧版本子行不动）。
-				//
-				// 注意：这里读的是**旧父版本下的当前有效子行**（rec.oldPK = 本次更新
-				// 前该父记录的主键）；软删行不参与合并。
-				oldChildren, txErr := childHandler.DoList(ctx, rel.FKField, rec.oldPK, false)
-				if txErr != nil {
-					return res, errs.ErrCascadeUpdateBackfill(rel.HandlerName, txErr)
-				}
-				childData, txErr = mergeChildrenByOldIdentity(
-					childData, oldChildren, pkField, rel.PublishCodeField, rel.HandlerName)
-				if txErr != nil {
-					return res, txErr
 				}
 			} else if !passParentVersioned && rec.oldPK != nil {
 				// 父非版本化且携带请求子数据 → 先清理旧子记录（全量替换）

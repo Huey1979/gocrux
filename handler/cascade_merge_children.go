@@ -7,19 +7,20 @@ import (
 )
 
 // ============================================================
-// 版本化重建时的子记录字段合并（CascadeRelation.MergeChildrenOnVersionedRebuild）
+// 携带子表局部更新时的子记录字段合并（CascadeRelation.MergeChildrenOnUpdate）
 //
 // 背景（下游 BUG：cascade_partial_child）：
 //
-// 版本化父表 update 携带子表时，框架把请求子数据**整体**当作新版本的子快照
-// （清 PK → CREATE 重建）。若调用方按「提交哪些字段就改哪些字段」的契约只提交
-// 了部分字段，未提交字段在新快照里会退化为零值/默认值 —— 旧值静默丢失：
+// 父表 update 携带子表时，框架把请求子数据**整体**当作子记录的完整内容：
+// 版本化父清 PK 重建新快照、非版本化父删旧行后全量替换。若调用方按「提交哪些
+// 字段就改哪些字段」的契约只提交了部分字段，未提交字段就会退化为零值/默认值
+// —— 旧值静默丢失：
 //
 //	旧子记录: {col_code:"c1", title:"列1", unit:"px", width:120, expr:"a+b"}
 //	请求携带: {ulid:"<旧ULID>", expr:"a-b"}
 //	重建结果: {col_code:"c1", title:"", unit:"", width:0, expr:"a-b"}   ← title/unit/width 丢失
 //
-// 合并语义（置位后）：
+// 合并语义（置位后，**两条父路径共用**）：
 //
 //	① 按身份把请求子记录与旧子记录配对（旧主键 → 业务 code 兜底）；
 //	② 配对成功 → 以旧记录为基底，用请求字段逐键覆盖；
@@ -29,9 +30,18 @@ import (
 // 「字段未传」与「字段显式置空」由 JSON 的 key 存在性区分：
 // key 不存在 → 保留旧值；key 存在（含 null / ""）→ 覆盖，即显式清空。
 //
-// 只做「匹配 + 合并」，不碰主键与落库：新快照的 PK 仍由调用方清 PK 后重建
-// （v3 通道填预分配值，否则由 service 生成），旧子行不做任何修改。
+// 只做「匹配 + 合并」，不碰主键与落库：合并结果交回调用方，由它按各自路径的
+// 既有语义处理（版本化父清 PK 重建新快照；非版本化父删旧行后替换）。
 // ============================================================
+
+// mergeChildrenOnUpdate 判断该关系是否开启「携带子表局部字段合并」。
+//
+// 两个字段是同一开关的新旧名（详见 CascadeRelation.MergeChildrenOnUpdate 的说明）：
+// 任一为 true 即生效 —— 旧名 MergeChildrenOnVersionedRebuild 保留为兼容别名，
+// 其语义已从「版本化重建」扩展到「非版本化父 + 携带子表」两条路径。
+func mergeChildrenOnUpdate(rel CascadeRelation) bool {
+	return rel.MergeChildrenOnUpdate || rel.MergeChildrenOnVersionedRebuild
+}
 
 // mergeChildrenByOldIdentity 把请求携带的子记录与旧子记录按身份合并。
 //
