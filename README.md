@@ -28,6 +28,7 @@ go get github.com/Huey1979/gocrux
 - [级联机制](#级联机制)
   - [级联创建跨实体引用](#级联创建跨实体引用)
   - [版本重建时的子记录引用重映射](#版本重建时的子记录引用重映射cascaderelationremaps)
+  - [版本重建时的子记录局部字段合并](#版本重建时的子记录局部字段合并mergechildrenonversionedrebuild)
   - [跨级联批次的引用重映射](#跨级联批次的引用重映射remapkey--sourceremapkey)
   - [引用装配（v3：Target + Assemblies）](#引用装配v3target--assemblies)
   - [外部引用解析（引用已存在的实体）](#外部引用解析引用已存在的实体)
@@ -1393,7 +1394,7 @@ Update 时级联行为与子数据存在性相关：
 | 场景 | 行为 |
 |------|------|
 | 有子数据 + 非版本化 + 已有旧子记录 | 先删旧子记录 → 全量替换为新子数据 |
-| 有子数据 + 版本化 | 创建新版本子记录（保留旧版本关联） |
+| 有子数据 + 版本化 | 创建新版本子记录（保留旧版本关联）；配 `MergeChildrenOnVersionedRebuild` 时先与旧子记录逐字段合并，未提交字段不丢（见下节） |
 | 无子数据 + 非版本化 + 已有旧子记录 | 回填旧子数据 → 更新 FK 指向新父实体（子行原地更新，PK 不变） |
 | 无子数据 + 版本化 + 已有旧子记录 | 回填旧子数据 → **清除子行 PK 走 CREATE 复制重建**为新版本快照（新子行 PK/ULID，旧版本子表保持不变，BUG-059） |
 | 无子数据 + 无旧子记录 | 跳过 |
@@ -1463,6 +1464,50 @@ childH.InstallRemapHook()
 > **业务自定义映射**：引用判定规则无法声明式表达时，让子实体实现
 > `handler.ReferenceRemapper`（`RemapReferences(ctx, childData) (map[string]string, error)`），
 > 返回值会并入 `oldToNew`（同键以业务侧为准）。
+
+### 版本重建时的子记录局部字段合并（`MergeChildrenOnVersionedRebuild`）
+
+版本化父表 update 携带子表时，框架默认把**请求子数据当作新版本的完整子内容**
+（清 PK → CREATE 重建）。若调用方按「提交哪些字段就改哪些字段」的契约只提交了
+部分字段，未提交字段会在新快照里退化为零值/默认值：
+
+```text
+旧子记录: {col_code:"c1", title:"列1", unit:"px", width:120, expr:"a+b"}
+请求携带: {"ulid":"<旧ULID>", "expr":"a-b"}
+默认结果: {col_code:"c1", title:"", unit:"", width:0, expr:"a-b"}   ← title/unit/width 丢失
+```
+
+置位后改为「旧记录为基底 + 请求字段覆盖」再重建：
+
+```go
+CascadeRelation{
+    HandlerName:   "form_list_column",
+    ChildrenField: "list_columns",
+    FKField:       "form_ulid",
+    OnCreate:      true,
+    OnUpdate:      true,
+    MergeChildrenOnVersionedRebuild: true,  // ← 局部字段更新不丢字段
+    PublishCodeField: "col_code",           // ← 业务 code 兜底身份键（可选）
+}
+```
+
+| 情形 | 行为 |
+|:--|:--|
+| 字段未传 | 保留旧值（以旧记录为基底） |
+| 字段显式置空（`""` / `null`） | 覆盖为空（key 存在即覆盖） |
+| 数组里的子记录无对应旧记录 | 视为**新增**，按请求字段创建 |
+| 旧子记录不在数组里 | 不进入新版本（即删除；**数组即子记录集合**） |
+
+身份匹配（「这条请求记录对应哪条旧记录」）优先用请求携带的**旧主键**
+（`ulid` / 实体 PK 字段），未命中时回退 `PublishCodeField` 声明的**业务 code**；
+两者都命中不了 → 视为新增。业务 code 在旧记录里不唯一时返回
+`errs.ErrAssemblyIdentityAmbiguous`，绝不按位置猜测。
+
+新快照的主键仍然是新的（清 PK 重建；v3 通道填预分配值），旧版本子行**不做任何修改**。
+
+生效范围：仅「版本化父 + `OnUpdate` + 携带子表」这条重建路径。未携带子表仍走 DB
+回填（本就带全字段）；非版本化父 + 携带子表仍是既有的「全量替换」语义。默认 `false`，
+即保持既有「请求即完整快照」契约不变。
 
 ### 跨级联批次的引用重映射（`RemapKey` / `SourceRemapKey`）
 

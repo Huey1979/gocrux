@@ -230,6 +230,23 @@ func (h *GenericHandler[M]) prepareUpdateSubtree(
 						}
 					}
 				}
+			} else if rel.MergeChildrenOnVersionedRebuild && passParentVersioned && rec.oldPK != nil {
+				// 版本化父 + 携带子表 + 已开启字段合并：请求只提交了子记录的**部分
+				// 字段**（「提交哪些字段就改哪些字段」的契约）。直接按请求重建会让
+				// 未提交字段退化为零值 —— 先按身份与旧子记录逐字段合并，再走下面的
+				// 清 PK → CREATE 重建（旧版本子行不动）。
+				//
+				// 注意：这里读的是**旧父版本下的当前有效子行**（rec.oldPK = 本次更新
+				// 前该父记录的主键）；软删行不参与合并。
+				oldChildren, txErr := childHandler.DoList(ctx, rel.FKField, rec.oldPK, false)
+				if txErr != nil {
+					return res, errs.ErrCascadeUpdateBackfill(rel.HandlerName, txErr)
+				}
+				childData, txErr = mergeChildrenByOldIdentity(
+					childData, oldChildren, pkField, rel.PublishCodeField, rel.HandlerName)
+				if txErr != nil {
+					return res, txErr
+				}
 			} else if !passParentVersioned && rec.oldPK != nil {
 				// 父非版本化且携带请求子数据 → 先清理旧子记录（全量替换）
 				if txErr := childHandler.DoDeleteByFK(ctx, rel.FKField, []any{rec.oldPK}); txErr != nil {
