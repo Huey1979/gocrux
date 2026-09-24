@@ -2543,6 +2543,7 @@ err := repo.RawList(ctx, &docs, bson.M{"status": "active"})
 | `password` | string | 密码 |
 | `min_pool_size` | int | 最小连接池 |
 | `max_pool_size` | int | 最大连接池 |
+| `replica_set` | string | 副本集名称（可选）。非空时连接串附加 `replicaSet=<名称>`：驱动据此按种子节点发现其余成员（`hosts` 只配一个成员也能连通整个副本集），并在选主/故障转移后重定向。单机部署留空，行为与之前一致 |
 
 ### `redis` — Redis 配置
 

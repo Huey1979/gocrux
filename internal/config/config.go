@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 
 	errs "github.com/Huey1979/gocrux/errors"
@@ -55,15 +56,25 @@ type MongoDBConfig struct {
 	Password    string   `yaml:"password"`
 	MinPoolSize int      `yaml:"min_pool_size"`
 	MaxPoolSize int      `yaml:"max_pool_size"`
+	// ReplicaSet 副本集名称（可选，yaml 写作 replica_set）。
+	//
+	// 非空时以 replicaSet 参数附加到连接串：驱动据此认定目标为副本集、按种子节点
+	// 发现其余成员（因此 hosts 只配一个成员也能连通整个副本集），并在选主/故障
+	// 转移后重定向。单机（standalone）部署留空 —— 留空时不附加该参数，行为与
+	// 之前完全一致。
+	ReplicaSet string `yaml:"replica_set"`
 }
 
 func (m MongoDBConfig) URI() string {
-	if m.Username != "" && m.Password != "" {
-		return fmt.Sprintf("mongodb://%s:%s@%s/%s?minPoolSize=%d&maxPoolSize=%d",
-			m.Username, m.Password, m.Hosts[0], m.Database, m.MinPoolSize, m.MaxPoolSize)
+	query := fmt.Sprintf("minPoolSize=%d&maxPoolSize=%d", m.MinPoolSize, m.MaxPoolSize)
+	if m.ReplicaSet != "" {
+		query += "&replicaSet=" + url.QueryEscape(m.ReplicaSet)
 	}
-	return fmt.Sprintf("mongodb://%s/%s?minPoolSize=%d&maxPoolSize=%d",
-		m.Hosts[0], m.Database, m.MinPoolSize, m.MaxPoolSize)
+	if m.Username != "" && m.Password != "" {
+		return fmt.Sprintf("mongodb://%s:%s@%s/%s?%s",
+			m.Username, m.Password, m.Hosts[0], m.Database, query)
+	}
+	return fmt.Sprintf("mongodb://%s/%s?%s", m.Hosts[0], m.Database, query)
 }
 
 type RedisConfig struct {
